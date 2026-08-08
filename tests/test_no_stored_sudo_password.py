@@ -167,3 +167,70 @@ def test_check_sudo_stdin_guard_blocks_regardless_of_sudo_password(
         "this guard must be unconditional."
     )
     assert description
+
+
+# --- Combined/separate short-flag coverage (2026-08-08) --------------------
+#
+# sudo follows standard getopt short-flag combining: -S (read password from
+# stdin) is a boolean flag with no argument, so it can be bundled with other
+# boolean short flags in either order and either combined into one token or
+# given as separate arguments. A regex anchored to a literal, standalone
+# "-S" as the very first argument misses all of these — verified against
+# the actual sudo binary during the 2026-08-08 upstream-sync merge:
+# "sudo -Sk -l" and "sudo -S -k -l" both prompt for a stdin password
+# identically. This is a live bypass of the guard's unconditional-block
+# guarantee, not a hypothetical — these parametrized cases pin the fix so
+# a future regex change can't reopen it silently.
+_SUDO_STDIN_SHOULD_BLOCK = [
+    ("sudo -S apt-get update", "bare -S, start of string"),
+    ("true; sudo -S whoami", "bare -S after ;"),
+    ("true && sudo -S whoami", "bare -S after &&"),
+    ("true || sudo -S whoami", "bare -S after ||"),
+    ("echo $(sudo -S whoami)", "bare -S after $("),
+    ("sudo -Sk whoami", "combined -S -k, S first"),
+    ("sudo -nS whoami", "combined -n -S, S last"),
+    ("sudo -kS whoami", "combined -k -S, S last"),
+    ("sudo -SkE whoami", "combined -S -k -E, S first"),
+    ("sudo -S -k whoami", "separate flags, S first"),
+    ("sudo -k -S whoami", "separate flags, S second (not first)"),
+    ("sudo -n -S whoami", "separate flags, S second (not first)"),
+    ("sudo -n -k -S whoami", "three separate flag groups, S last"),
+]
+
+_SUDO_STDIN_SHOULD_NOT_BLOCK = [
+    ("grep -n 'sudo -S' README.md", "mention inside a quoted grep pattern"),
+    ("echo 'you should never run sudo -S in scripts'", "mention inside echoed prose"),
+    ("printf '%s\\n' 'sudo -S is dangerous'", "mention inside printf string"),
+    ("rg --line-number 'sudo -S' .", "mention inside rg pattern"),
+    ("sudo -k whoami", "single flag, no S at all"),
+    ("sudo -n whoami", "single flag, no S at all"),
+    ("sudo -k -n whoami", "two flags, neither contains S"),
+    ("sudo whoami", "plain sudo, no flags"),
+]
+
+
+@pytest.mark.parametrize("command,label", _SUDO_STDIN_SHOULD_BLOCK)
+def test_check_sudo_stdin_guard_catches_combined_and_reordered_s_flags(command, label):
+    """Every real stdin-password invocation blocks — combined short flags
+    (-Sk, -kS, -SkE, ...) and S given as a later, separate flag (-k -S),
+    not just a bare leading -S."""
+    is_blocked, description = _check_sudo_stdin_guard(command)
+    assert is_blocked is True, (
+        f"_check_sudo_stdin_guard failed to block a real stdin-password "
+        f"invocation ({label}): {command!r}. This is a live bypass of the "
+        "unconditional-block guarantee — see this section's module comment."
+    )
+    assert description
+
+
+@pytest.mark.parametrize("command,label", _SUDO_STDIN_SHOULD_NOT_BLOCK)
+def test_check_sudo_stdin_guard_does_not_false_positive_on_flags_or_mentions(command, label):
+    """Widening the guard to catch combined/reordered -S flags must not
+    start blocking flags that don't contain S, or text that merely
+    mentions "sudo -S" without it being a real command start."""
+    is_blocked, _description = _check_sudo_stdin_guard(command)
+    assert is_blocked is False, (
+        f"_check_sudo_stdin_guard incorrectly blocked a safe command "
+        f"({label}): {command!r}. The widened combined-flag pattern must "
+        "not introduce new false positives."
+    )
