@@ -58,6 +58,64 @@ def _set_checkpoint(database: Path, job_id: str, value: str, now: datetime) -> N
         )
 
 
+SELF_HEAL_KEY = "self_heal_triggered_date"
+
+
+def _self_heal_already_triggered_today(database: Path, job_id: str, today: str) -> bool:
+    with sqlite3.connect(database, timeout=5) as connection:
+        connection.execute("PRAGMA busy_timeout=5000")
+        connection.execute(
+            """CREATE TABLE IF NOT EXISTS cron_notepad (
+                 job_id TEXT NOT NULL,
+                 key TEXT NOT NULL,
+                 value TEXT NOT NULL,
+                 updated_at TEXT NOT NULL,
+                 PRIMARY KEY (job_id, key)
+               )"""
+        )
+        row = connection.execute(
+            "SELECT value FROM cron_notepad WHERE job_id = ? AND key = ?",
+            (job_id, SELF_HEAL_KEY),
+        ).fetchone()
+        return row is not None and row[0] == today
+
+
+def _record_self_heal_triggered(database: Path, job_id: str, today: str, now: datetime) -> None:
+    with sqlite3.connect(database, timeout=5) as connection:
+        connection.execute("PRAGMA busy_timeout=5000")
+        connection.execute(
+            """INSERT INTO cron_notepad (job_id, key, value, updated_at)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(job_id, key)
+               DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at""",
+            (job_id, SELF_HEAL_KEY, today, now.isoformat()),
+        )
+
+
+def attempt_self_heal(hermes_home: Path, now: datetime) -> str:
+    """Re-trigger the daily-brief job once per calendar day on a validation
+    failure, instead of alert-only. Bounded to one attempt/day via the same
+    notepad.db used for the checkpoint, so a persistent problem escalates
+    as a repeated daily alert rather than looping. Never raises - a self-heal
+    failure must not mask the validation alert that triggered it."""
+    today = now.date().isoformat()
+    database = hermes_home / "cron/notepad.db"
+    try:
+        job = _find_job(hermes_home)
+        job_id = job["id"]
+        if _self_heal_already_triggered_today(database, job_id, today):
+            return "(self-heal already attempted today; not retrying again)"
+        from cron.jobs import trigger_job
+
+        result = trigger_job(job_id)
+        if not result:
+            return "(self-heal: trigger_job() found no matching job, not retried)"
+        _record_self_heal_triggered(database, job_id, today, now)
+        return "(self-heal: re-triggered hermes-daily-brief for an immediate retry)"
+    except Exception as exc:
+        return f"(self-heal failed: {type(exc).__name__}: {exc})"
+
+
 def validate(
     *, hermes_home: Path, vault_root: Path, now: datetime, update_checkpoint: bool = True
 ) -> list[str]:
@@ -123,6 +181,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--vault-root", type=Path, default=Path.home() / "Obsidian Core")
     parser.add_argument("--now", help="ISO timestamp override for deterministic tests")
     parser.add_argument("--no-checkpoint-update", action="store_true")
+    parser.add_argument(
+        "--no-self-heal", action="store_true", help="test-only: skip the self-heal retrigger"
+    )
     return parser.parse_args()
 
 
@@ -142,6 +203,8 @@ def main() -> int:
         print("🩺 Operations Alert — Daily brief validation failed")
         for problem in problems:
             print(f"- {problem}")
+        if not args.no_self_heal:
+            print(attempt_self_heal(args.hermes_home, now))
     return 0
 
 
