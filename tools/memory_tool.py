@@ -235,8 +235,9 @@ class MemoryStore:
         the system prompt.
 
         The live ``memory_entries`` / ``user_entries`` lists keep the
-        original text so the user can still SEE poisoned entries via
-        see poisoned entries by inspecting the source files directly, and remove them — silently dropping them would hide the attack from the user.
+        original text so the user can still SEE poisoned entries by
+        inspecting the source files directly, and remove them — silently
+        dropping them would hide the attack from the user.
 
         Scanning is deterministic from disk bytes, so the snapshot remains
         stable for the entire session (prefix-cache invariant holds).
