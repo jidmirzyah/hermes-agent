@@ -63,6 +63,11 @@ def test_venv_launcher_bypasses_uv_console_script_that_requires_realpath(tmp_pat
             'get_command_link_display_dir() { printf "%s" "$COMMAND_LINK_DIR"; }',
             "log_info() { :; }",
             "log_success() { :; }",
+            # setup_path also calls log_warn, on the branch taken when $HOME
+            # has no shell config files. Without this stub the harness dies
+            # with exit 127 there, so the test only passed on machines whose
+            # home directory happened to be populated.
+            "log_warn() { :; }",
             _setup_path_function(),
             "setup_path",
         ]
