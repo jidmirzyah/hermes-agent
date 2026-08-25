@@ -149,11 +149,42 @@ for _test_var in HERMES_TEST_IMAGE HERMES_TEST_WORKERS HERMES_TEST_PATHS \
   fi
 done
 
+# ── Isolated HOME for the test run ─────────────────────────────────────────
+# `env -i` below forwards HOME, and that has been the last hole in this
+# script's isolation. Tests that reach a real install write into the
+# developer's actual home: scripts/install.sh links node/npm/npx into
+# "$(get_command_link_dir)", which is "$HOME/.local/bin", and npm caches into
+# "$HOME/.npm". Both have been overwritten by test runs in practice.
+#
+# Point HOME at a stable directory instead. It is deliberately PERSISTENT, not
+# a per-run tempdir: a fresh home every run would re-download ~50MB of Node
+# each time. It must also not live under /var/tmp, which this host clears on a
+# 30-day timer.
+#
+# Set HERMES_TEST_HOME to override. Setting it to your real $HOME is the
+# deliberate opt-out.
+#
+# NOTE: the Windows location variables above (USERPROFILE/HOMEDRIVE/HOMEPATH)
+# are intentionally left pointing at the real profile. Native Windows was not
+# testable where this change was made, and this script's own comment records
+# that dropping those breaks collection there. POSIX runs are isolated by the
+# HOME below; isolating native Windows is deliberately left as follow-up
+# rather than guessed at.
+HERMES_TEST_HOME="${HERMES_TEST_HOME:-$HOME/.cache/hermes-test-home}"
+mkdir -p "$HERMES_TEST_HOME"
+# Seed a git identity once. An absent ~/.gitconfig is a behaviour change, not
+# a no-op, for the tests that shell out to git.
+if [ ! -f "$HERMES_TEST_HOME/.gitconfig" ]; then
+  printf '[user]\n\tname = hermes tests\n\temail = tests@hermes.invalid\n' \
+    > "$HERMES_TEST_HOME/.gitconfig"
+fi
+
 # ── Run in hermetic env ──────────────────────────────────────────────────────
 # env -i: start with empty environment, opt-in only what we need.
 # No credential var can leak — you'd have to explicitly add it here.
 echo "▶ running per-file parallel test suite via run_tests_parallel.py"
 echo "  (TZ=UTC LANG=C.UTF-8 PYTHONHASHSEED=0; clean env)"
+echo "  HOME=$HERMES_TEST_HOME (isolated; set HERMES_TEST_HOME to override)"
 
 cd "$REPO_ROOT"
 
@@ -168,7 +199,7 @@ echo "▶ pre-compiling bytecode cache"
 echo "▶ launching test runner"
 exec env -i \
   PATH="$PATH" \
-  HOME="$HOME" \
+  HOME="$HERMES_TEST_HOME" \
   ${WIN_ENV[@]+"${WIN_ENV[@]}"} \
   ${TEST_ENV[@]+"${TEST_ENV[@]}"} \
   TZ=UTC \
