@@ -179,6 +179,18 @@ if [ ! -f "$HERMES_TEST_HOME/.gitconfig" ]; then
     > "$HERMES_TEST_HOME/.gitconfig"
 fi
 
+# TMPDIR is forwarded when the caller sets it. run_tests_parallel.py reads it
+# to place its per-file basetemp root ("Placed under the parent's TMPDIR (or
+# the OS default) so it still lands on whatever disk-backed location the caller
+# configured"), so stripping it silently defeated that design and sent every
+# test temp tree to a RAM-backed /tmp. Measured peak there: 709MB of a 2.7GB
+# tmpfs for one subdirectory of the suite.
+#
+# Keep any value SHORT. Some tests build AF_UNIX sockets under tmp_path, and
+# sun_path is capped at 104/108 bytes; a deep TMPDIR reproduced "AF_UNIX path
+# too long" when it was tried as a per-file override. A shallow disk root is
+# fine -- verified against tests/tools/test_approved_command_clean_slate.py,
+# the file that failure was found in.
 # ── Run in hermetic env ──────────────────────────────────────────────────────
 # env -i: start with empty environment, opt-in only what we need.
 # No credential var can leak — you'd have to explicitly add it here.
@@ -200,6 +212,7 @@ echo "▶ launching test runner"
 exec env -i \
   PATH="$PATH" \
   HOME="$HERMES_TEST_HOME" \
+  ${TMPDIR:+TMPDIR="$TMPDIR"} \
   ${WIN_ENV[@]+"${WIN_ENV[@]}"} \
   ${TEST_ENV[@]+"${TEST_ENV[@]}"} \
   TZ=UTC \
