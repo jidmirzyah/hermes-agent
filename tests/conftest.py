@@ -32,6 +32,60 @@ import pytest
 
 # Ensure project root is importable
 PROJECT_ROOT = Path(__file__).parent.parent
+
+#: Set to "1" to run the suite from the live checkout anyway. Deliberately
+#: verbose so it cannot be set by accident or by muscle memory.
+LIVE_CHECKOUT_OVERRIDE_ENV = "HERMES_ALLOW_TESTS_IN_LIVE_CHECKOUT"
+
+#: Override the path treated as the live checkout, for non-standard installs.
+LIVE_CHECKOUT_PATH_ENV = "HERMES_LIVE_CHECKOUT"
+
+
+def _live_checkout_refusal(project_root, home, env):
+    """Return a refusal message if the suite would run from the live checkout.
+
+    The live checkout is the working tree ``hermes-gateway.service`` runs
+    from. A suite run there can mutate it -- ``hermes update``'s autostash
+    reached it this way on 2026-08-12 -- and it is also where uncommitted
+    work lives. ``_live_system_guard`` blocks individual dangerous git calls,
+    but it is function-scoped, so collection time and session-scoped fixtures
+    are outside it. Refusing before collection closes both windows at once.
+
+    Pure by design: every input is passed in, so the refusal can be
+    unit-tested without a test actually running from the live checkout.
+
+    Returns ``None`` when the run is allowed, else the message to abort with.
+    """
+    if env.get(LIVE_CHECKOUT_OVERRIDE_ENV) == "1":
+        return None
+    live = Path(
+        env.get(LIVE_CHECKOUT_PATH_ENV) or Path(home) / ".hermes" / "hermes-agent"
+    )
+    try:
+        # Resolve both sides: a symlink pointing at the live checkout IS the
+        # live checkout, and comparing unresolved paths misses that.
+        if Path(project_root).resolve() != live.resolve():
+            return None
+    except OSError:
+        # Unresolvable path: fail OPEN. A guard that crashes collection on an
+        # odd filesystem blocks all testing everywhere, which is worse than
+        # the bug it defends against.
+        return None
+    return (
+        f"Refusing to run the test suite from the live checkout ({live}).\n"
+        f"\n"
+        f"That is the working tree hermes-gateway.service runs from, and where\n"
+        f"uncommitted work lives -- a suite run can mutate it.\n"
+        f"\n"
+        f"Clone it first:\n"
+        f"    git clone <fork-url> ~/reconcile-work/<name>\n"
+        f"and run the suite there.\n"
+        f"\n"
+        f"Set {LIVE_CHECKOUT_OVERRIDE_ENV}=1 only if you genuinely intend to\n"
+        f"run against the live checkout."
+    )
+
+
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -1342,6 +1396,10 @@ _OS_MARKS = {
 
 def pytest_configure(config):  # noqa: D401 — pytest hook
     """Register markers used by hermetic conftest."""
+    refusal = _live_checkout_refusal(PROJECT_ROOT, Path.home(), os.environ)
+    if refusal:
+        raise pytest.UsageError(refusal)
+
     config.addinivalue_line(
         "markers",
         f"{_LIVE_SYSTEM_GUARD_BYPASS_MARK}: bypass the live-system guard "
