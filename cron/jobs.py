@@ -1095,6 +1095,28 @@ def _cron_next_run_matches_expr(
         return True
 
 
+def _is_manual_trigger(job: Dict[str, Any], next_run: Any) -> bool:
+    """Whether ``next_run`` is an operator force-run rather than a stale edit.
+
+    ``trigger_job`` re-runs a job by setting ``next_run_at`` to now. For a cron
+    job that instant is off-schedule by definition, which is exactly what a
+    direct ``schedule.expr`` edit looks like to the stale-schedule guard
+    (#93049) — so without a way to tell the two apart, the guard re-anchors
+    every deliberate force-run instead of firing it. ``trigger_job`` stamps
+    ``manual_trigger_at`` with the same instant it writes to ``next_run_at``;
+    equality between the two is the signal.
+
+    Requiring equality is what makes the marker safe to leave behind: it
+    authorises only the exact instant it names, and a fire advances
+    ``next_run_at`` to an on-schedule value the guard never questions, so a
+    leftover marker cannot license a second off-schedule run.
+    """
+    marker = job.get("manual_trigger_at")
+    if not marker or not next_run:
+        return False
+    return str(marker) == str(next_run)
+
+
 def compute_next_run(schedule: Dict[str, Any], last_run_at: Optional[str] = None) -> Optional[str]:
     """
     Compute the next run time for a schedule.
@@ -2445,6 +2467,10 @@ def trigger_job(job_id: str) -> Optional[Dict[str, Any]]:
             f"Create a new occurrence with 'hermes cron resume {name} "
             "--run-now' or '--at <ISO-8601>'."
         )
+    # Stamped alongside next_run_at so the due-scan stale-schedule guard can
+    # tell this force-run apart from a hand-edited jobs.json — see
+    # _is_manual_trigger.
+    requested = _hermes_now().isoformat()
     return update_job(
         job["id"],
         {
@@ -2452,7 +2478,8 @@ def trigger_job(job_id: str) -> Optional[Dict[str, Any]]:
             "state": "scheduled",
             "paused_at": None,
             "paused_reason": None,
-            "next_run_at": _hermes_now().isoformat(),
+            "next_run_at": requested,
+            "manual_trigger_at": requested,
         },
     )
 
@@ -3630,8 +3657,10 @@ def _get_due_jobs_locked() -> List[Dict[str, Any]]:
                 # so re-anchor before either can fire. Recomputation uses the
                 # current expression, so this converges — it cannot defer
                 # forever.
-                if kind == "cron" and not _cron_next_run_matches_expr(
-                    schedule, next_run_dt
+                if (
+                    kind == "cron"
+                    and not _cron_next_run_matches_expr(schedule, next_run_dt)
+                    and not _is_manual_trigger(job, next_run)
                 ):
                     new_next = compute_next_run(schedule, now.isoformat())
                     logger.info(
