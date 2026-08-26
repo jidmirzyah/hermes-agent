@@ -117,24 +117,48 @@ deps_note="not_needed"
 
 echo "hermes-sync-fork: synced $commit_count commit(s) ($before_head -> $after_head), deps_reinstall=$deps_note, gateway restart scheduled (async) — hermes-sync-fork-restart-check will alert if it doesn't finish healthy"
 
-# Launch the restart (and, if needed, the dependency reinstall) as a
-# fully-detached background step that outlives this process. `setsid`
-# gives it its own session (belt-and-suspenders: the cron scheduler
-# already launches this script with start_new_session=True, but setsid
-# here makes the detachment explicit and self-contained rather than
-# relying on an invocation detail of the caller). stdin/stdout/stderr are
-# all redirected away from this process's own pipes — the scheduler's
-# subprocess.communicate() call blocks until BOTH pipes see EOF, which
-# would otherwise mean waiting on this background step too, defeating the
-# entire point. `disown` drops it from this shell's job table so bash
-# doesn't try to track or wait on it either.
+# Launch the restart (and, if needed, the dependency reinstall) as a step
+# that outlives this process AND survives the restart it is about to issue.
+# Those are two different requirements, and only the first was met before.
 #
-# Empirically verified on this VM (2026-08-20): a `setsid ... &
-# disown`-launched child with fds fully redirected keeps running and
-# completes its work after the parent script exits and the parent's
-# process is gone.
-nohup setsid bash "$RESTART_SCRIPT" "$scheduled_at" "$before_head" "$after_head" "$commit_count" "$deps_changed" \
-  > "$RESTART_LOG" 2>&1 < /dev/null &
-disown
+# `setsid` gives the child its own session, and that much was verified on
+# 2026-08-20: it keeps running after this script exits. But a session is not
+# a cgroup. A setsid'd child stays in the cgroup of whatever launched it —
+# here, hermes-gateway.service — and that unit carries
+# `ExecStopPost=python -m gateway.cgroup_cleanup`, which SIGKILLs every
+# process in the cgroup on stop. So the restart step was killed by the very
+# restart it issued, part-way through `systemctl restart`, and could never
+# reach its "healthy"/"failed" marker write. hermes-sync-fork-restart-check
+# then reported "restart never completed" on every real sync from 2026-08-24
+# onward, while the gateway had in fact restarted perfectly.
+#
+# (The markers for 2026-08-21 and 08-22 do read "healthy", and that is not
+# explained here — most likely those runs were launched from an interactive
+# session, whose cgroup the reaper never touches. The failure mechanism above
+# is established by direct test; the earlier successes are not, so no story
+# is invented for them. The fix is correct either way.)
+#
+# A transient systemd unit lands in its own cgroup under app.slice/, where
+# the reaper cannot see it. Verified on this host: XDG_RUNTIME_DIR and
+# DBUS_SESSION_BUS_ADDRESS both survive the cron secret-scrub, so
+# `systemd-run --user` works from inside a cron script; --collect reaps the
+# unit afterwards; and the call returns immediately rather than blocking,
+# which is what keeps the scheduler's communicate() from waiting on it.
+restart_unit="hermes-sync-fork-restart-$(date -u +%Y%m%d%H%M%S)-$$"
+if ! systemd-run --user --collect --quiet --unit="$restart_unit" \
+    --property=StandardOutput="file:$RESTART_LOG" \
+    --property=StandardError="append:$RESTART_LOG" \
+    bash "$RESTART_SCRIPT" "$scheduled_at" "$before_head" "$after_head" "$commit_count" "$deps_changed"
+then
+  # The fallback reintroduces the false "never completed" alert, because the
+  # child dies in the reap exactly as before. That is the deliberate choice:
+  # a sync that pulled new code and then never restarted the gateway is a
+  # worse outcome than a noisy alert, and the alert is what brings someone
+  # to look.
+  echo "hermes-sync-fork: systemd-run --user failed; falling back to a setsid launch. The restart will still happen, but its completion marker will not be written, so expect a 'restart never completed' alert from hermes-sync-fork-restart-check." >> "$RESTART_LOG"
+  nohup setsid bash "$RESTART_SCRIPT" "$scheduled_at" "$before_head" "$after_head" "$commit_count" "$deps_changed" \
+    >> "$RESTART_LOG" 2>&1 < /dev/null &
+  disown
+fi
 
 exit 0
