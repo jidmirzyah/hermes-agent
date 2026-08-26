@@ -339,6 +339,49 @@ def resolve_telegram_chat_id(
 _LAST_DELIVERY_RESOLUTION_ERROR: Dict[str, str] = {}
 
 
+def restore_scrubbed_send_credentials(hermes_home: Path) -> Optional[str]:
+    """Re-read ``.env`` into this process so Telegram sends can authenticate.
+
+    Cron runs this job as a ``no_agent`` script, and script subprocesses take
+    their environment from ``build_subprocess_env()``, which scrubs secrets by
+    default -- ``TELEGRAM_BOT_TOKEN`` among them. That default is right for
+    arbitrary children; this job is not one. It exists to send people a
+    Telegram reminder, so without the token every send fails with *"You must
+    pass the token you received from Botfather"* while the job itself still
+    completes and reports ``ok``.
+
+    That is exactly what happened on 2026-08-26, the first day a reminder ever
+    came due: both sends failed and the only trace was a line inside the job's
+    own summary. Cron's own ``deliver:`` target is unaffected -- the gateway
+    performs that send, not this script -- which is why the failure could hide
+    behind a delivered message.
+
+    ``load_hermes_dotenv`` does not override variables already set, so a run
+    that legitimately inherits a token keeps it, and this is a no-op whenever
+    the token is already present. Never raises: a failure here must degrade to
+    the existing per-send error reporting rather than take the watchdog down.
+
+    Returns a warning string to surface in the run summary, or None.
+    """
+    if os.environ.get("TELEGRAM_BOT_TOKEN"):
+        return None
+    try:
+        from hermes_cli.env_loader import load_hermes_dotenv
+
+        load_hermes_dotenv(hermes_home=hermes_home)
+    except Exception as exc:
+        return (
+            "delivery credentials: could not reload .env "
+            f"({type(exc).__name__}: {exc}) -- Telegram sends will fail"
+        )
+    if not os.environ.get("TELEGRAM_BOT_TOKEN"):
+        return (
+            "delivery credentials: TELEGRAM_BOT_TOKEN is still unset after "
+            f"reloading {hermes_home / '.env'} -- Telegram sends will fail"
+        )
+    return None
+
+
 def send_telegram_message(chat_id: str, message: str) -> "tuple[bool, str]":
     """Direct send, reusing the EXISTING shared send tool — the same one
     ``hermes send`` (hermes_cli/send_cmd.py) and the agent's own
@@ -712,6 +755,11 @@ def main() -> int:
 
     state = load_state(hermes_home)
     all_logs: List[str] = []
+
+    # Before anything sends -- the canary check below sends too.
+    credentials_warning = restore_scrubbed_send_credentials(hermes_home)
+    if credentials_warning:
+        all_logs.append(credentials_warning)
 
     try:
         all_logs.extend(
