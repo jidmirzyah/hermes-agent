@@ -266,7 +266,7 @@ def register_self(purpose: str, *, project_root: Optional[Path] = None) -> bool:
         import sys as _sys
 
         entry.argv = " ".join(_sys.argv[:6])
-    except Exception:
+    except Exception:  # noqa: S110 -- reviewed: argv is cosmetic identity detail; recording it must not fail (2026-08-26 CI-green audit)
         pass
 
     path = _ledger_path()

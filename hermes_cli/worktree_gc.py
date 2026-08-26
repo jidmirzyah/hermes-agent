@@ -108,7 +108,7 @@ def _tree_size_mb(path: Path) -> Optional[int]:
         )
         if result.returncode == 0 and result.stdout.strip():
             return int(result.stdout.split()[0])
-    except Exception:
+    except Exception:  # noqa: S110 -- reviewed: size is display-only; an unreadable du correctly means 'unknown size' (2026-08-26 CI-green audit)
         pass
     return None
 
@@ -274,7 +274,7 @@ def reclaim_worktrees(
         # Dead-pid locks must be unlocked or `remove --force` refuses.
         try:
             _git(["worktree", "unlock", record.path], cwd=repo_root, timeout=10)
-        except Exception:
+        except Exception:  # noqa: S110 -- reviewed: unlock is best-effort; the remove below reports the real failure (2026-08-26 CI-green audit)
             pass
 
         try:
@@ -296,7 +296,7 @@ def reclaim_worktrees(
     if not dry_run:
         try:
             _git(["worktree", "prune"], cwd=repo_root, timeout=15)
-        except Exception:
+        except Exception:  # noqa: S110 -- reviewed: best-effort prune after removal (2026-08-26 CI-green audit)
             pass
     return actions
 
@@ -379,7 +379,7 @@ def audit_branches(repo_root: str) -> List[BranchRecord]:
                 max_workers=workers, thread_name_prefix="hermes-branch-gc"
             ) as pool:
                 return list(pool.map(_classify_branch, branches))
-        except Exception:
+        except Exception:  # noqa: S110 -- reviewed: falls back to serial classification below (2026-08-26 CI-green audit)
             pass
     return [_classify_branch(b) for b in branches]
 
@@ -427,6 +427,6 @@ def worktrees_summary(repo_root: str) -> tuple[int, Optional[int]]:
         )
         if result.returncode == 0 and result.stdout.strip():
             size_mb = int(result.stdout.split()[0])
-    except Exception:
+    except Exception:  # noqa: S110 -- reviewed: size is display-only (2026-08-26 CI-green audit)
         pass
     return count, size_mb

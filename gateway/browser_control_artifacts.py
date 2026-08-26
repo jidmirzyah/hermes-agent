@@ -175,7 +175,7 @@ def artifact_scope_key(scope: Any) -> str:
     try:
         principal = str(getattr(scope, "principal_id", "") or "")
         family = str(getattr(scope, "transport_family", "") or "")
-    except Exception:
+    except Exception:  # noqa: S110 -- reviewed: label attributes only; a missing scope attr must not fail artifact recording (2026-08-26 CI-green audit)
         pass
     if not principal:
         # Fail closed: an artifact can only be minted for an authenticated
@@ -340,7 +340,7 @@ class ArtifactStore:
                 self._entries.pop(artifact_id, None)
             try:
                 temp.unlink(missing_ok=True)
-            except Exception:
+            except Exception:  # noqa: S110 -- reviewed: best-effort temp cleanup after a failed replace; the replace error is the real one (2026-08-26 CI-green audit)
                 pass
             raise
         return receipt

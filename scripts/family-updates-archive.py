@@ -183,7 +183,11 @@ def main() -> int:
     today = date.today()
 
     # Idempotency guard for the forced annual reset.
-    last_reset_year = int(STATE_FILE.read_text().strip()) if STATE_FILE.exists() else today.year
+    last_reset_year = (
+        int(STATE_FILE.read_text(encoding="utf-8").strip())
+        if STATE_FILE.exists()
+        else today.year
+    )
 
     main_entries = read_entries(MAIN)
     progress_entries = read_entries(PROGRESS)

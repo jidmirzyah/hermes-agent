@@ -48,7 +48,7 @@ def _publish_health(source: _HealthSource, path: Path, state: str) -> None:
         from gateway.status import write_runtime_status
 
         write_runtime_status(session_store={"status": aggregate})
-    except Exception:
+    except Exception:  # noqa: S110 -- reviewed: runtime health is diagnostic only, per the comment above; persistence must not depend on it (2026-08-26 CI-green audit)
         # Runtime health is diagnostic only; persistence must not depend on it.
         pass
 
@@ -150,7 +150,7 @@ class RecoverableHandleCache:
             if close_rejected is not None:
                 try:
                     close_rejected(handle)
-                except Exception:
+                except Exception:  # noqa: S110 -- reviewed: best-effort close of a rejected handle during teardown (2026-08-26 CI-green audit)
                     pass
             return None
         _publish_health(self._health_source, path, "ok")
@@ -170,7 +170,7 @@ class RecoverableHandleCache:
         for handle in handles:
             try:
                 close(handle)
-            except Exception:
+            except Exception:  # noqa: S110 -- reviewed: best-effort close during teardown; the handles are being discarded anyway (2026-08-26 CI-green audit)
                 pass
         with _health_lock:
             states = _health_states.get(self._health_source)

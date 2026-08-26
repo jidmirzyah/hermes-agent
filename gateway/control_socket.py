@@ -202,7 +202,7 @@ def build_identify_payload() -> dict[str, Any]:
         served = runtime.get("served_profiles")
         if isinstance(served, list) and served:
             payload["served_profiles"] = served
-    except Exception:
+    except Exception:  # noqa: S110 -- reviewed: served_profiles is optional enrichment; the payload is valid without it (2026-08-26 CI-green audit)
         pass
     return payload
 

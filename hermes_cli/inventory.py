@@ -703,7 +703,7 @@ def _anthropic_oauth_credentials_present() -> bool:
                 and str(entry.get("access_token") or "").strip()
             ):
                 return True
-    except Exception:
+    except Exception:  # noqa: S110 -- reviewed: fail-closed probe; an unreadable entry correctly means 'no usable OAuth token' (2026-08-26 CI-green audit)
         pass
     return False
 
