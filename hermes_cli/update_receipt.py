@@ -75,7 +75,7 @@ class UpdateReceipt:
             from hermes_cli.build_info import get_code_identity
 
             self.data["pre_update"] = get_code_identity()
-        except Exception:
+        except Exception:  # noqa: S110 -- reviewed: receipt metadata is diagnostic; the update must not fail on it (2026-08-26 CI-green audit)
             pass
 
     # -- recording ---------------------------------------------------------
@@ -119,7 +119,7 @@ class UpdateReceipt:
             from hermes_cli.build_info import get_code_identity
 
             self.data["post_update"] = get_code_identity(refresh=True)
-        except Exception:
+        except Exception:  # noqa: S110 -- reviewed: receipt metadata is diagnostic; the update must not fail on it (2026-08-26 CI-green audit)
             pass
 
 
@@ -240,7 +240,7 @@ def finalize_pending_update_receipt(
         receipt = _current
         if receipt is not None and exit_code is not None:
             receipt.data["exit_code"] = int(exit_code)
-    except Exception:
+    except Exception:  # noqa: S110 -- reviewed: exit-code annotation is diagnostic only (2026-08-26 CI-green audit)
         pass
     return finalize_update_receipt(outcome, stop_reason=stop_reason)
 
@@ -257,7 +257,7 @@ def _prune_old_receipts(directory: Path) -> None:
                 stale.unlink()
             except OSError:
                 pass
-    except Exception:
+    except Exception:  # noqa: S110 -- reviewed: best-effort pruning of superseded receipts (2026-08-26 CI-green audit)
         pass
 
 

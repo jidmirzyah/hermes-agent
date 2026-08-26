@@ -70,7 +70,9 @@ def split_header_and_entries(text: str) -> tuple[str, str]:
 
 def read_last_rotation_date() -> date:
     if STATE_FILE.exists():
-        return datetime.strptime(STATE_FILE.read_text().strip(), "%Y-%m-%d").date()
+        return datetime.strptime(
+            STATE_FILE.read_text(encoding="utf-8").strip(), "%Y-%m-%d"
+        ).date()
     # First-ever rotation: no prior boundary recorded. Start the clock now
     # rather than inventing an earlier start date.
     return date.today()

@@ -3860,7 +3860,7 @@ def _run_pre_update_backup(args) -> Optional[str]:
                             f"{k}={v}" for k, v in sorted(_sibling_snaps.items())
                         ),
                     )
-                except Exception:
+                except Exception:  # noqa: S110 -- reviewed: sibling-snapshot note is cosmetic (2026-08-26 CI-green audit)
                     pass
                 global _LAST_SIBLING_SNAPSHOTS
                 _LAST_SIBLING_SNAPSHOTS = _sibling_snaps
@@ -4812,7 +4812,7 @@ def _handoff_reapable_backend_pids(
         except psutil.NoSuchProcess:
             # Exited between scan and classification — nothing to reap.
             continue
-        except Exception:
+        except Exception:  # noqa: S110 -- reviewed: best-effort cmdline read; an unclassified process is handled below (2026-08-26 CI-green audit)
             pass
         if not _is_backend(argv.lower()):
             # A non-backend holder during a hand-off is unexpected; refuse the
@@ -5974,7 +5974,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
             pre_update_snapshot_id is not None,
             f"snapshot={pre_update_snapshot_id}" if pre_update_snapshot_id else "disabled or failed",
         )
-    except Exception:
+    except Exception:  # noqa: S110 -- reviewed: record_step is diagnostic; the update must not fail on it (2026-08-26 CI-green audit)
         pass
 
     _windows_gateway_resume = _m()._pause_windows_gateways_for_update()
@@ -8282,7 +8282,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                     failed_units=failed_or_stale_units,
                     incomplete=bool(failed_or_stale_units),
                 )
-            except Exception:
+            except Exception:  # noqa: S110 -- reviewed: restart record is diagnostic (2026-08-26 CI-green audit)
                 pass
 
             if not restarted_services and not killed_pids:
@@ -8363,7 +8363,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                     incomplete=gateway_fleet_restart_incomplete,
                     phase_error=str(e),
                 )
-            except Exception:
+            except Exception:  # noqa: S110 -- reviewed: restart record is diagnostic; the phase error is already captured in it (2026-08-26 CI-green audit)
                 pass
 
         _m()._resume_windows_gateways_after_update(_windows_gateway_resume)
@@ -8498,7 +8498,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
 
                     if _ur._current is not None:
                         _ur._current.data["runtime_outcomes"] = _runtime_outcomes
-                except Exception:
+                except Exception:  # noqa: S110 -- reviewed: runtime_outcomes is receipt detail only (2026-08-26 CI-green audit)
                     pass
         except Exception as _outcome_exc:
             logger.debug("Runtime-outcome reconciliation failed: %s", _outcome_exc)
@@ -8556,7 +8556,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                 from hermes_cli.update_receipt import finalize_update_receipt
 
                 finalize_update_receipt("failed")
-            except Exception:
+            except Exception:  # noqa: S110 -- reviewed: receipt finalisation must not mask the failure it is reporting (2026-08-26 CI-green audit)
                 pass
             sys.exit(1)
 
@@ -8628,7 +8628,7 @@ def _fleet_probe_expected_runtimes(
     try:
         if pre_update_plan is not None and pre_update_plan.runtimes:
             return True
-    except Exception:
+    except Exception:  # noqa: S110 -- reviewed: plan probe; falls through to the default below (2026-08-26 CI-green audit)
         pass
     if isinstance(windows_resume_token, dict) and (
         windows_resume_token.get("profiles")

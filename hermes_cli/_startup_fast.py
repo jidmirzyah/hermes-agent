@@ -246,7 +246,7 @@ def print_fast_version_info(*, check_updates: bool = True) -> None:
             )
         elif behind == 0:
             print("Up to date")
-    except Exception:
+    except Exception:  # noqa: S110 -- reviewed: optional 'update available' notice; startup must not fail on it (2026-08-26 CI-green audit)
         pass
 
 

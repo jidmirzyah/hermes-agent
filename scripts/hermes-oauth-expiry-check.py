@@ -266,7 +266,14 @@ def _run_setup(
     setup_py = _setup_py_path(hermes_home)
     cmd = [sys.executable, str(setup_py), "--identity", identity, *args]
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+        )
         return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
     except Exception as exc:
         return 1, f"subprocess failed: {exc}"

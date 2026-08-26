@@ -15857,7 +15857,7 @@ def _plugin_terminal_backend_rows() -> List[Dict[str, str]]:
         from hermes_cli.plugins import discover_plugins
 
         discover_plugins()  # idempotent — plugin state may not be loaded yet
-    except Exception:
+    except Exception:  # noqa: S110 -- reviewed: plugin discovery is idempotent and optional here (2026-08-26 CI-green audit)
         pass
     try:
         from agent.terminal_env_registry import list_providers
@@ -16008,7 +16008,7 @@ def _probe_terminal_backend(name: str, terminal_cfg: dict) -> tuple:
             provider = get_provider(name)
             if provider is not None:
                 return provider.probe()
-        except Exception:
+        except Exception:  # noqa: S110 -- reviewed: provider probe is optional; absence is a valid answer (2026-08-26 CI-green audit)
             pass
         return ("unavailable", f"Unknown backend: {name}")
     except Exception as exc:  # pragma: no cover — belt-and-braces guard
@@ -19917,7 +19917,7 @@ def start_server(
                     )
 
                     _public_url_for_msg = _rpu()
-                except Exception:
+                except Exception:  # noqa: S110 -- reviewed: public URL is cosmetic in this message (2026-08-26 CI-green audit)
                     pass
                 _gate_reason = (
                     f"dashboard.public_url is set to "

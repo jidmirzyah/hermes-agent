@@ -88,7 +88,7 @@ def _detect_supervisor_for_pid(pid: int, service_pids: set) -> str:
                 return "systemd"
             if is_macos():
                 return "launchd"
-        except Exception:
+        except Exception:  # noqa: S110 -- reviewed: service-manager detection falls through to the next strategy (2026-08-26 CI-green audit)
             pass
         return "service"
     return "manual"
