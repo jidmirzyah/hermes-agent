@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -802,3 +803,73 @@ class TestCanaryCheck:
         assert "canary" in out
         assert "family_person" in out
         assert any(c == "8758899353" for c, _ in sent)
+
+
+class TestRestoreScrubbedSendCredentials:
+    """Cron runs this job as a ``no_agent`` script, and script subprocesses get
+    their env from ``build_subprocess_env()``, which scrubs ``TELEGRAM_BOT_TOKEN``.
+    Without it every reminder send fails with "You must pass the token you
+    received from Botfather" while the job still completes and reports ``ok`` --
+    which is precisely how 2026-08-26 failed, the first day a reminder ever came
+    due. Cron's own ``deliver:`` target is performed by the gateway, not this
+    script, so the failure hid behind a delivered message.
+    """
+
+    def test_no_op_when_a_token_is_already_present(self, mod, hermes_home, monkeypatch):
+        """A run that legitimately inherits a token must keep it untouched."""
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "inherited-token")
+        (hermes_home / ".env").write_text(
+            "TELEGRAM_BOT_TOKEN=from-dotenv\n", encoding="utf-8"
+        )
+
+        assert mod.restore_scrubbed_send_credentials(hermes_home) is None
+        assert os.environ["TELEGRAM_BOT_TOKEN"] == "inherited-token"
+
+    def test_restores_the_token_when_the_env_was_scrubbed(
+        self, mod, hermes_home, monkeypatch
+    ):
+        """The actual fix: with the token scrubbed, reload it from .env."""
+        monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+        (hermes_home / ".env").write_text(
+            "TELEGRAM_BOT_TOKEN=restored-from-dotenv\n", encoding="utf-8"
+        )
+
+        assert mod.restore_scrubbed_send_credentials(hermes_home) is None
+        assert os.environ["TELEGRAM_BOT_TOKEN"] == "restored-from-dotenv"
+
+    def test_warns_when_dotenv_has_no_token(self, mod, hermes_home, monkeypatch):
+        """Silence would leave the same invisible failure. Say so instead."""
+        monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+        (hermes_home / ".env").write_text("SOMETHING_ELSE=1\n", encoding="utf-8")
+
+        warning = mod.restore_scrubbed_send_credentials(hermes_home)
+
+        assert warning is not None
+        assert "TELEGRAM_BOT_TOKEN" in warning
+        assert "still unset" in warning
+
+    def test_warns_rather_than_raises_when_there_is_no_dotenv(
+        self, mod, tmp_path, monkeypatch
+    ):
+        """A credentials failure must degrade to reporting, never take the
+        whole watchdog down -- the expiry check itself still has to run."""
+        monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+        missing = tmp_path / "no-such-home"
+
+        warning = mod.restore_scrubbed_send_credentials(missing)
+
+        assert warning is not None
+        assert "TELEGRAM_BOT_TOKEN" in warning
+
+    def test_warning_reaches_the_run_summary(self, mod, hermes_home, monkeypatch):
+        """The warning is only useful if it is surfaced, so main() must carry
+        it into the job's output rather than swallowing it."""
+        import inspect
+
+        source = inspect.getsource(mod.main)
+        assert "restore_scrubbed_send_credentials" in source
+        assert "all_logs.append(credentials_warning)" in source
+        # and it must run before anything that sends
+        assert source.index("restore_scrubbed_send_credentials") < source.index(
+            "run_canary_check"
+        )
