@@ -93,6 +93,67 @@ def script_drift_alerts(hermes_home: Path) -> list[str]:
     return alerts
 
 
+def skill_registry_alerts(hermes_home: Path) -> list[str]:
+    """Compare the skill usage registry against the skills actually on disk.
+
+    ``skills/.usage.json`` is telemetry, and ``bump_use`` deliberately records
+    any name it is handed -- its own docstring calls usage tracking "pure
+    observability ... orthogonal to whether a skill is ever curated", which is
+    why bundles and hub-installed skills get counted too. The cost of that
+    permissiveness is that a name nothing can resolve still accumulates a
+    record, and nothing notices.
+
+    It happened. ``vault-governance`` held 51 recorded uses with no SKILL.md
+    anywhere, and its record was ``curator_managed: True`` -- so the one entry
+    the curator would eventually have acted on was the one that did not exist.
+    In the other direction, 18 skills installed in a single batch on 2026-08-10
+    had no record at all, which left them invisible to the curator and made any
+    "unused skills" count wrong in both directions at once.
+
+    Reports both directions and changes nothing. Repair is ``forget()`` for a
+    dead record and ``seed_record_if_missing()`` for a missing one, but which
+    of those is right depends on why the drift appeared, so it stays a
+    judgement call rather than an automatic sweep.
+    """
+    skills_dir = hermes_home / "skills"
+    usage_file = skills_dir / ".usage.json"
+    if not skills_dir.is_dir():
+        return [f"Skill registry cannot be checked: {skills_dir} is missing"]
+    if not usage_file.is_file():
+        return [f"Skill registry cannot be checked: {usage_file} is missing"]
+    try:
+        usage = load_json(usage_file)
+    except (OSError, ValueError) as exc:
+        return [f"Skill registry cannot be read: {exc}"]
+    if not isinstance(usage, dict):
+        return [f"Skill registry is not an object: {usage_file}"]
+
+    on_disk = {
+        path.parent.name
+        for path in skills_dir.rglob("SKILL.md")
+        if path.is_file()
+    }
+    tracked = set(usage)
+    alerts: list[str] = []
+    orphaned = sorted(tracked - on_disk)
+    untracked = sorted(on_disk - tracked)
+    if orphaned:
+        alerts.append(
+            f"{len(orphaned)} skill usage record(s) have no SKILL.md on disk: "
+            f"{', '.join(orphaned)}. A record with no skill still accrues "
+            "usage and can be curator-managed -- clear it with "
+            "skill_usage.forget() once you know why it is there."
+        )
+    if untracked:
+        alerts.append(
+            f"{len(untracked)} skill(s) on disk have no usage record: "
+            f"{', '.join(untracked)}. They are invisible to the curator and to "
+            "any usage-based decision -- seed_record_if_missing() gives each an "
+            "anchor without enrolling it for archival."
+        )
+    return alerts
+
+
 def inspect_health(
     *,
     hermes_home: Path,
@@ -138,6 +199,7 @@ def inspect_health(
                 alerts.append(alert)
 
         alerts.extend(script_drift_alerts(hermes_home))
+        alerts.extend(skill_registry_alerts(hermes_home))
 
         jobs_path = hermes_home / "cron/jobs.json"
         try:
