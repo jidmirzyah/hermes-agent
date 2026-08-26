@@ -90,13 +90,16 @@ def inspect_health(
                 except ValueError:
                     alerts.append(f"Cron {name} has an invalid next_run_at value")
 
-            if not job.get("last_run_at") and job.get("created_at"):
-                try:
-                    never_run_age = (now - parse_datetime(job["created_at"])).total_seconds() / 3600
-                    if never_run_age > 8 * 24:
-                        alerts.append(f"Cron {name} has never run after {never_run_age / 24:.1f} days")
-                except ValueError:
-                    alerts.append(f"Cron {name} has an invalid created_at value")
+            # A job that has never run is only a problem once it has actually
+            # missed a fire. The overdue check above catches that the moment
+            # next_run_at passes, and it applies to never-run jobs too. Judging
+            # staleness by age-since-creation instead flagged every monthly job
+            # created mid-month -- "never run after 11.6 days" for a job whose
+            # first fire had not arrived yet. Known gap: if the scheduler ever
+            # advanced next_run_at without executing, neither check fires;
+            # detecting that needs interval awareness this script does not have.
+            if not job.get("last_run_at") and not job.get("next_run_at"):
+                alerts.append(f"Cron {name} has never run and has no next_run_at scheduled")
 
     return alerts, facts
 

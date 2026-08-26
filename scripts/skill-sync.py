@@ -24,6 +24,11 @@ Rules:
   would otherwise sit there forever unnoticed gets surfaced instead.
 - Silent (exit 0, no output) only when nothing needed syncing and no
   orphans exist. Any real change, or any error, is never silent.
+
+Second job (added 2026-08-23): validate the frontmatter of EVERY live
+SKILL.md, not just synced ones. Unparseable frontmatter makes a skill
+register an empty description, which leaves it listed but unselectable --
+a silent outage. Reported loudly, exit 1, never auto-fixed.
 """
 from __future__ import annotations
 
@@ -31,6 +36,8 @@ import os
 import shutil
 import sys
 from pathlib import Path
+
+import yaml
 
 REPO_SKILLS = Path("/home/jiddy/.hermes/hermes-agent/skills")
 LIVE_SKILLS = Path("/home/jiddy/.hermes/skills")
@@ -69,6 +76,61 @@ def all_files(base: Path) -> dict[str, Path]:
             rel = full.relative_to(base)
             files[str(rel)] = full
     return files
+
+
+def validate_live_frontmatter(live_root: Path) -> list[str]:
+    """Every live SKILL.md must have parseable frontmatter with a name and
+    description.
+
+    Why this walks LIVE rather than the repo loop in main(): a skill whose
+    frontmatter fails to parse registers an EMPTY description in the prompt
+    index. It stays listed, but as a bare name with nothing telling the model
+    when to use it -- so it silently stops being selected. That is exactly
+    what happened to obsidian-vault-governance (broken 2026-08-11, unnoticed
+    until 2026-08-23; use_count 36, then zero).
+
+    That skill has no repo counterpart -- it is one of 38 live-only skills.
+    main()'s sync loop deliberately iterates repo_skills, so a check bolted
+    into it would have reported "ok" every night while the actual broken file
+    sat unvisited.
+
+    Exclusions are deliberately NOT honoured: a skill excluded from syncing
+    can still be broken, and being unselectable is not something anyone
+    opts into.
+    """
+    problems: list[str] = []
+    for skill_md in sorted(live_root.rglob("SKILL.md")):
+        rel = skill_md.relative_to(live_root)
+        try:
+            raw = skill_md.read_text(encoding="utf-8", errors="replace")
+        except OSError as e:
+            problems.append(f"{rel}: unreadable: {e}")
+            continue
+        if not raw.startswith("---"):
+            problems.append(f"{rel}: no YAML frontmatter block")
+            continue
+        parts = raw.split("---", 2)
+        if len(parts) < 3:
+            problems.append(f"{rel}: frontmatter block is not terminated")
+            continue
+        try:
+            fm = yaml.safe_load(parts[1])
+        except yaml.YAMLError as e:
+            detail = str(e).split("\n")[0].strip()
+            problems.append(f"{rel}: frontmatter is not valid YAML: {detail}")
+            continue
+        if not isinstance(fm, dict):
+            problems.append(f"{rel}: frontmatter is not a mapping")
+            continue
+        if not str(fm.get("name") or "").strip():
+            problems.append(f"{rel}: frontmatter has no 'name'")
+        if not str(fm.get("description") or "").strip():
+            problems.append(
+                f"{rel}: frontmatter has no 'description' -- the skill will be "
+                f"listed in the prompt index as a bare name and will not be "
+                f"selected"
+            )
+    return problems
 
 
 def main() -> int:
@@ -122,10 +184,30 @@ def main() -> int:
             if rel not in repo_files:
                 orphaned.append(f"{name}/{rel}")
 
+    fm_problems = validate_live_frontmatter(LIVE_SKILLS)
+
     if errors:
         print("hermes-skill-sync FAILED:")
         for e in errors:
             print(f"  - {e}")
+        if fm_problems:
+            print(
+                f"hermes-skill-sync: ALSO found {len(fm_problems)} skill(s) "
+                f"with invalid frontmatter:"
+            )
+            for p in fm_problems:
+                print(f"  - {p}")
+        return 1
+
+    if fm_problems:
+        # File sync itself succeeded; this is a separate failure class.
+        print(
+            f"hermes-skill-sync: file sync OK, but {len(fm_problems)} live "
+            f"skill(s) have INVALID FRONTMATTER and will not be selectable "
+            f"by the agent until fixed:"
+        )
+        for p in fm_problems:
+            print(f"  - {p}")
         return 1
 
     if not updated and not orphaned and not never_installed:
