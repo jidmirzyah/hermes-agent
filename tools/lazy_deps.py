@@ -292,9 +292,8 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
     # the stdlib .ipynb/.docx/.xlsx to PDF, legacy Office (.doc/.ppt/.xls),
     # OpenDocument, RTF, and EPUB. Installed on first read of such a file;
     # the call site uses prompt=False so read_file never blocks on a prompt.
-    # NOTE: lazy-only for now — no pyproject `doc-extract` extra until the
-    # package clears the uv exclude-newer 14-day quarantine (first release
-    # 2026-08-04); add the mirrored extra then.
+    # Keep lazy-only. Upstream's fresh 0.2.4 native wheel remains inside the
+    # project's 14-day quarantine and must not receive a cooldown exemption.
     "tool.doc_extract": ("firecrawl-anydoc==0.1.6",),
     # Computer Use (cua-driver) — the MCP client SDK used to spawn and talk
     # to the cua-driver process over stdio. Matches the `mcp` / `computer-use`

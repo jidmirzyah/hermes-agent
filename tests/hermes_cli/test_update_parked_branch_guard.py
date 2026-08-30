@@ -281,7 +281,7 @@ def test_update_skips_and_warns_on_dirty_parked_branch(
     args = SimpleNamespace(branch=None, yes=False, force=False, force_venv=False)
 
     with pytest.raises(SystemExit) as exc_info:
-        hermes_main.cmd_update(args)
+        hermes_main.cmd_update(args, approved=True)
 
     assert exc_info.value.code == 1
     out = capsys.readouterr().out
@@ -323,7 +323,7 @@ def test_update_switches_unmerged_parked_branch_with_kept_notice(
     args = SimpleNamespace(branch=None, yes=False, force=False, force_venv=False)
 
     with pytest.raises(_StopFlow):
-        hermes_main.cmd_update(args)
+        hermes_main.cmd_update(args, approved=True)
 
     out = capsys.readouterr().out
     assert "1 commit(s) not merged into origin/main" in out
@@ -377,7 +377,7 @@ def test_update_updates_unmerged_branch_in_place_when_configured(
     args = SimpleNamespace(branch=None, yes=False, force=False, force_venv=False)
 
     with pytest.raises(_StopFlow):
-        hermes_main.cmd_update(args)
+        hermes_main.cmd_update(args, approved=True)
 
     out = capsys.readouterr().out
     assert "updating it in place" in out
@@ -435,7 +435,7 @@ def test_switch_branch_flag_overrides_in_place_strategy(
     )
 
     with pytest.raises(_StopFlow):
-        hermes_main.cmd_update(args)
+        hermes_main.cmd_update(args, approved=True)
 
     out = capsys.readouterr().out
     assert "1 commit(s) not merged into origin/main" in out
@@ -485,7 +485,7 @@ def test_unmerged_branch_still_updates_in_place_without_the_flag(
     )
 
     with pytest.raises(_StopFlow):
-        hermes_main.cmd_update(args)
+        hermes_main.cmd_update(args, approved=True)
 
     out = capsys.readouterr().out
     assert "updating it in place" in out
@@ -516,7 +516,7 @@ def test_update_auto_switches_clean_merged_parked_branch(
     args = SimpleNamespace(branch=None, yes=False, force=False, force_venv=False)
 
     with pytest.raises(_StopFlow):
-        hermes_main.cmd_update(args)
+        hermes_main.cmd_update(args, approved=True)
 
     out = capsys.readouterr().out
     assert "parked on 'old-feature'" in out
@@ -572,7 +572,7 @@ def test_update_up_to_date_path_does_not_repark_merged_branch(
     args = SimpleNamespace(branch=None, yes=False, force=False, force_venv=False)
 
     with pytest.raises(_StopFlow):
-        hermes_main.cmd_update(args)
+        hermes_main.cmd_update(args, approved=True)
 
     out = capsys.readouterr().out
     assert "switched back to main" in out
@@ -599,7 +599,7 @@ def test_update_on_main_fast_path_unchanged(repo_pair, monkeypatch, capsys):
     args = SimpleNamespace(branch=None, yes=False, force=False, force_venv=False)
 
     with pytest.raises(_StopFlow):
-        hermes_main.cmd_update(args)
+        hermes_main.cmd_update(args, approved=True)
 
     out = capsys.readouterr().out
     assert "parked on" not in out

@@ -788,6 +788,7 @@ def _get_session_db() -> Optional[Any]:
         on_loop_thread = True
 
     if on_loop_thread:
+        started_bootstrap = False
         with _DB_BOOTSTRAP_LOCK:
             # Re-check under the lock: a bootstrap may have finished between
             # the unlocked read above and here.
@@ -799,12 +800,18 @@ def _get_session_db() -> Optional[Any]:
                 done = threading.Event()
                 _DB_BOOTSTRAP_INFLIGHT[home] = done
                 _DB_BOOTSTRAP_EXECUTOR.submit(_bootstrap_session_db, home, done)
+                started_bootstrap = True
         # Grace window: a healthy init finishes in tens of ms, so waiting
         # briefly keeps goal/heartbeat persistence working on the very first
         # loop-thread call instead of silently dropping it. A contended init
         # (the crash-loop scenario) exceeds the window and we degrade to
         # None — a bounded stall far below the watchdog's probe timeout.
-        done.wait(_DB_BOOTSTRAP_LOOP_WAIT_S)
+        wait_s = (
+            _DB_BOOTSTRAP_INIT_WAIT_S
+            if started_bootstrap
+            else _DB_BOOTSTRAP_LOOP_WAIT_S
+        )
+        done.wait(wait_s)
         return _DB_CACHE.get(home)
 
     try:
