@@ -74,7 +74,7 @@ def _run_cmd_update(monkeypatch, impl, *, reexec: bool):
 
     args = SimpleNamespace(plan=False, check=False, gateway=False, branch=None)
     try:
-        cmd_update(args)
+        cmd_update(args, approved=True)
     finally:
         _LAST.clear()
         _LAST.update(events)

@@ -142,6 +142,26 @@ process disappears while it is still running is recorded as `unknown`, because
 Hermes cannot prove whether its external side effects happened. Pending and
 delivered records are bounded and profile-local.
 
+### Child background-process notifications
+
+Background processes a subagent starts (e.g. `npm ci` with
+`notify_on_complete`) technically route their completion and watch-pattern
+notifications to the **parent** conversation, because anything that outlives
+the child needs a durable consumer. By default those notifications are
+**suppressed** in the parent chat — the child's consolidated delegation result
+is the deliverable, and mid-conversation "process finished" walls from a
+child's internal builds are noise. Suppressed events are logged at debug level
+with the process session ID and subagent task ID, so they remain diagnosable.
+
+The delegation result itself is never suppressed. To restore delivery of the
+child process notifications (each carries a "Started by subagent …"
+attribution line):
+
+```yaml
+delegation:
+  surface_child_process_notifications: true   # default: false
+```
+
 ## Model Override
 
 You can configure a different model for subagents via `config.yaml` — useful for delegating simple tasks to cheaper/faster models:
@@ -168,7 +188,7 @@ delegation:
   provider: "openrouter"             # optional: route children to a different provider
 ```
 
-Resolution order: `delegation.base_url` (direct endpoint) takes precedence, then `delegation.provider` (full credential bundle resolved via the runtime provider system), and when neither is set children inherit the parent's provider and credentials; `delegation.model` applies in all cases, and when it is empty children inherit the parent's model.
+Resolution order: `delegation.base_url` (direct endpoint) takes precedence, then `delegation.provider` (full credential bundle resolved via the runtime provider system), and when neither is set children inherit the parent's provider and credentials; `delegation.model` applies in all cases, and when it is empty children inherit the parent's model. Setting `delegation.provider` alongside `delegation.base_url` keeps the explicit endpoint but carries that provider's request overrides and max output tokens into the child.
 
 Note that the pin is global: `delegate_task` has no per-task model parameter, so every child in a batch runs on the configured delegation model. For quality-sensitive subtasks that need a stronger model, either leave `delegation.model` unset for that session or hand the task to the [kanban board](kanban.md#per-task-model-override), which does support a per-task model override.
 

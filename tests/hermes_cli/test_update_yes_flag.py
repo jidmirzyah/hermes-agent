@@ -12,7 +12,33 @@ import subprocess
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 from hermes_cli.main import cmd_update
+
+
+@pytest.fixture(autouse=True)
+def _isolate_live_gateway_state(monkeypatch):
+    """These prompt tests must never discover or restart the VM's gateway."""
+    monkeypatch.setattr(
+        "hermes_cli.main._purge_stale_hermes_modules", lambda: None
+    )
+    monkeypatch.setattr(
+        "hermes_cli.gateway.find_gateway_pids", lambda **kwargs: []
+    )
+    monkeypatch.setattr(
+        "hermes_cli.gateway.find_profile_gateway_processes", lambda *args, **kwargs: []
+    )
+    monkeypatch.setattr(
+        "hermes_cli.gateway.supports_systemd_services", lambda: False
+    )
+    monkeypatch.setattr(
+        "hermes_cli.update_inventory.collect_runtime_inventory",
+        lambda: SimpleNamespace(runtimes=[], to_dict=lambda: {}),
+    )
+    monkeypatch.setattr(
+        "hermes_cli.update_receipt.collect_fleet_versions", lambda **kwargs: []
+    )
 
 
 def _make_run_side_effect(

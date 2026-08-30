@@ -164,7 +164,14 @@ def test_slow_construction_does_not_block_the_loop(monkeypatch):
         f"in-flight call blocked for {elapsed2:.2f}s — watchdog territory"
     )
     # The kick call must wait the LONGER window: otherwise a healthy cold
-    # init loses its grace period and the first write drops again.
-    assert elapsed > elapsed2, (
-        "kick call should wait the one-time init window; in-flight calls the short one"
+    # init loses its grace period and the first write drops again. Assert
+    # each elapsed time against the midpoint between the two configured
+    # windows instead of comparing them directly; a direct comparison let
+    # two short-window waits pass or fail based only on scheduler noise.
+    midpoint = (goals._DB_BOOTSTRAP_INIT_WAIT_S + goals._DB_BOOTSTRAP_LOOP_WAIT_S) / 2
+    assert elapsed > midpoint, (
+        "kick call should wait the one-time init window before degrading"
+    )
+    assert elapsed2 < midpoint, (
+        "in-flight calls should wait only the short per-call window"
     )
