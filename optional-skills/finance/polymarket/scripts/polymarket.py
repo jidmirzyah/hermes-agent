@@ -8,7 +8,7 @@ Usage:
     python3 polymarket.py event <slug>
     python3 polymarket.py price <token_id>
     python3 polymarket.py book <token_id>
-    python3 polymarket.py history <condition_id> [--interval all] [--fidelity 50]
+    python3 polymarket.py history <token_id> [--interval all] [--fidelity 50]
     python3 polymarket.py trades [--limit 10] [--market CONDITION_ID]
 """
 
@@ -195,9 +195,9 @@ def cmd_book(token_id: str):
         print(f"    {_fmt_pct(a['price']):>7}  |  Size: {float(a['size']):>10.2f}")
 
 
-def cmd_history(condition_id: str, interval: str = "all", fidelity: int = 50):
+def cmd_history(token_id: str, interval: str = "all", fidelity: int = 50):
     """Get price history for a market."""
-    data = _get(f"{CLOB}/prices-history?market={condition_id}&interval={interval}&fidelity={fidelity}")
+    data = _get(f"{CLOB}/prices-history?market={token_id}&interval={interval}&fidelity={fidelity}")
     history = data.get("history", [])
     if not history:
         print("No price history available for this market.")
