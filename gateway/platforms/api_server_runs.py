@@ -175,7 +175,7 @@ def _make_run_event_callback(
         try:
             loop.call_soon_threadsafe(q.put_nowait, event)
         except Exception:
-            pass
+            logger.debug("event push to run stream failed (non-fatal); stream may already be closed", exc_info=True)
 
     def _callback(
         event_type: str,
@@ -640,7 +640,7 @@ async def _handle_runs(
                 "delta": delta,
             })
         except Exception:
-            pass
+            logger.debug("message.delta event push failed (non-fatal); stream may already be closed", exc_info=True)
 
     initial_status = self._set_run_status(
         run_id,
@@ -761,7 +761,7 @@ async def _handle_runs(
                 try:
                     loop.call_soon_threadsafe(q.put_nowait, event)
                 except Exception:
-                    pass
+                    logger.debug("approval.request event push failed (non-fatal); stream may already be closed", exc_info=True)
 
             def _run_sync():
                 from gateway.session_context import clear_session_vars
@@ -836,12 +836,12 @@ async def _handle_runs(
                                 try:
                                     reset_current_session_key(approval_token)
                                 except Exception:
-                                    pass
+                                    logger.debug("resetting approval/session context var failed (non-fatal)", exc_info=True)
                             if session_tokens:
                                 try:
                                     clear_session_vars(session_tokens)
                                 except Exception:
-                                    pass
+                                    logger.debug("clearing session context vars failed (non-fatal)", exc_info=True)
                             if room_policy_token is not None:
                                 try:
                                     from gateway.hosted_room_execution_policy import (
@@ -850,7 +850,7 @@ async def _handle_runs(
 
                                     reset_room_execution_policy(room_policy_token)
                                 except Exception:
-                                    pass
+                                    logger.debug("resetting room execution policy context var failed (non-fatal)", exc_info=True)
                     u = {
                         "input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,
                         "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
@@ -928,7 +928,7 @@ async def _handle_runs(
                     "timestamp": time.time(),
                 })
             except Exception:
-                pass
+                logger.debug("run.cancelled event push failed (non-fatal); stream may already be closed", exc_info=True)
             raise
         except _ProviderAuthResolutionError as exc:
             # /v1/runs builds its own agent via _create_agent() and does
@@ -954,7 +954,7 @@ async def _handle_runs(
                     "error": error_msg,
                 })
             except Exception:
-                pass
+                logger.debug("run.failed event push failed (non-fatal); stream may already be closed", exc_info=True)
         except Exception as exc:
             logger.exception("[api_server] run %s failed", run_id)
             self._set_run_status(
@@ -971,7 +971,7 @@ async def _handle_runs(
                     "error": _redact_api_error_text(exc),
                 })
             except Exception:
-                pass
+                logger.debug("run.failed event push failed (non-fatal); stream may already be closed", exc_info=True)
         finally:
             # If the asyncio wrapper is cancelled (for example via
             # /stop), the executor thread can still be blocked waiting
@@ -983,12 +983,12 @@ async def _handle_runs(
 
                 unregister_gateway_notify(approval_session_key)
             except Exception:
-                pass
+                logger.debug("unregistering gateway notify failed (non-fatal); approval session may already be gone", exc_info=True)
             # Sentinel: signal SSE stream to close
             try:
                 _put_event_if_active(None)
             except Exception:
-                pass
+                logger.debug("SSE stream close sentinel push failed (non-fatal); stream may already be closed", exc_info=True)
             self._active_run_agents.pop(run_id, None)
             self._active_run_tasks.pop(run_id, None)
             self._run_approval_sessions.pop(run_id, None)
@@ -1261,7 +1261,7 @@ async def _handle_run_approval(
                 "resolved": resolved,
             })
         except Exception:
-            pass
+            logger.debug("approval.responded event push failed (non-fatal); stream may already be closed", exc_info=True)
 
     return web.json_response({
         "object": "hermes.run.approval_response",
@@ -1409,7 +1409,7 @@ async def _handle_stop_run(
         try:
             request_hard_interrupt(agent, "Stop requested via API")
         except Exception:
-            pass
+            logger.debug("hard interrupt request failed (non-fatal); run may have already finished", exc_info=True)
         # The stopped run is abandoned — reap only the background
         # processes it created (#76115). Epoch-gated inside, so a
         # concurrent run sharing the same session_id keeps its own
@@ -1451,7 +1451,7 @@ def _sweep_orphaned_runs_once(self, now: Optional[float] = None) -> None:
                 if approval_session_key:
                     unregister_gateway_notify(approval_session_key)
             except Exception:
-                pass
+                logger.debug("unregistering gateway notify failed (non-fatal); approval session may already be gone", exc_info=True)
         # The transport TTL always bounds buffering. Live control state is
         # independent and survives until the executor-backed task returns.
         self._run_streams.pop(run_id, None)

@@ -7543,7 +7543,11 @@ def _portable_git_candidates() -> list:
                 root / "git" / "mingw64" / "libexec" / "git-core" / "git.exe"
             )
     except Exception:
-        pass
+        logger.debug(
+            "portable-git candidate path resolution failed (non-fatal); "
+            "returning partial/empty candidate list",
+            exc_info=True,
+        )
     return candidates
 
 
