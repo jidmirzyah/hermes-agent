@@ -287,6 +287,15 @@ def test_build_system_requires_exempt_from_exclude_newer():
 
 
 def test_exact_pinned_deps_exempt_from_exclude_newer():
+    pytest.skip(
+        "FORK DEVIATION (deliberate, not a bug): upstream requires every "
+        "exact-pinned dependency to be whitelisted in exclude-newer-package, "
+        "which blanket-disables the 14-day supply-chain cooldown for ~85 "
+        "packages. This fork adds exemptions narrowly and by name instead "
+        "— see Operations.md, Supply-chain cooldown exemptions. The "
+        "companion build-system.requires guard above IS enforced, because "
+        "build requirements genuinely cannot fall back to an older version."
+    )
     """Regression guard for the release-day brick class.
 
     Every release exact-pins at least one dependency to a version published

@@ -432,7 +432,10 @@ class TestCmdUpdateBranchFallback:
             "hermes_cli.update_receipt.finalize_pending_update_receipt"
         ):
             with pytest.raises(SystemExit) as exit_info:
-                cmd_update(mock_args)
+                # Bypass the update-approval staging gate - this test
+                # exercises the repair/durable-outcome path beneath it;
+                # gate coverage lives in tests/tools/test_update_approval.py.
+                cmd_update(mock_args, approved=True)
 
         assert exit_info.value.code == 1
         assert runtime_check.call_count == expected_runtime_checks
@@ -469,7 +472,10 @@ class TestCmdUpdateBranchFallback:
             "hermes_cli.update_receipt.finalize_pending_update_receipt"
         ):
             with pytest.raises(SystemExit) as exit_info:
-                cmd_update(mock_args)
+                # Bypass the update-approval staging gate - this test
+                # exercises the repair/durable-outcome path beneath it;
+                # gate coverage lives in tests/tools/test_update_approval.py.
+                cmd_update(mock_args, approved=True)
 
         assert exit_info.value.code == 1
         write_gateway_exit.assert_called_once_with(False)
