@@ -1174,7 +1174,11 @@ def _windows_runtime_self_lock(live: Path) -> tuple[bool, str]:
                     "process executes from inside it"
                 )
     except Exception:
-        pass
+        logger.debug(
+            "ancestor-process live-venv check failed (non-fatal); psutil "
+            "unavailable or ancestor walk failed",
+            exc_info=True,
+        )
     return False, ""
 
 
