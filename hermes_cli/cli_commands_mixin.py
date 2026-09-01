@@ -40,6 +40,37 @@ from hermes_cli.browser_connect import (
 )
 
 
+def _print_lightpanda_engine_status() -> None:
+    """One or two ``/browser status`` lines about ``browser.engine: lightpanda``.
+
+    Silent unless the engine is set to lightpanda. Says whether it is in use
+    (and by which driver) or which setting shadows it — the engine is the
+    lowest-precedence browser knob and used to be ignored silently.
+    """
+    try:
+        from tools.browser_tool import lightpanda_engine_status, _using_lightpanda_engine
+
+        if not _using_lightpanda_engine():
+            return
+        used, reason = lightpanda_engine_status()
+    except Exception:
+        return
+    if not used:
+        print(f"   ⚠ browser.engine is 'lightpanda' but it is NOT in use: {reason}")
+        return
+    print(f"   Engine: Lightpanda — {reason} (no screenshots)")
+    try:
+        from tools.browser_lightpanda import LIGHTPANDA_INSTALL_HINT, find_lightpanda_binary
+
+        lightpanda_bin = find_lightpanda_binary()
+    except Exception:
+        return
+    if lightpanda_bin:
+        print(f"   Binary: {lightpanda_bin}")
+    else:
+        print(f"   ⚠ lightpanda binary not found — {LIGHTPANDA_INSTALL_HINT}")
+
+
 class CLICommandsMixin:
     """Mixin holding the interactive-CLI slash-command handlers.
 
@@ -2201,6 +2232,33 @@ class CLICommandsMixin:
         else:  # pragma: no cover - defensive (no live input loop)
             print("  /learn needs an active chat session to run.")
 
+    def _handle_plan_command(self, cmd: str):
+        """Handle /plan — write a markdown implementation plan, no execution.
+
+        Mirrors /learn: build the plan-mode prompt and inject it onto the
+        agent's input queue as a normal user turn. The live agent inspects
+        the workspace with read-only tools and saves the plan under
+        ``.hermes/plans/`` via ``write_file``. No engine, no model-tool
+        footprint, works on any terminal backend, and preserves prompt-cache
+        invariants (no system prompt or history mutation).
+        """
+        from agent.plan_prompt import build_plan_prompt
+
+        # Everything after the command word is the task to plan (optional —
+        # empty infers the task from conversation context).
+        parts = cmd.strip().split(None, 1)
+        task = parts[1].strip() if len(parts) > 1 else ""
+
+        msg = build_plan_prompt(task)
+        if task:
+            print(f"\n📋 Planning: {task[:80]}{'...' if len(task) > 80 else ''}")
+        else:
+            print("\n📋 Planning from this conversation's context...")
+        if hasattr(self, "_pending_input"):
+            self._pending_input.put(msg)
+        else:  # pragma: no cover - defensive (no live input loop)
+            print("  /plan needs an active chat session to run.")
+
     def _handle_init_command(self, cmd: str):
         """Handle /init — generate or update AGENTS.md from a project scan.
 
@@ -2773,6 +2831,7 @@ class CLICommandsMixin:
             if _bu_mode:
                 print("🌐 Browser: Browser Use mode (browser_exec via the Browser Use CLI 3.0)")
                 print("   Local Chrome via CDP, or Browser Use cloud browsers")
+                _print_lightpanda_engine_status()
                 print()
                 print("   /browser use off      — revert to the built-in browser tools")
                 print()
@@ -2780,6 +2839,7 @@ class CLICommandsMixin:
             if current:
                 print("🌐 Browser: connected to live Chromium-family browser via CDP")
                 print(f"   Endpoint: {current}")
+                _print_lightpanda_engine_status()
 
                 _port = 9222
                 try:
@@ -2804,6 +2864,7 @@ class CLICommandsMixin:
 
                 if provider is not None:
                     print(f"🌐 Browser: {provider.provider_name()} (cloud)")
+                    _print_lightpanda_engine_status()
                 else:
                     # Show engine info for local mode
                     try:
@@ -2815,6 +2876,7 @@ class CLICommandsMixin:
                         print("🌐 Browser: local Lightpanda (agent-browser --engine lightpanda)")
                         print("   ⚡ Lightpanda: faster navigation, no screenshot support")
                         print("   Automatic Chromium fallback for screenshots and failed commands")
+                        _print_lightpanda_engine_status()
                     elif engine == "chrome":
                         print("🌐 Browser: local headless Chromium (agent-browser --engine chrome)")
                     else:
