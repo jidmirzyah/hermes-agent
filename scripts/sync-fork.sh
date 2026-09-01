@@ -43,6 +43,7 @@ UV_BIN="/home/jiddy/.local/bin/uv"
 GATEWAY_UNIT="hermes-gateway.service"
 MARKER="$HERMES_HOME/cron/sync_fork_restart_state.json"
 RESTART_LOG="/tmp/hermes-sync-fork-restart-async.log"
+PULL_LOG="/tmp/hermes-sync-fork-pull.log"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./sync-fork-common.sh
@@ -87,7 +88,14 @@ git merge-base --is-ancestor "$before_head" "$origin_head" \
 
 changed_files="$(git diff --name-only "$before_head" "$origin_head")"
 
-git pull --ff-only origin main || fail "git pull --ff-only failed after passing the ancestor check — unexpected, needs manual review"
+# git pull's own stdout is the fast-forward diffstat — one line per changed
+# file, which on a large sync (e.g. a multi-hundred-commit upstream
+# reconciliation) runs to thousands of lines. That is real detail worth
+# keeping, just not worth pushing to Telegram at 2:40 AM: capture it in
+# PULL_LOG (overwritten each run, so it never accumulates) and keep this
+# job's only delivered stdout to the one-line summary below.
+git pull --ff-only origin main > "$PULL_LOG" 2>&1 \
+  || fail "git pull --ff-only failed after passing the ancestor check — unexpected, needs manual review (full output: $PULL_LOG)"
 
 after_head="$(git rev-parse HEAD)"
 [[ "$after_head" == "$origin_head" ]] || fail "pull completed but HEAD ($after_head) does not match origin/main ($origin_head)"
@@ -115,7 +123,7 @@ write_marker "scheduled" "$scheduled_at" "$before_head" "$after_head" "$commit_c
 deps_note="not_needed"
 [[ "$deps_changed" == true ]] && deps_note="scheduled"
 
-echo "hermes-sync-fork: synced $commit_count commit(s) ($before_head -> $after_head), deps_reinstall=$deps_note, gateway restart scheduled (async) — hermes-sync-fork-restart-check will alert if it doesn't finish healthy"
+echo "hermes-sync-fork: synced $commit_count commit(s) ($before_head -> $after_head), deps_reinstall=$deps_note, gateway restart scheduled (async) — hermes-sync-fork-restart-check will alert if it doesn't finish healthy. Full diff detail: $PULL_LOG"
 
 # Launch the restart (and, if needed, the dependency reinstall) as a step
 # that outlives this process AND survives the restart it is about to issue.
