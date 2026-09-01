@@ -27,7 +27,13 @@ permissions:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # Unconditional: a push run that hasn't started its jobs yet can wedge the
+  # concurrency lane for every push behind it indefinitely (2026-09-01, a
+  # stuck run held 23/24 jobs at "queued" for 13+ hours and blocked two
+  # merges). A commit reaching main already passed its own PR's checks, so
+  # losing CI on a commit that's immediately superseded costs little, and
+  # this workflow carries no publish/deploy steps to interrupt mid-run.
+  cancel-in-progress: true
 
 jobs:
   # ─────────────────────────────────────────────────────────────────────
