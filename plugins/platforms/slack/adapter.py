@@ -1480,7 +1480,18 @@ class SlackAdapter(BasePlatformAdapter):
 
         if handler is not None:
             try:
-                await handler.close_async()
+                # No timeout here previously let a hung close_async() freeze
+                # this entire method forever -- and since _restart_socket_mode
+                # only ever runs sequentially from _socket_watchdog_loop, that
+                # silently disabled the watchdog until the whole process was
+                # restarted (observed 2026-08-26/27: one successful reconnect
+                # log, then 17.5 hours of raw slack_sdk "Session is closed"
+                # retries with no further watchdog activity, cleared only by
+                # a SIGTERM). Bounded the same way _cancel_socket_tasks above
+                # already bounds its own cleanup wait.
+                await asyncio.wait_for(
+                    handler.close_async(), timeout=_SOCKET_TASK_CANCEL_TIMEOUT_S
+                )
             except Exception as e:  # pragma: no cover - defensive logging
                 logger.warning(
                     "[Slack] Error while closing Socket Mode handler: %s",
