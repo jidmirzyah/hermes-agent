@@ -153,6 +153,32 @@ def _family_outboxes(vault_root: Path) -> list[dict[str, object]]:
     return results
 
 
+def _zee_outbox(zee_vault_root: Path) -> list[dict[str, object]]:
+    # Zee keeps his own separate vault (not nested under JID's), so
+    # _family_outboxes above -- scoped to vault_root/"Hermes/Profile/Family"
+    # -- structurally cannot see it. Per Family/Zarkash/Zarkash Profile.md
+    # ("Outbox/ (both directions...)"), the Zee -> JID direction is the
+    # mirror living inside Zee's own vault at Hermes/Family/JID/Outbox, not a
+    # path under JID's vault at all.
+    directory = zee_vault_root / "Hermes/Family/JID/Outbox"
+    if not directory.is_dir():
+        return []
+    items = _queue_files(directory, "Outbox.md")
+    if not items:
+        return []
+    return [
+        {
+            "location": _relative(directory, zee_vault_root.parent),
+            "count": len(items),
+            "items": [
+                {"file": path.name, "preview": _preview(path)}
+                for path in items[:MAX_ITEMS_PER_QUEUE]
+            ],
+            "truncated": len(items) > MAX_ITEMS_PER_QUEUE,
+        }
+    ]
+
+
 def _journal(vault_root: Path, since: datetime) -> list[dict[str, str]]:
     root = vault_root / "Journal"
     if not root.is_dir():
@@ -188,10 +214,17 @@ def _system(hermes_home: Path, primary_backup_dir: Path, now: datetime) -> dict[
 
 
 def collect(
-    hermes_home: Path, vault_root: Path, primary_backup_dir: Path, now: datetime
+    hermes_home: Path,
+    vault_root: Path,
+    primary_backup_dir: Path,
+    now: datetime,
+    zee_vault_root: Path | None = None,
 ) -> dict[str, object]:
     job_id = _job_id(hermes_home)
     since = _last_brief_at(hermes_home, job_id, now)
+    family_outboxes = _family_outboxes(vault_root)
+    if zee_vault_root is not None:
+        family_outboxes += _zee_outbox(zee_vault_root)
     return {
         "collector_contract": (
             "Bounded read-only inputs. Calendar and email are intentionally absent and must be queried once each. "
@@ -203,7 +236,7 @@ def collect(
         "vault_changes": _changed_vault_files(vault_root, since),
         "mailbox": _mailbox(vault_root),
         "family_events": _family_events(vault_root, since),
-        "family_outboxes": _family_outboxes(vault_root),
+        "family_outboxes": family_outboxes,
         "journal_candidates": _journal(vault_root, since),
         "system": _system(hermes_home, primary_backup_dir, now),
     }
@@ -213,6 +246,12 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--hermes-home", type=Path, default=Path.home() / ".hermes")
     parser.add_argument("--vault-root", type=Path, default=Path.home() / "Obsidian Core")
+    parser.add_argument(
+        "--zee-vault-root",
+        type=Path,
+        default=Path.home() / "Zarkash Mirza/Zarkash Mirza Obsidian Vault - Neo",
+        help="Zee's separate vault (Syncthing folder zwfnd-wj3pr); silently skipped if not present",
+    )
     parser.add_argument(
         "--primary-backup-dir", type=Path, default=Path.home() / "backups/hermes-agent"
     )
@@ -224,7 +263,13 @@ def main() -> int:
     args = parse_args()
     now = parse_datetime(args.now) if args.now else local_now()
     try:
-        payload = collect(args.hermes_home, args.vault_root, args.primary_backup_dir, now)
+        payload = collect(
+            args.hermes_home,
+            args.vault_root,
+            args.primary_backup_dir,
+            now,
+            zee_vault_root=args.zee_vault_root,
+        )
     except Exception as exc:
         print(json.dumps({"collector_error": f"{type(exc).__name__}: {exc}"}, ensure_ascii=False))
         return 1
