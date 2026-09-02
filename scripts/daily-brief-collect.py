@@ -179,17 +179,27 @@ def _zee_outbox(zee_vault_root: Path) -> list[dict[str, object]]:
     ]
 
 
+_JOURNAL_FOLDERS = (
+    # (relative path under vault_root, hub/index file to skip)
+    ("Journal", "Journal.md"),
+    # Hermes/Reflections/ deliberately excluded: personal content, and the
+    # brief goes to Telegram -- a wider surface than that folder should get.
+    ("Hermes/Wrap Ups", "Wrap Ups.md"),
+)
+
+
 def _journal(vault_root: Path, since: datetime) -> list[dict[str, str]]:
-    root = vault_root / "Journal"
-    if not root.is_dir():
-        return []
     candidates: list[tuple[float, Path]] = []
-    for path in root.glob("*.md"):
-        if path.name == "Journal.md" or not path.is_file():
+    for folder, hub_file in _JOURNAL_FOLDERS:
+        root = vault_root / folder
+        if not root.is_dir():
             continue
-        modified = datetime.fromtimestamp(path.stat().st_mtime, tz=TORONTO)
-        if modified > since:
-            candidates.append((path.stat().st_mtime, path))
+        for path in root.glob("*.md"):
+            if path.name == hub_file or not path.is_file():
+                continue
+            modified = datetime.fromtimestamp(path.stat().st_mtime, tz=TORONTO)
+            if modified > since:
+                candidates.append((path.stat().st_mtime, path))
     candidates.sort(reverse=True)
     return [
         {"file": path.name, "preview": _preview(path)} for _, path in candidates[:10]
