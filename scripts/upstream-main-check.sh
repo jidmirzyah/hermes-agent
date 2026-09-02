@@ -9,7 +9,8 @@ GIT="git -C /home/jiddy/.hermes/hermes-agent"
 HEARTBEAT="/home/jiddy/.hermes/scripts/.upstream-check-last-success"
 
 fetch_err="$(mktemp)"
-trap 'rm -f "$fetch_err"' EXIT
+log_err="$(mktemp)"
+trap 'rm -f "$fetch_err" "$log_err"' EXIT
 
 if ! $GIT fetch upstream main --quiet 2>"$fetch_err"; then
   err="$(cat "$fetch_err")"
@@ -30,7 +31,16 @@ if [[ "$head_behind" == "0" ]]; then
   exit 0
 fi
 
-mapfile -t commit_lines < <($GIT log HEAD..upstream/main --oneline)
+# `set -e` does not propagate a failure inside a process-substitution
+# pipeline (`mapfile -t x < <(cmd)` ignores cmd's exit status), so capture
+# git log's own exit status explicitly before trusting its output.
+if ! commit_log="$($GIT log HEAD..upstream/main --oneline 2>"$log_err")"; then
+  err="$(cat "$log_err")"
+  printf 'Hermes upstream check FAILED: git log HEAD..upstream/main failed: %s\n' "$err"
+  exit 1
+fi
+
+mapfile -t commit_lines <<< "$commit_log"
 max_lines=15
 total_lines="${#commit_lines[@]}"
 show_lines=$(( total_lines < max_lines ? total_lines : max_lines ))
