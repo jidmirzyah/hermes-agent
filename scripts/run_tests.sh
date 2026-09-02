@@ -116,8 +116,16 @@ fi
 # Windows (issues #67385, #70813). These are location variables, not
 # credentials, so forwarding them keeps the isolation intent intact. Each is
 # only forwarded when actually set, so POSIX runs are byte-for-byte unchanged.
+#
+# USERPROFILE is deliberately excluded from this passthrough: forwarding the
+# real one is exactly the isolation hole this loop exists to avoid on native
+# Windows, where Path.home() reads it directly. It is overridden below,
+# alongside HERMES_TEST_HOME, instead. HOMEDRIVE/HOMEPATH are left pointing
+# at the real profile on purpose -- Path.home() only falls back to them when
+# USERPROFILE is unset, so once USERPROFILE is overridden they're inert for
+# that resolution path, and other tools may still need the real values.
 WIN_ENV=()
-for _win_var in USERPROFILE HOMEDRIVE HOMEPATH LOCALAPPDATA APPDATA SYSTEMROOT TEMP TMP; do
+for _win_var in HOMEDRIVE HOMEPATH LOCALAPPDATA APPDATA SYSTEMROOT TEMP TMP; do
   if [ -n "${!_win_var:-}" ]; then
     WIN_ENV+=("$_win_var=${!_win_var}")
   fi
@@ -164,14 +172,19 @@ done
 # Set HERMES_TEST_HOME to override. Setting it to your real $HOME is the
 # deliberate opt-out.
 #
-# NOTE: the Windows location variables above (USERPROFILE/HOMEDRIVE/HOMEPATH)
-# are intentionally left pointing at the real profile. Native Windows was not
-# testable where this change was made, and this script's own comment records
-# that dropping those breaks collection there. POSIX runs are isolated by the
-# HOME below; isolating native Windows is deliberately left as follow-up
-# rather than guessed at.
+# NOTE: on native Windows, POSIX HOME isolation alone doesn't cover
+# Path.home() -- CPython resolves that from USERPROFILE there. Point
+# USERPROFILE at the same isolated directory so a native Windows run gets the
+# same protection this HOME override already gives POSIX (stopping writes
+# into the real ~/.local/bin, ~/.npm). Only touched when USERPROFILE was
+# actually set to begin with, so a POSIX run stays byte-for-byte unchanged.
+# Native Windows was not testable where this was written; verification
+# belongs on the CI lane's windows_only jobs, not asserted here.
 HERMES_TEST_HOME="${HERMES_TEST_HOME:-$HOME/.cache/hermes-test-home}"
 mkdir -p "$HERMES_TEST_HOME"
+if [ -n "${USERPROFILE:-}" ]; then
+  WIN_ENV+=("USERPROFILE=$HERMES_TEST_HOME")
+fi
 # Seed a git identity once. An absent ~/.gitconfig is a behaviour change, not
 # a no-op, for the tests that shell out to git.
 if [ ! -f "$HERMES_TEST_HOME/.gitconfig" ]; then
