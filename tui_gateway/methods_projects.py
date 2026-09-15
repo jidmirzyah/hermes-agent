@@ -129,11 +129,14 @@ def _(rid, params, pdb, conn) -> dict:
 
 
 def _non_workspace_dirs() -> set[str]:
-    """Never-a-workspace dirs: ``/``, the user's home, the dir homes live in, plus both POSIX
-    spellings on every host (remote shells hand back Linux paths; promoting one mints a
-    catch-all project)."""
+    """Never-a-workspace dirs: ``/``, the user's home, the dir homes live in, the OS temp
+    root, plus both POSIX spellings on every host (remote shells hand back Linux paths;
+    promoting one mints a catch-all project). The temp root matters because a stray
+    ``.git`` directly under it (however it got there) must never turn the whole temp
+    filesystem into a discovered "project" for every session whose cwd lives under it."""
+    import tempfile
     home = os.path.realpath(os.path.expanduser("~"))
-    candidates = (os.sep, home, os.path.dirname(home), "/home", "/Users")
+    candidates = (os.sep, home, os.path.dirname(home), "/home", "/Users", tempfile.gettempdir())
     return {os.path.normcase(os.path.realpath(path)) for path in candidates if path}
 
 
@@ -286,7 +289,10 @@ def _discover_repos_payload(
         agg = _agg(root)
         agg["sessions"] += int(row.get("sessions") or 0)
         agg["last_active"] = max(agg["last_active"], float(row.get("last_active") or 0))
-    if backfill:
+    # A read-only handle (foreign-profile RPC) must not attempt the persistence write: it would
+    # raise and be swallowed here, silently dropping the backfill. That profile's own gateway
+    # backfills on its own refreshes.
+    if backfill and not getattr(db, "read_only", False):
         try:
             db.backfill_repo_roots(cwd_to_root)
         except Exception:
