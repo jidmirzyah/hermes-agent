@@ -43,10 +43,15 @@ G1_TESTS = (
 
 # G2 -- No sudo password is ever stored or piped anywhere.
 # Lives in: tools/terminal_tool.py's _transform_sudo_command, tools/approval.py's
-# _check_sudo_stdin_guard / _SUDO_STDIN_RE, hermes_cli/config.py's SUDO_PASSWORD env-key handling.
+# _check_sudo_stdin_guard / _SUDO_STDIN_RE, hermes_cli/config.py's SUDO_PASSWORD env-key handling,
+# and (added 2026-09-15, DRIFTWATCH Step 2) tui_gateway/contracts -- a clean, non-conflicting
+# upstream addition reintroduced a "sudo" wire-request contract the same day this gate was first
+# written, five days before this test was added to catch it. See the structural sweep below too:
+# a curated test list is always one manifestation behind however this exclusion next comes back.
 G2_TESTS = (
     "tests/tools/test_terminal_tool.py",
     "tests/tools/test_approval.py",
+    "tests/tui_gateway/contracts/test_generated.py",
 )
 
 # G3 -- Family identity resolution is platform-ID-only, never self-identification.
@@ -106,6 +111,45 @@ TEST_DRIVEN_GUARANTEES = {
     "G5": G5_TESTS,
 }
 
+# Standing-Exclusion structural sweep (DRIFTWATCH Step 2, 2026-09-15) -- not one of G1-G8
+# individually, same spirit as G2 but mechanical rather than test-file-based. A curated test-file
+# list is always one manifestation behind however the exclusion next gets reintroduced: confirmed
+# via a full execution-log history read that it has recurred via at least 6 distinct mechanisms
+# across 5 weeks (stray references, an entangled feature hunk, a wholesale-checkout data loss, a
+# wire contract, a new upstream test file). Two tiers, like G1-G5 vs G6/G7 below: hard-gated
+# patterns that should categorically never exist anywhere in the tree (any match is a real,
+# unambiguous finding), and a reported-only count for the one pattern that legitimately appears in
+# the fork's OWN blocklist/detection code and needs a human read rather than a mechanical gate.
+# File-existence check: unambiguous, the module must categorically never be present, unlike a
+# textual mention (this file's own docstring at tools/terminal_tool.py referenced the module name
+# in a "companion modules" list years after the module itself was excluded and deleted -- found
+# and fixed alongside this sweep, 2026-09-15 -- so a plain grep for the name is too broad).
+EXCLUSION_HARD_GATE_FILES = (
+    ("tools/terminal_tool_sudo.py", "the excluded sudo-password-piping module must not exist"),
+)
+
+# Pattern check: the exact shape of a real reintroduction, not a name mention. Still narrow enough
+# that a docstring/comment would need to reproduce the literal call syntax to false-positive, which
+# is an acceptable residual risk against catching a real reintroduction automatically.
+EXCLUSION_HARD_GATE_PATTERNS = (
+    (r'server_request\(\s*["\']sudo["\']', 'a "sudo" wire-request contract entry (found once already, 2026-09-15)'),
+)
+
+
+def _run_exclusion_sweep() -> tuple[bool, list[str]]:
+    findings = []
+    for rel_path, desc in EXCLUSION_HARD_GATE_FILES:
+        if (REPO_ROOT / rel_path).exists():
+            findings.append(f"{desc}: {rel_path} exists")
+    for pattern, desc in EXCLUSION_HARD_GATE_PATTERNS:
+        result = subprocess.run(
+            ["git", "grep", "-nE", pattern, "--", ".",
+             ":(exclude)scripts/guarantee_gate.py", ":(exclude)Hermes/Governance/**"],
+            cwd=REPO_ROOT, capture_output=True, text=True)
+        if result.returncode == 0 and result.stdout.strip():
+            findings.append(f"{desc}:\n{result.stdout.strip()}")
+    return (not findings), findings
+
 # G6 -- This job's own execution integrity (cron/jobs.py, cron/scheduler.py,
 # cron/scheduler_provider.py). Policy rule, not a test: the job cannot safely evaluate changes to
 # the mechanism it itself runs on, regardless of whether tests for it currently pass.
@@ -159,6 +203,26 @@ def main() -> int:
         print(f"[{marker}] {name}{note}")
         if not passed:
             print(f"        {detail}")
+
+    print("\n=== Standing-Exclusion structural sweep (hard-gated) ===")
+    sweep_ok, sweep_findings = _run_exclusion_sweep()
+    ok = ok and sweep_ok
+    if sweep_ok:
+        print("[PASS] no hard-gated exclusion patterns found in the tree")
+    else:
+        print("[FAIL] found reintroduced exclusion pattern(s):")
+        for finding in sweep_findings:
+            print(f"    {finding}")
+
+    print("\n=== SUDO_PASSWORD bare-string occurrences (reported, not gated -- this string")
+    print("    legitimately appears in the fork's own blocklist/detection code) ===")
+    sp_result = subprocess.run(["git", "grep", "-c", "SUDO_PASSWORD"],
+                                cwd=REPO_ROOT, capture_output=True, text=True)
+    sp_lines = sp_result.stdout.strip().splitlines() if sp_result.stdout.strip() else []
+    print(f"    {len(sp_lines)} file(s) mention SUDO_PASSWORD -- read each if this count or the")
+    print("    file list changed since the last known-good run:")
+    for line in sp_lines:
+        print(f"    {line}")
 
     print("\n=== G6: policy check (not test-driven) ===")
     print(f"    If this change touches any of {G6_FILES}, it flags for review regardless of")

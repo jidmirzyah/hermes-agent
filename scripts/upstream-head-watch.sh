@@ -15,6 +15,15 @@ set -euo pipefail
 GIT="git -C /home/jiddy/.hermes/hermes-agent"
 HEARTBEAT="/home/jiddy/.hermes/scripts/.upstream-head-watch-last-success"
 
+# DRIFTWATCH (2026-09-15): a gap this size has, twice now (08-24->08-29,
+# 09-14->09-15), gone from routine to a multi-hour manual reconciliation
+# before anyone treated a nightly report as urgent. Not a new mechanism --
+# same unconditional nightly report as before, just an explicit marker so
+# a big-gap night doesn't read the same as a small one. Tune later if this
+# number turns out wrong in either direction; it is not load-bearing to
+# anything else.
+URGENT_THRESHOLD=300
+
 fetch_err="$(mktemp)"
 log_err="$(mktemp)"
 trap 'rm -f "$fetch_err" "$log_err"' EXIT
@@ -57,7 +66,11 @@ upstream_head_short="$($GIT rev-parse --short upstream/main)"
 local_head_full="$($GIT rev-parse HEAD)"
 local_head_short="$($GIT rev-parse --short HEAD)"
 
-printf 'Hermes upstream head watch: local checkout (HEAD) is %s commit(s) behind upstream/main.\n' "$head_behind"
+if (( head_behind >= URGENT_THRESHOLD )); then
+  printf 'Hermes upstream head watch [URGENT -- %s+ commits, this has previously compounded into a multi-hour reconciliation]: local checkout (HEAD) is %s commit(s) behind upstream/main.\n' "$URGENT_THRESHOLD" "$head_behind"
+else
+  printf 'Hermes upstream head watch: local checkout (HEAD) is %s commit(s) behind upstream/main.\n' "$head_behind"
+fi
 printf '(origin/main..upstream/main: %s, upstream/main..HEAD: %s)\n\n' "$origin_behind" "$ahead_of_upstream"
 printf 'upstream/main: %s (%s)\n' "$upstream_head_short" "$upstream_head_full"
 printf 'local HEAD:    %s (%s)\n\n' "$local_head_short" "$local_head_full"
