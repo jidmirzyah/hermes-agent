@@ -1,32 +1,6 @@
-"""Regression tests for sudo command pass-through and terminal tool schema."""
+"""Regression tests for terminal tool schema and workdir validation."""
 
 import tools.terminal_tool as terminal_tool
-
-
-def test_transform_sudo_command_is_always_a_pass_through(monkeypatch):
-    """Hermes no longer pipes a sudo password into commands.
-
-    The sudo-password mechanism (SUDO_PASSWORD env var, interactive prompt,
-    session cache) was removed as a security fix — it was a process-global
-    secret every agent-spawned command could read. _transform_sudo_command
-    now returns every command unchanged and always reports no stdin to
-    pipe, regardless of whether the command mentions "sudo" in passing, is
-    a real sudo invocation, or SUDO_PASSWORD happens to be set.
-    """
-    monkeypatch.setenv("SUDO_PASSWORD", "testpass")
-
-    commands = [
-        "rg --line-number --no-heading --with-filename 'sudo' . | head -n 20",
-        "printf '%s\\n' sudo",
-        "grep -n sudo README.md",
-        "sudo apt install -y ripgrep",
-        "sudo true",
-        "sudo a; sudo b",
-    ]
-    for command in commands:
-        transformed, sudo_stdin = terminal_tool._transform_sudo_command(command)
-        assert transformed == command
-        assert sudo_stdin is None
 
 
 def test_terminal_schema_advertises_persistent_env_state():
@@ -61,9 +35,3 @@ def test_validate_workdir_still_blocks_metachars_in_unicode_paths():
     assert terminal_tool._validate_workdir("/tmp/テスト\nwhoami")
     assert terminal_tool._validate_workdir("/tmp/项目|cat /etc/passwd")
     assert terminal_tool._validate_workdir("/tmp/ü\x00ber")
-
-# NOTE (reconcile/upstream-db658668-salvage): upstream's
-# test_count_real_sudo_invocations_ignores_mentions was dropped here — it
-# exercises _count_real_sudo_invocations, part of the SUDO_PASSWORD-based
-# sudo mechanism this fork permanently excludes (Update & Merge Policy
-# Exclusion 1). That helper does not exist in this fork's terminal_tool.py.

@@ -166,10 +166,12 @@ _SUDO_STDIN_RE = re.compile(
 
 
 def _check_sudo_stdin_guard(command: str) -> tuple:
-    """Detect ``sudo -S`` -> (is_blocked, description). Unconditional: Hermes never sets
-    SUDO_PASSWORD or injects ``-S`` itself (Standing Exclusion 3), so any ``sudo -S`` in a
-    command is always the LLM piping a guessed password via stdin — never a legitimate case
-    to exempt."""
+    """Detect ``sudo -S`` -> (is_blocked, description). This guard runs on the LLM's original,
+    untransformed command text, before Hermes's own sudo handling (which injects ``-S`` and pipes
+    a real password downstream, in the environment-backend layer, only after approval already
+    cleared) ever sees it. So any ``sudo -S`` appearing HERE is always the LLM itself writing it
+    into the command it's asking to run — piping a guessed password via stdin — never Hermes's own
+    transform, and never a legitimate case to exempt."""
     if _SUDO_STDIN_RE.search(_normalize_command_for_detection(command).lower()):
         return (True, "sudo password guessing via stdin (sudo -S)")
     return (False, None)

@@ -1,29 +1,32 @@
 #!/usr/bin/env python3
-"""Fast, named test set for the G1-G8 guarantees in Hermes/Governance/Update & Merge Policy.md.
+"""Fast, named test set for the canonical guarantees in Hermes/Governance/Update & Merge Policy.md.
 
 TIERSYNC Step 7: run this alongside the existing behavior-level guarantee review, not instead of
 it, until it has caught something real (see the TIERSYNC plan, Step 7). A gate that is too loose
 manufactures false confidence -- every file below was individually read to confirm it actually
 asserts the guarantee it is listed against, not picked by filename resemblance.
 
-G1-G5 are test-driven and this script runs them. G6 and G8 are structural/policy checks that
-cannot be reduced to a standalone pytest run against a snapshot of the tree (they are about
-whether a *proposed change* touches a mechanism or applies cleanly, not a property of the tree at
-rest) -- this script prints what to check by hand instead of faking a pass/fail. G7 runs `npm
-audit` and reports the current count; it cannot determine "new" vulnerability without a stored
-baseline, so it is reported, not gated.
+G1, G3, G4, G5 are test-driven and this script runs them. (G2 -- "no sudo password is ever stored
+or piped" -- was removed 2026-09-16, HOLDFAST: the fork stopped excluding upstream's sudo-password
+subsystem, replacing the code-level exclusion with a SOUL.md behavioral guard instead. See the
+HOLDFAST plan for the full reasoning.) G6 and G8 are structural/policy checks that cannot be
+reduced to a standalone pytest run against a snapshot of the tree (they are about whether a
+*proposed change* touches a mechanism or applies cleanly, not a property of the tree at rest) --
+this script prints what to check by hand instead of faking a pass/fail. G7 runs `npm audit` and
+reports the current count; it cannot determine "new" vulnerability without a stored baseline, so it
+is reported, not gated.
 
 Canonical guarantee text: read Hermes/Governance/Update & Merge Policy.md live, every run -- this
-script's file lists are a snapshot verified against it on 2026-09-14 and will drift as the tree
-changes.
+script's file lists are a snapshot verified against it on 2026-09-14 (updated 2026-09-16) and will
+drift as the tree changes.
 
 Known gap: G5 ("config/skill loading integrity") has no single test file written specifically to
-assert it, unlike G1-G4. The 30 files below are every test_config*.py / *config_migration*.py file
-in the tree as of this writing -- broad coverage of config parsing/loading generally, not a
+assert it, unlike G1/G3/G4. The 30 files below are every test_config*.py / *config_migration*.py
+file in the tree as of this writing -- broad coverage of config parsing/loading generally, not a
 guarantee-specific test suite. Recommended follow-up: a dedicated test asserting the family
 allowlist / group_allow_from / obsidian-vault-governance load path specifically.
 
-Exit 0 if every G1-G5 test file passes. Exit 1 otherwise. Run:
+Exit 0 if every test-driven guarantee's test file passes. Exit 1 otherwise. Run:
   uv run python3 scripts/guarantee_gate.py
 """
 from __future__ import annotations
@@ -39,19 +42,6 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # check in hermes_cli/main.py's update path, hermes update pending/approve/reject/approval wiring.
 G1_TESTS = (
     "tests/tools/test_update_approval.py",
-)
-
-# G2 -- No sudo password is ever stored or piped anywhere.
-# Lives in: tools/terminal_tool.py's _transform_sudo_command, tools/approval.py's
-# _check_sudo_stdin_guard / _SUDO_STDIN_RE, hermes_cli/config.py's SUDO_PASSWORD env-key handling,
-# and (added 2026-09-15, DRIFTWATCH Step 2) tui_gateway/contracts -- a clean, non-conflicting
-# upstream addition reintroduced a "sudo" wire-request contract the same day this gate was first
-# written, five days before this test was added to catch it. See the structural sweep below too:
-# a curated test list is always one manifestation behind however this exclusion next comes back.
-G2_TESTS = (
-    "tests/tools/test_terminal_tool.py",
-    "tests/tools/test_approval.py",
-    "tests/tui_gateway/contracts/test_generated.py",
 )
 
 # G3 -- Family identity resolution is platform-ID-only, never self-identification.
@@ -105,50 +95,10 @@ G5_TESTS = (
 
 TEST_DRIVEN_GUARANTEES = {
     "G1": G1_TESTS,
-    "G2": G2_TESTS,
     "G3": G3_TESTS,
     "G4": G4_TESTS,
     "G5": G5_TESTS,
 }
-
-# Standing-Exclusion structural sweep (DRIFTWATCH Step 2, 2026-09-15) -- not one of G1-G8
-# individually, same spirit as G2 but mechanical rather than test-file-based. A curated test-file
-# list is always one manifestation behind however the exclusion next gets reintroduced: confirmed
-# via a full execution-log history read that it has recurred via at least 6 distinct mechanisms
-# across 5 weeks (stray references, an entangled feature hunk, a wholesale-checkout data loss, a
-# wire contract, a new upstream test file). Two tiers, like G1-G5 vs G6/G7 below: hard-gated
-# patterns that should categorically never exist anywhere in the tree (any match is a real,
-# unambiguous finding), and a reported-only count for the one pattern that legitimately appears in
-# the fork's OWN blocklist/detection code and needs a human read rather than a mechanical gate.
-# File-existence check: unambiguous, the module must categorically never be present, unlike a
-# textual mention (this file's own docstring at tools/terminal_tool.py referenced the module name
-# in a "companion modules" list years after the module itself was excluded and deleted -- found
-# and fixed alongside this sweep, 2026-09-15 -- so a plain grep for the name is too broad).
-EXCLUSION_HARD_GATE_FILES = (
-    ("tools/terminal_tool_sudo.py", "the excluded sudo-password-piping module must not exist"),
-)
-
-# Pattern check: the exact shape of a real reintroduction, not a name mention. Still narrow enough
-# that a docstring/comment would need to reproduce the literal call syntax to false-positive, which
-# is an acceptable residual risk against catching a real reintroduction automatically.
-EXCLUSION_HARD_GATE_PATTERNS = (
-    (r'server_request\(\s*["\']sudo["\']', 'a "sudo" wire-request contract entry (found once already, 2026-09-15)'),
-)
-
-
-def _run_exclusion_sweep() -> tuple[bool, list[str]]:
-    findings = []
-    for rel_path, desc in EXCLUSION_HARD_GATE_FILES:
-        if (REPO_ROOT / rel_path).exists():
-            findings.append(f"{desc}: {rel_path} exists")
-    for pattern, desc in EXCLUSION_HARD_GATE_PATTERNS:
-        result = subprocess.run(
-            ["git", "grep", "-nE", pattern, "--", ".",
-             ":(exclude)scripts/guarantee_gate.py", ":(exclude)Hermes/Governance/**"],
-            cwd=REPO_ROOT, capture_output=True, text=True)
-        if result.returncode == 0 and result.stdout.strip():
-            findings.append(f"{desc}:\n{result.stdout.strip()}")
-    return (not findings), findings
 
 # G6 -- This job's own execution integrity (cron/jobs.py, cron/scheduler.py,
 # cron/scheduler_provider.py). Policy rule, not a test: the job cannot safely evaluate changes to
@@ -194,7 +144,7 @@ def _run_npm_audit(rel_dir: str) -> str:
 
 def main() -> int:
     ok = True
-    print("=== G1-G5: test-driven guarantees ===")
+    print("=== G1, G3, G4, G5: test-driven guarantees ===")
     for name, files in TEST_DRIVEN_GUARANTEES.items():
         passed, detail = _run_pytest(files)
         ok = ok and passed
@@ -203,26 +153,6 @@ def main() -> int:
         print(f"[{marker}] {name}{note}")
         if not passed:
             print(f"        {detail}")
-
-    print("\n=== Standing-Exclusion structural sweep (hard-gated) ===")
-    sweep_ok, sweep_findings = _run_exclusion_sweep()
-    ok = ok and sweep_ok
-    if sweep_ok:
-        print("[PASS] no hard-gated exclusion patterns found in the tree")
-    else:
-        print("[FAIL] found reintroduced exclusion pattern(s):")
-        for finding in sweep_findings:
-            print(f"    {finding}")
-
-    print("\n=== SUDO_PASSWORD bare-string occurrences (reported, not gated -- this string")
-    print("    legitimately appears in the fork's own blocklist/detection code) ===")
-    sp_result = subprocess.run(["git", "grep", "-c", "SUDO_PASSWORD"],
-                                cwd=REPO_ROOT, capture_output=True, text=True)
-    sp_lines = sp_result.stdout.strip().splitlines() if sp_result.stdout.strip() else []
-    print(f"    {len(sp_lines)} file(s) mention SUDO_PASSWORD -- read each if this count or the")
-    print("    file list changed since the last known-good run:")
-    for line in sp_lines:
-        print(f"    {line}")
 
     print("\n=== G6: policy check (not test-driven) ===")
     print(f"    If this change touches any of {G6_FILES}, it flags for review regardless of")
@@ -239,7 +169,7 @@ def main() -> int:
     print("    Meaningful only during an active merge trial. Check by hand:")
     print("    git grep -n '^<<<<<<< \\|^>>>>>>> ' -- . and zero unmerged paths in git status.")
 
-    print(f"\n=== Result: {'PASS' if ok else 'FAIL'} (G1-G5 test-driven guarantees) ===")
+    print(f"\n=== Result: {'PASS' if ok else 'FAIL'} (G1/G3/G4/G5 test-driven guarantees) ===")
     if not ok:
         return 1
     return 0
