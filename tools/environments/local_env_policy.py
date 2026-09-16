@@ -38,8 +38,8 @@ _STATIC_PROVIDER_ENV_BLOCKLIST = frozenset({
     "DAYTONA_API_KEY", "GATEWAY_RELAY_ID", "GATEWAY_RELAY_SECRET",
     "GATEWAY_RELAY_DELIVERY_KEY", "VERCEL_OIDC_TOKEN", "VERCEL_TOKEN",
     "VERCEL_PROJECT_ID", "VERCEL_TEAM_ID",
-    # Belt-and-braces: the sudo-password-piping mechanism was removed and nothing reads this
-    # anymore, but a stale value from a user's .env must never reach a spawned command's env.
+    # Belt-and-braces: Hermes itself may read SUDO_PASSWORD, but a spawned child
+    # process/skill should never inherit it -- least-privilege, not exclusion.
     "SUDO_PASSWORD",
 })
 
@@ -213,9 +213,8 @@ _ALWAYS_STRIP_KEYS: frozenset[str] = frozenset({
     "HASS_TOKEN", "EMAIL_PASSWORD", "HERMES_DASHBOARD_SESSION_TOKEN",
     # Remote-compute / infrastructure secrets
     "MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET", "DAYTONA_API_KEY",
-    # Hermes no longer reads SUDO_PASSWORD anywhere (the sudo-password-piping
-    # mechanism was removed as a process-global-secret risk, Standing Exclusion 3).
-    # Stripped here too, belt-and-braces, in case a stale value is still sitting
-    # in .env or the shell environment.
+    # Hermes itself may read SUDO_PASSWORD for its own sudo-password prompting,
+    # but a spawned child process/skill should never inherit it -- stripped here
+    # as least-privilege scoping, independent of whether the top-level agent uses it.
     "SUDO_PASSWORD",
 })

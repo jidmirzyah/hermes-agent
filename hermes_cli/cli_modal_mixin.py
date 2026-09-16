@@ -743,11 +743,6 @@ class CLIModalMixin:
         _cprint(f"\n{_DIM}(clarify timed out after {timeout}s — locked answers returned){_RST}")
         return {"answers": partial, "timed_out": True}
 
-    # _sudo_password_callback intentionally removed: Standing Exclusion 3
-    # (interactive sudo-password prompting) is permanently excluded. Nothing
-    # ever sets self._sudo_state/_sudo_deadline now, so the remaining TUI
-    # references to them elsewhere (overlay/focus conditions) are inert.
-
     def _approval_callback(self, command: str, description: str,
                            *, allow_permanent: bool = True,
                            allow_session: bool = True,

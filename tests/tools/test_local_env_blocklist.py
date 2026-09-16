@@ -229,13 +229,13 @@ class TestProviderEnvBlocklist:
             assert var not in result_env, f"{var} leaked into subprocess env"
 
     def test_sudo_password_is_stripped(self):
-        """SUDO_PASSWORD must not leak into subprocess env even though it's
-        no longer read anywhere (the sudo-password-piping mechanism was
-        removed). It used to arrive in _HERMES_PROVIDER_ENV_BLOCKLIST via
-        the OPTIONAL_ENV_VARS registry loop (category="setting",
-        password=True); that config_defaults.py entry is gone along with
-        the mechanism, so SUDO_PASSWORD is now hardcoded into the static
-        blocklist instead — this is the end-to-end proof that still works."""
+        """SUDO_PASSWORD must never leak into a spawned subprocess/skill
+        environment, even though Hermes's own top-level process legitimately
+        reads it for sudo-password prompting — least-privilege scoping, not
+        exclusion. Hardcoded directly into the static blocklist (may also
+        arrive via the OPTIONAL_ENV_VARS registry loop once that
+        config_defaults.py entry is restored; harmless duplication either
+        way) — this is the end-to-end proof that stripping still works."""
         result_env = _run_with_env(extra_os_env={
             "SUDO_PASSWORD": "leaked-sudo-secret",
         })
@@ -1474,9 +1474,9 @@ class TestBlocklistCoverage:
         )
 
     def test_sudo_password_in_blocklist(self):
-        """Belt-and-braces: SUDO_PASSWORD stays in the blocklist even though
-        it's no longer read anywhere, so a stale value never reaches a
-        spawned command's environment."""
+        """Belt-and-braces: SUDO_PASSWORD stays in the blocklist regardless
+        of whether Hermes's own top-level process reads it, so it never
+        reaches a spawned command's environment either way."""
         assert "SUDO_PASSWORD" in _HERMES_PROVIDER_ENV_BLOCKLIST
 
     def test_extra_auth_vars_covered(self):

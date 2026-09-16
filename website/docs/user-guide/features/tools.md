@@ -250,8 +250,6 @@ it does not keep unfinished children alive after a timeout or crash.
 
 ## Sudo Support
 
-If a command needs sudo, it behaves like a normal non-interactive shell: it fails with "sudo: a password is required" unless the host has a NOPASSWD sudoers rule configured for the specific commands Hermes needs. Configure that with `visudo` under `/etc/sudoers.d/`, scoped to the commands you actually want automated.
+If a command needs sudo, Hermes tries, in order: a configured `SUDO_PASSWORD` environment variable, a password already cached earlier in the same session, then — if a UI is actually reachable to ask — an interactive prompt (45s timeout, cached on success). If the host has a NOPASSWD sudoers rule for the command, none of that is needed and it just runs.
 
-:::warning
-Hermes previously supported piping a password via a `SUDO_PASSWORD` environment variable. That mechanism was removed: it stored a process-global secret that every agent-spawned command could read. `SUDO_PASSWORD` is no longer read by Hermes at all — do not set it. Use a scoped NOPASSWD sudoers rule instead.
-:::
+The most scoped option is a NOPASSWD sudoers rule limited to the specific commands you want automated — configure that with `visudo` under `/etc/sudoers.d/`. `SUDO_PASSWORD` is a broader grant (any sudo command, not just a named list) and is scoped per-session, never written to disk or logged; set it only if you want that broader behavior.

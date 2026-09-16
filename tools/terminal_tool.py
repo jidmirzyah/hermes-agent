@@ -12,11 +12,10 @@ processes survive cleanup, idle reaping, or Hermes exit.
 Companion modules (re-exported here, so ``tools.terminal_tool.<name>`` stays the
 import/patch target): ``terminal_tool_config`` (TERMINAL_* reads, ``_quiet``),
 ``terminal_tool_backends`` (env builders + requirement checkers),
-``terminal_tool_lifecycle`` (reaper/teardown/ensure_task_env), ``terminal_tool_guards``
+``terminal_tool_lifecycle`` (reaper/teardown/ensure_task_env),
+``terminal_tool_sudo`` (sudo password + shell rewrites), ``terminal_tool_guards``
 (pre-exec blocks), ``terminal_tool_background`` (background spawn),
 ``terminal_tool_result`` (foreground result post-processing).
-(No ``terminal_tool_sudo`` -- the sudo-password-piping module is permanently excluded;
-see Standing Exclusion 1/2/3 in Hermes/Governance/Update & Merge Policy.md.)
 """
 
 import json

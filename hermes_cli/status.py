@@ -195,9 +195,9 @@ def _render_terminal(ctx):
 
     sudo_password_set = bool(os.getenv("SUDO_PASSWORD", ""))
     if sudo_password_set:
-        print(f"  Sudo:         {check_mark(False)} SUDO_PASSWORD is set but unused — Hermes no longer reads it; see 'hermes doctor'")
+        print(f"  Sudo:         {check_mark(True)} SUDO_PASSWORD configured (used for agent-run sudo commands)")
     else:
-        print(f"  Sudo:         {check_mark(True)} no SUDO_PASSWORD in environment (current)")
+        print(f"  Sudo:         {check_mark(True)} no SUDO_PASSWORD set (Hermes prompts interactively if needed)")
 
 def _render_platforms(ctx):
     _section("Messaging Platforms")

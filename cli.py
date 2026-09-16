@@ -3029,40 +3029,11 @@ class HermesCLI(CLIProcessNotificationsMixin, CLIAgentSetupMixin, CLICommandsMix
             _set_cu_cb(self._computer_use_approval_callback)
         except ImportError:
             pass
-        self._warn_if_sudo_password_configured()
         from agent.vault_backends.unlock import set_code_prompt_callback, set_save_login_prompt_callback, set_unlock_prompt_callback
         set_unlock_prompt_callback(self._vault_unlock_callback)
         set_save_login_prompt_callback(self._vault_save_login_callback)
         set_code_prompt_callback(self._vault_code_callback)
         self._tool_callbacks_installed = True
-
-    def _warn_if_sudo_password_configured(self) -> None:
-        """One-shot startup warning when a leftover SUDO_PASSWORD is set.
-
-        Hermes removed the sudo-password-piping mechanism: SUDO_PASSWORD
-        was a process-global secret that every agent-spawned command could
-        read from its own environment. It is no longer read anywhere, so a
-        value left in .env or the shell environment is inert — but worth
-        flagging so it gets cleaned up rather than sitting there unused.
-        """
-        if "SUDO_PASSWORD" not in os.environ:
-            return
-        from tools.terminal_tool import _sudo_nopasswd_works
-
-        if _sudo_nopasswd_works():
-            _cprint(
-                f"{_DIM}Note: SUDO_PASSWORD is set but no longer used by Hermes — "
-                f"and sudo already works here without a password (NOPASSWD is "
-                f"configured), so it's safe to remove.{_RST}"
-            )
-        else:
-            _cprint(
-                f"{_DIM}Note: SUDO_PASSWORD is set but no longer used by Hermes — "
-                f"the password-piping mechanism was removed as a security fix. "
-                f"For agent-run sudo commands to work, add a scoped NOPASSWD rule "
-                f"for this user instead, e.g. via "
-                f"`sudo visudo -f /etc/sudoers.d/hermes`.{_RST}"
-            )
 
     def _ensure_tirith_security(self) -> None:
         """Check tirith availability once before tools can run terminal commands."""

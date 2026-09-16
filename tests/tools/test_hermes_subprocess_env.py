@@ -124,10 +124,11 @@ class TestTierInvariants:
         assert {"MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET", "DAYTONA_API_KEY"} <= _ALWAYS_STRIP_KEYS
 
     def test_tier1_covers_sudo_password(self):
-        """Belt-and-braces: SUDO_PASSWORD is no longer read anywhere (the
-        sudo-password-piping mechanism was removed), but a stale value left
-        in .env or the shell environment must still never reach a spawned
-        command's environment."""
+        """Belt-and-braces: even though Hermes's own top-level process
+        legitimately reads SUDO_PASSWORD for sudo-password prompting, a
+        spawned command's environment must still never inherit it —
+        least-privilege scoping, independent of whether the feature is in
+        use."""
         assert "SUDO_PASSWORD" in _ALWAYS_STRIP_KEYS
 
 
