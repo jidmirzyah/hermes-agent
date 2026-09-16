@@ -16,6 +16,7 @@ Layout:
   Execution Logs/.last-rotation-date - window-boundary state
   Execution Logs/rotation-log.md     - breadcrumb of every event
 """
+import importlib.util
 import os
 import re
 import sys
@@ -26,6 +27,20 @@ BASE = Path(os.environ.get(
     "EXECUTION_LOG_BASE",
     "/home/jiddy/Obsidian Core/Hermes/Execution Logs",
 ))
+# Two levels up from .../Hermes/Execution Logs is the vault root.
+VAULT_ROOT = BASE.parent.parent
+
+_scripts_dir = Path(__file__).resolve().parent
+if str(_scripts_dir) not in sys.path:
+    sys.path.insert(0, str(_scripts_dir))
+_spec = importlib.util.spec_from_file_location(
+    "_vault_conflict_lib", _scripts_dir / "_vault_conflict_lib.py"
+)
+assert _spec is not None and _spec.loader is not None
+_vault_conflict_lib = importlib.util.module_from_spec(_spec)
+sys.modules["_vault_conflict_lib"] = _vault_conflict_lib
+_spec.loader.exec_module(_vault_conflict_lib)
+
 PRIMARY = BASE / "Execution Log.md"
 WEEKLY_DIR = BASE / "Weekly"
 MONTHS_DIR = BASE / "Months"
@@ -203,6 +218,18 @@ def main() -> int:
     if not PRIMARY.exists():
         print(f"ERROR: primary log not found at {PRIMARY}", file=sys.stderr)
         return 1
+
+    # SYNCGUARD Step 3: self-heal any pending sync-conflict for the primary
+    # file before reading it. Rotation is a third, unguarded writer to
+    # Execution Log.md (found during the SYNCGUARD investigation) -- without
+    # this, a conflict landing near the weekly rotation window would both
+    # slip past detection and make later manual reconciliation harder once
+    # entries have already moved into Weekly/.
+    for conflict_path in _vault_conflict_lib.find_conflicts(VAULT_ROOT):
+        if _vault_conflict_lib.canonical_path_for(conflict_path) == PRIMARY:
+            outcome = _vault_conflict_lib.reconcile(conflict_path, VAULT_ROOT)
+            if outcome is not None:
+                append_event(f"PRE-ROTATION RECONCILE | {outcome.message}")
 
     header, entries_body = split_header_and_entries(PRIMARY.read_text(encoding="utf-8"))
     last_boundary = read_last_rotation_date()
