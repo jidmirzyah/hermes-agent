@@ -58,7 +58,7 @@ for required_dir in "${required_source_dirs[@]}"; do
 done
 
 stamp="$(date +%Y-%m-%d)"
-work_dir="$(mktemp -d)"
+work_dir="$(mktemp -d -p /var/tmp)"
 trap 'rm -rf "$work_dir"' EXIT
 
 staging="$work_dir/hermes-backup-$stamp"
