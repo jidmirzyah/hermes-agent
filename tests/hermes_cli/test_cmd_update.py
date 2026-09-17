@@ -90,24 +90,14 @@ def _patch_gateway_discovery():
     Discovery returning nothing makes the phase a clean no-op for every test
     in this module (none of them assert on gateway restarts).
     """
-    # _cmd_update_impl calls _purge_stale_hermes_modules() (to pick up
-    # freshly-pulled gateway source on a real update) immediately before
-    # re-importing hermes_cli.gateway — that re-import creates a fresh
-    # module object, silently discarding the three patches above and
-    # reaching the real, unmocked gateway. No-op it for tests; see
-    # hermes_cli.update_cmd._m()'s docstring for this patch surface.
-    # _cmd_update_impl also calls _reload_config_modules() after a real pull,
-    # which force-reloads hermes_cli.dashboard_procs from disk to pick up
-    # post-update code — that reload creates a fresh module object, breaking
-    # object-identity assumptions (e.g. test_lazy_command_exports.py's
-    # hermes_cli.main._scan_dashboard_processes is dashboard_procs.
-    # _scan_dashboard_processes check) for any test that runs later in the
-    # same pytest session. No-op it here too, same rationale as the purge.
+    # The stale-module-purge/reload layer this fixture used to no-op around
+    # (_purge_stale_hermes_modules, _reload_config_modules) was removed
+    # upstream (94ced1a2b2): `hermes update` now hands off to a freshly
+    # spawned interpreter running the pulled code instead of reloading
+    # modules in-process, so there is nothing left to purge or reload here.
     with patch("hermes_cli.gateway.find_gateway_pids", return_value=[]), \
          patch("hermes_cli.gateway.supports_systemd_services", return_value=False), \
-         patch("hermes_cli.gateway.find_profile_gateway_processes", return_value=[]), \
-         patch("hermes_cli.main._purge_stale_hermes_modules", lambda: None), \
-         patch("hermes_cli.update_cmd._reload_config_modules", lambda: None):
+         patch("hermes_cli.gateway.find_profile_gateway_processes", return_value=[]):
         yield
 
 
@@ -648,8 +638,6 @@ class TestCmdUpdateBranchFallback:
         with patch("shutil.which", return_value=None), patch(
             "subprocess.run"
         ) as mock_run, patch("builtins.input") as mock_input, patch(
-            "hermes_cli.update_cmd._reload_config_modules"
-        ), patch(
             "hermes_cli.config.get_missing_env_vars", return_value=["MISSING_KEY"]
         ), patch(
             "hermes_cli.config.get_missing_config_fields",
@@ -694,8 +682,6 @@ class TestCmdUpdateMigrationPrompt:
         with patch("shutil.which", return_value=None), patch(
             "subprocess.run"
         ) as mock_run, patch("builtins.input") as mock_input, patch(
-            "hermes_cli.update_cmd._reload_config_modules"
-        ), patch(
             "hermes_cli.config.get_missing_env_vars", return_value=[]
         ), patch(
             "hermes_cli.config.get_missing_config_fields", return_value=[]
@@ -782,8 +768,6 @@ class TestCmdUpdateMigrationPrompt:
         with patch("shutil.which", return_value=None), patch(
             "subprocess.run"
         ) as mock_run, patch("builtins.input", return_value="n"), patch(
-            "hermes_cli.update_cmd._reload_config_modules"
-        ), patch(
             "hermes_cli.config.get_missing_env_vars", return_value=env_items
         ), patch(
             "hermes_cli.config.get_missing_config_fields", return_value=cfg_items

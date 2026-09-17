@@ -223,6 +223,15 @@ def _current_session_profile() -> str:
     return get_session_env("HERMES_SESSION_PROFILE", "")
 
 
+def _get_sudo_password_callback():
+    return getattr(_callback_tls, "sudo_password", None)
+
+
+def set_sudo_password_callback(cb):
+    """Register the CLI's sudo password prompt callback (per-thread slot)."""
+    _callback_tls.sudo_password = cb
+
+
 def _get_approval_callback():
     return getattr(_callback_tls, "approval", None)
 
@@ -629,28 +638,12 @@ def _rewrite_compound_background(command: str) -> str:
     return result
 
 
-def _transform_sudo_command(command: str | None) -> tuple[str | None, str | None]:
-    """
-    Pass *command* through unchanged.
-
-    Hermes no longer pipes a sudo password into commands: the mechanism was
-    a process-global secret (SUDO_PASSWORD in os.environ, or an interactive
-    cache) that every agent-spawned command could potentially read, and the
-    fix was to remove it rather than harden it. `sudo` in an agent-run
-    command now behaves exactly like it would in a normal, non-interactive
-    shell — it fails with "sudo: a password is required" unless the host has
-    a NOPASSWD sudoers rule configured for the relevant commands (see
-    _sudo_nopasswd_works and _handle_sudo_failure's guidance).
-
-    Signature and return shape (transformed_command, sudo_stdin) are kept
-    for the environment callers (local/ssh/docker/singularity stdin-merge
-    paths, and the modal/daytona/vercel_sandbox embed paths) that still call
-    this as their single seam into sudo handling; sudo_stdin is now always
-    None.
-    """
-    if command is None:
-        return None, None
-    return command, None
+# _transform_sudo_command lives in tools/terminal_tool_sudo.py (the real
+# password-cache/prompt/rewrite implementation, restored 2026-09-17 when
+# HOLDFAST Step 4 adopted upstream's sudo module) -- re-exported here so
+# tools.terminal_tool._transform_sudo_command keeps resolving for existing
+# callers (see tools/environments/base.py) without changing every call site.
+from tools.terminal_tool_sudo import _transform_sudo_command  # noqa: F401
 
 
 # Environment classes now live in tools/environments/

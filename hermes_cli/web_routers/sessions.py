@@ -749,8 +749,8 @@ async def export_session_endpoint(session_id: str, profile: Optional[str] = None
     return StreamingResponse(_stream_export(), media_type="application/json")
 
 
-@manage_router.get("/api/sessions/{session_id}/timeline")
-async def get_session_timeline(session_id: str, limit: int = Query(200, ge=1, le=200)):
+@manage_router.get("/api/sessions/{session_id}/timeline/live")
+async def get_session_live_timeline(session_id: str, limit: int = Query(200, ge=1, le=200)):
     """Return the live, in-progress step timeline for a session.
 
     Ephemeral and session-scoped — NOT the persisted message history (see
@@ -759,6 +759,12 @@ async def get_session_timeline(session_id: str, limit: int = Query(200, ge=1, le
     this reflects gateway/CLI/desktop sessions running in a process other
     than this API server, including a step that is still mid-flight
     (``status: "running"``, ``duration: null``).
+
+    Renamed from .../timeline to .../timeline/live 2026-09-17 (upstream
+    reconciliation): upstream independently added its own persisted-history
+    route at the un-suffixed path, and the Desktop app already consumes
+    that one (limit/profile/after_row_id, next_cursor pagination) -- this
+    route moved rather than the actively-used one.
     """
     from tools.session_timeline import read_timeline
 

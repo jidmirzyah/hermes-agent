@@ -727,13 +727,6 @@ def _setup_keep_stash_test(monkeypatch, tmp_path):
     monkeypatch.setattr(
         "hermes_cli.gateway.find_profile_gateway_processes", lambda **kw: [], raising=False
     )
-    # _cmd_update_impl calls _purge_stale_hermes_modules() (to pick up
-    # freshly-pulled gateway source on a real update) immediately before
-    # re-importing hermes_cli.gateway — that re-import creates a fresh
-    # module object, silently discarding the find_gateway_pids/etc. patches
-    # above and reaching the real, unmocked gateway. No-op it for tests;
-    # see hermes_cli.update_cmd._m()'s docstring for this patch surface.
-    monkeypatch.setattr(hermes_main, "_purge_stale_hermes_modules", lambda: None, raising=False)
     return restore_calls, discard_calls, park_calls
 
 

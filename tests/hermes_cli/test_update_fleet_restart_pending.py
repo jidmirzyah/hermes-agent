@@ -99,7 +99,6 @@ def _patch_update_deps(monkeypatch, tmp_path, run_side_effect):
         hermes_main, "_stash_local_changes_if_needed", lambda *a, **k: None
     )
     monkeypatch.setattr(hermes_main, "_clear_bytecode_cache", lambda *a, **k: 0)
-    monkeypatch.setattr(hermes_main, "_purge_stale_hermes_modules", lambda: None)
     monkeypatch.setattr(
         hermes_main, "_record_bytecode_fingerprint", lambda *a, **k: None
     )
@@ -532,7 +531,7 @@ def test_clean_update_defers_desktop_owned_serve_and_clears_marker(
         lambda **_k: [{"pid": 6161, "purpose": "serve", "create_time": 1000.0}],
     )
 
-    hermes_main.cmd_update(args)  # no SystemExit(1)
+    hermes_main.cmd_update(args, approved=True)  # no SystemExit(1)
 
     out = capsys.readouterr().out
     assert "pid 6161" in out and "pre-update code" in out
