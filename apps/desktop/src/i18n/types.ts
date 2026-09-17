@@ -59,6 +59,45 @@ interface AuxTaskCopy {
 }
 
 export interface Translations {
+  catalog: {
+    listView: string
+    cardView: string
+    installTitle: (name: string) => string
+    installDescription: string
+    installTo: string
+    thisComputer: string
+    installing: string
+    installComplete: (name: string) => string
+    destinationChanged: string
+    browse: string
+    installed: string
+    searchSkills: string
+    searchPlugins: string
+    allSources: string
+    allCategories: string
+    about: string
+    author: string
+    source: string
+    category: string
+    version: string
+    platforms: string
+    requires: string
+    tools: string
+    hooks: string
+    repository: string
+    documentation: string
+    noResults: string
+    tryAnother: string
+    clearFilters: string
+    loadFailed: string
+    retry: string
+    more: string
+    pinned: string
+    snapshotHint: string
+    installHint: string
+    results: (count: number) => string
+    back: string
+  }
   connectors: {
     title: string
     connect: string
@@ -322,6 +361,8 @@ export interface Translations {
       tryRecordingAgain: string
       unavailable: string
       liveEnded: string
+      liveEndedConnectionLost: string
+      liveEndedClosed: string
       liveError: string
       liveDelegationFailed: string
       liveUnavailable: (reason: string) => string
@@ -829,6 +870,26 @@ export interface Translations {
       attachmentSizeLabel: string
       showOptions: string
     }
+    screenshot: {
+      enabledTitle: string
+      enabledDesc: string
+      statusTitle: string
+      checking: string
+      disabled: string
+      starting: string
+      ready: string
+      inputPermission: string
+      screenPermission: string
+      openSettings: string
+      retry: string
+      unavailable: string
+      errorTitle: string
+      loadFailed: string
+      saveFailed: string
+      permissionFailed: string
+      captureFailed: string
+      contextChanged: string
+    }
     quickEntry: {
       enabledTitle: string
       enabledDesc: string
@@ -1191,7 +1252,10 @@ export interface Translations {
       notInCatalog: string
       moaTitle: string
       moaPreset: string
+      moaDescription: string
       moaAggregator: string
+      moaAggregatorBilled: string
+      moaReferenceHint: string
       tasks: Record<string, AuxTaskCopy>
     }
     localModels: {
@@ -2071,6 +2135,12 @@ export interface Translations {
     actions: string
     color: string
     colorFor: string
+    openInNewWindow: string
+    setAsDefault: string
+    defaultProfile: string
+    defaultSet: (name: string) => string
+    defaultDescription: string
+    failedSetDefault: string
     setColor: (color: string) => string
     autoColor: string
     noProfiles: string
@@ -2313,6 +2383,7 @@ export interface Translations {
       reorder: string
       actions: string
     }
+    profileRail: string
     nav: Record<string, string>
     searchAria: string
     searchPlaceholder: string
@@ -2406,6 +2477,7 @@ export interface Translations {
       enter: (label: string) => string
       reorder: (label: string) => string
       toggle: (label: string, open: boolean) => string
+      showAllCount: (count: number) => string
       back: string
     }
     newSessionIn: (label: string) => string
@@ -2510,6 +2582,7 @@ export interface Translations {
     voiceDictation: string
     speakReplies: string
     stopSpeakingReplies: string
+    wakeWord: (phrase: string) => string
     wakeWordListening: (phrase: string) => string
     wakeWordOff: (phrase: string) => string
     wakeWordPausedVoice: (phrase: string) => string
@@ -3015,8 +3088,30 @@ export interface Translations {
     timedOutBody: string
     retiredBody: string
     errorBody: string
+    /** The account service asked for a short wait mid sign-in (a busy account, a rate limit, the ops pause). */
+    busyHeading: string
+    busyBody: (wait: string) => string
+    /** The account service could not be reached or errored mid sign-in. */
+    unreachableBody: string
     alreadySignedInHeading: string
     alreadySignedInBody: string
+    // First-launch set-up failure notice: the free tier could not be created at boot.
+    // One sentence per backend code (`hermes_cli/anon_auth.py::ANON_*`); the copy never says
+    // the free MODEL is off — what is unavailable is using Hermes without signing in.
+    setupFailed: {
+      gateClosed: string
+      paused: string
+      rateLimited: (wait: string) => string
+      unreachable: string
+      serverError: string
+      powRequired: string
+      locked: string
+      generic: string
+      /** The sign-in door, when the account service is reachable: the Nous row sits right below. */
+      signInBelow: string
+      tryAgain: string
+      retrying: string
+    }
   }
 
   modelPicker: {
@@ -3489,6 +3584,8 @@ export interface Translations {
       /** One-click recovery for an expired/revoked OAuth grant: re-runs that
        *  provider's sign-in flow (auth layer, authKind 'oauth'). */
       errorSignInAgain: (provider: string) => string
+      /** Free-tier refusals: opens the free sign-in dialog (signing in is free and lifts the refusal). */
+      errorSignInFreeTier: string
       /** Explains WHY the turn failed for an OAuth 401 — the raw body
        *  ("HTTP 401: User not found.") doesn't say "sign in again". */
       errorOauthExpired: (provider: string) => string
@@ -3720,7 +3817,13 @@ export interface Translations {
     cwdChangeFailed: string
     cwdStagedTitle: string
     cwdStagedMessage: string
+    modelSwitchConfirmBody: string
+    modelSwitchConfirmLabel: string
+    modelSwitchConfirmTitle: (model: string) => string
+    modelSwitchConfirmTitleFallback: string
     modelSwitchFailed: string
+    modelSwitchKeepLabel: string
+    modelSwitchStaleNotice: string
     hydrationSyncing: (profile: string) => string
     sessionExported: string
     sessionExportFailed: string

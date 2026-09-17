@@ -1119,17 +1119,12 @@ def _warm_turn_machinery_sync() -> int:
     """Synchronously initialize first-turn prerequisites (executor thread); returns the schema count.
 
     Covers the lazy init seen in skeleton turns: ``run_agent`` import graph, tool schemas (+ ``check_fn``
-    TTL cache), context files, the local Python toolchain probe (#106064)."""
+    TTL cache), and the local Python toolchain probe (#106064). Context files remain lazy because they
+    need the active turn's agent and model context."""
     import run_agent  # noqa: F401  # heavy import graph, cached in sys.modules
     import model_tools
 
     tool_defs = model_tools.get_tool_definitions(quiet_mode=True)
-    try:
-        from agent.prompt_builder import build_context_files_prompt
-
-        build_context_files_prompt()
-    except Exception:
-        logger.debug("context-file warm-up failed (non-fatal)", exc_info=True)
     from hermes_cli.config import load_config_readonly
 
     agent_cfg = load_config_readonly().get("agent")
@@ -1372,6 +1367,20 @@ def _message_timestamps_enabled(user_config: Optional[dict]) -> bool:
     return bool(mt)
 
 
+def _has_replayable_sidecar(role: Any, content: Any, msg: Dict[str, Any]) -> bool:
+    """True for an assistant row whose reply lives only in the ``api_content`` sidecar.
+
+    A reasoning-only clean stop persists ``content=""`` and the promoted text in ``api_content``
+    (agent/turn_final_response.py). Gating replay on ``content`` alone dropped that row, so the
+    next gateway turn lost the assistant's answer and replayed user->user."""
+    return (
+        role == "assistant"
+        and not content
+        and isinstance(msg.get("api_content"), str)
+        and bool(msg.get("api_content"))
+    )
+
+
 def _build_gateway_agent_history(
     history: List[Dict[str, Any]], *, channel_prompt: Optional[str] = None,
     inject_timestamps: bool = False) -> tuple[List[Dict[str, Any]], Optional[str]]:
@@ -1406,7 +1415,7 @@ def _build_gateway_agent_history(
         if "tool_calls" in msg or "tool_call_id" in msg or role == "tool":
             clean_msg = {k: v for k, v in msg.items() if k not in {"timestamp", "observed"}}
             agent_history.append(clean_msg)
-        elif content:
+        elif content or _has_replayable_sidecar(role, content, msg):
             replay_timestamp = msg.get("timestamp")
             # Clean before rendering: a timestamp prefix hides recovery notes
             # from the startswith-based stripper. Retain an embedded original time.
@@ -1730,10 +1739,6 @@ def _planned_restart_notification_pending() -> bool:
     return _planned_restart_notification_path().exists()
 
 
-def _clear_planned_restart_notification() -> None:
-    _planned_restart_notification_path().unlink(missing_ok=True)
-
-
 # Gateway marker so a lazily imported cli.py load_cli_config() doesn't clobber TERMINAL_CWD.
 os.environ["_HERMES_GATEWAY"] = "1"
 
@@ -1959,15 +1964,19 @@ async def _async_profile_runtime_scope(profile_home: "Path"):
 
 
 def load_gateway_config_for_runner() -> "GatewayConfig":
-    """Load gateway config for the process-level GatewayRunner. Multiplexed: reload under the default
-    profile's ``_profile_runtime_scope`` so platform tokens in its ``.env`` resolve via the secret
-    scope; unscoped ``_getenv`` falls to ``os.environ``, which often lacks a token living only under
+    """Load gateway config for the process-level GatewayRunner. An UNSET ``multiplex_profiles`` is
+    settled first by ``resolve_multiplex_mode`` (the default is on; the boot guard keeps a fleet that
+    still runs per-profile gateways standalone). Multiplexed: reload under the default profile's
+    ``_profile_runtime_scope`` so platform tokens in its ``.env`` resolve via the secret scope;
+    unscoped ``_getenv`` falls to ``os.environ``, which often lacks a token living only under
     ``profiles/<name>/.env``. Off -> identical to ``load_gateway_config()``.
 
     See #64674.
     """
+    from hermes_cli.gateway_multiplex_mode import log_multiplex_decision, resolve_multiplex_mode
     cfg = load_gateway_config()
-    if not getattr(cfg, "multiplex_profiles", False):
+    log_multiplex_decision(resolve_multiplex_mode(cfg))
+    if not cfg.multiplex_profiles:
         return cfg
     try:
         home = get_hermes_home()
@@ -1975,10 +1984,12 @@ def load_gateway_config_for_runner() -> "GatewayConfig":
         return cfg
     try:
         with _profile_runtime_scope(Path(home)):
-            return load_gateway_config()
+            scoped = load_gateway_config()
     except Exception:
         logger.debug("multiplex default-scope config reload failed; using unscoped load", exc_info=True)
         return cfg
+    scoped.multiplex_profiles = cfg.multiplex_profiles  # the verdict above, not a second unset flag
+    return scoped
 
 
 async def _discover_gateway_mcp_tools(config: object) -> None:
@@ -2463,9 +2474,19 @@ class _GatewayModelContext:
     context_source: str
 
 
-def _resolve_gateway_model_context(model: Optional[str] = None) -> _GatewayModelContext:
-    """Resolve the configured gateway route and effective context window. Call off-loop (may block)."""
-    from agent.model_metadata import DEFAULT_FALLBACK_CONTEXT, get_model_context_length
+def _resolve_gateway_model_context(
+    model: Optional[str] = None, route: Optional[dict] = None,
+) -> _GatewayModelContext:
+    """Resolve the configured gateway route and effective context window. Call off-loop (may block).
+
+    ``route`` (``provider`` / ``base_url`` / ``api_key`` of a session-only /model switch) replaces the
+    default runtime credentials so the window is looked up against the endpoint that actually serves
+    ``model``; a ``model.context_length`` pin only survives when that route still matches the config.
+    ``context_source`` is ``"default"`` only for a model unknown to the catalog that fell through to
+    ``DEFAULT_FALLBACK_CONTEXT`` — a catalog-listed 256K model is ``"detected"``.
+    """
+    from agent.model_metadata import (
+        DEFAULT_CONTEXT_LENGTHS, DEFAULT_FALLBACK_CONTEXT, _longest_key_match, get_model_context_length)
     resolved_model = model or _resolve_gateway_model()
     config_context_length = provider = base_url = api_key = custom_providers = None
     configured_model = configured_provider = configured_base_url = None
@@ -2493,6 +2514,14 @@ def _resolve_gateway_model_context(model: Optional[str] = None) -> _GatewayModel
 
     def _read_runtime() -> None:
         nonlocal provider, base_url, api_key
+        if route and route.get("base_url"):
+            # A session route with its own endpoint (a /model switch) replaces the default runtime
+            # read; a route without one (persisted / SessionDB / plain config) still resolves the
+            # default runtime credentials so a custom endpoint and its context_length pin survive.
+            provider = route.get("provider") or provider
+            base_url = route["base_url"]
+            api_key = route.get("api_key")
+            return
         runtime = _resolve_runtime_agent_kwargs()
         provider = runtime.get("provider") or provider
         base_url = runtime.get("base_url") or base_url
@@ -2520,8 +2549,10 @@ def _resolve_gateway_model_context(model: Optional[str] = None) -> _GatewayModel
         resolved_model, base_url=base_url or "", api_key=api_key or "",
         config_context_length=config_context_length, provider=provider or "",
         custom_providers=custom_providers)
+    fell_through = (context_length == DEFAULT_FALLBACK_CONTEXT
+                    and _longest_key_match(DEFAULT_CONTEXT_LENGTHS, str(resolved_model).lower()) is None)
     context_source = ("config" if config_context_length is not None
-                      else "default" if context_length == DEFAULT_FALLBACK_CONTEXT else "detected")
+                      else "default" if fell_through else "detected")
     return _GatewayModelContext(
         model=resolved_model, provider=provider or "", base_url=base_url or "",
         context_length=context_length, context_source=context_source)
@@ -2724,7 +2755,12 @@ def _dequeue_pending_event(adapter, session_key: str) -> MessageEvent | None:
 _INTERRUPT_REASON_STOP = "Stop requested"
 _INTERRUPT_REASON_RESET = "Session reset requested"
 _INTERRUPT_REASON_TIMEOUT = "Execution timed out (inactivity)"
+# ``tool_reason`` for the inactivity timeout: attributes the stop to the gateway watchdog (#112647).
+_INTERRUPT_TOOL_REASON_TIMEOUT = "gateway inactivity watchdog"
 _INTERRUPT_REASON_EVICTED = "Session ended while the turn was running"
+# ``tool_reason`` for eviction / shutdown: these stops are system-issued, not user stops (#112647).
+_INTERRUPT_TOOL_REASON_EVICTED = "session evicted"
+_INTERRUPT_TOOL_REASON_GATEWAY_SHUTDOWN = "gateway shutdown"
 _INTERRUPT_REASON_SSE_DISCONNECT = "SSE client disconnected"
 _INTERRUPT_REASON_GATEWAY_SHUTDOWN = "Gateway shutting down"
 _INTERRUPT_REASON_GATEWAY_RESTART = "Gateway restarting"
@@ -2819,7 +2855,7 @@ def _abandon_timed_out_gateway_turn(
     agent = agent_holder[0] if agent_holder else None
     if agent is not None:
         try:
-            request_hard_interrupt(agent, _INTERRUPT_REASON_TIMEOUT)
+            request_hard_interrupt(agent, _INTERRUPT_REASON_TIMEOUT, tool_reason=_INTERRUPT_TOOL_REASON_TIMEOUT)
         except Exception:
             logger.debug("Timed-out agent interrupt failed", exc_info=True)
 
@@ -3044,17 +3080,20 @@ def _get_channel_override(
 
 
 def _resolve_hermes_bin() -> Optional[list[str]]:
-    """Hermes update command argv: ``hermes`` on PATH, else ``python -m hermes_cli.main``, else None."""
-    import shutil
-    hermes_bin = shutil.which("hermes")
-    if hermes_bin:
-        return [hermes_bin]
+    """Hermes update/restart argv: the running interpreter's ``python -m hermes_cli.main``
+    (exactly this install), else ``hermes`` on PATH, else None. The module argv must win: a
+    PATH-first lookup lets an attacker-planted ``hermes`` shadow the running install when
+    /update or /restart re-execs it (#111569)."""
     try:
         import importlib.util
         if importlib.util.find_spec("hermes_cli") is not None:
             return [sys.executable, "-m", "hermes_cli.main"]
     except Exception:
         pass
+    import shutil
+    hermes_bin = shutil.which("hermes")
+    if hermes_bin:
+        return [hermes_bin]
     return None
 
 
@@ -3564,6 +3603,8 @@ class GatewayRunner(
         # With multiplex_profiles on, load under the default profile secret scope so bot tokens in its
         # .env resolve as secondary profiles' do; explicit config= injection (tests) is left untouched.
         # See #64674.
+        # An injected config (tests, ``gateway run --config``) is taken verbatim: an unset flag there
+        # stays None (= standalone); only the loaded path runs the boot-time default-on guard.
         self.config = config if config is not None else load_gateway_config_for_runner()
         # Multiplexer flag flips agent.secret_scope.get_secret() to fail-closed on unscoped credential
         # reads, so a missed migration crashes loudly instead of leaking a cross-profile value.
@@ -3798,22 +3839,10 @@ class GatewayRunner(
                         sessions_dir=self.config.sessions_dir)
             except Exception as exc:
                 logger.debug("state.db auto-maintenance skipped: %s", exc)
-
-        # Stale checkpoint repo cleanup; opt-in via checkpoints.auto_prune, idempotent via .last_prune.
-        try:
-            from hermes_cli.config import load_config as _load_full_config
-            _ckpt_cfg = (_load_full_config().get("checkpoints") or {})
-            if _ckpt_cfg.get("auto_prune", False):
-                from tools.checkpoint_manager import maybe_auto_prune_checkpoints
-                # delete_orphans never honoured unattended: a missing workdir is ambiguous (deleted vs.
-                # unmounted share); orphan cleanup is only via explicit `hermes checkpoints prune`.
-                maybe_auto_prune_checkpoints(
-                    retention_days=int(_ckpt_cfg.get("retention_days", 7)),
-                    min_interval_hours=int(_ckpt_cfg.get("min_interval_hours", 24)),
-                    delete_orphans=False,
-                    max_total_size_mb=int(_ckpt_cfg.get("max_total_size_mb", 500)))
-        except Exception as exc:
-            logger.debug("checkpoint auto-maintenance skipped: %s", exc)
+        # Checkpoint store pruning is a housekeeping chore (``_housekeeping_checkpoint_prune``), not a
+        # constructor step: its ``git gc`` repacks the whole store (tens of seconds on a GB store) and
+        # here it ran before the control socket, adapters and the code_sha stamp — so the first
+        # restart of the day (the ``hermes update`` one) looked hung and failed fleet verification.
 
     def _init_registries_and_clocks(self) -> None:
         """Pairing stores, hook registry, voice modes, background-task set, liveness and idle clocks."""
@@ -4751,6 +4780,14 @@ def _housekeeping_memory_trim() -> None:
     trim_memory(reason="messaging gateway housekeeping")
 
 
+def _housekeeping_checkpoint_prune() -> None:
+    """Checkpoint store retention + size cap on a live timer; ``auto_prune_from_config`` gates on
+    ``checkpoints.auto_prune`` and the 24h ``.last_prune`` marker. Off the startup path because its
+    ``git gc`` can block for tens of seconds on a large store."""
+    from tools.checkpoint_manager import auto_prune_from_config
+    auto_prune_from_config()
+
+
 def _drain_restart_safe_cron_deliveries(adapters, loop, runner=None) -> None:
     """Drain each profile's worker queue through its matching live adapters. A credential-less satellite
     profile (empty adapter map) drains through the primary's adapters routed by its own profile routes."""
@@ -4807,7 +4844,9 @@ def _start_gateway_housekeeping(
         (60, "Auto-archive tick", _housekeeping_auto_archive),
         (1, "Deferred FTS retry tick", _housekeeping_deferred_fts_retry),
         (1, "gateway housekeeping memory trim", _housekeeping_memory_trim),
-        (1, "MCP config reconcile", _mcp_config_reconciler(runner))]
+        (1, "MCP config reconcile", _mcp_config_reconciler(runner)),
+        # Last: a real prune can hold this thread for a while; every other chore of the tick runs first.
+        (1, "Checkpoint prune tick", _housekeeping_checkpoint_prune)]
 
     logger.info("Gateway housekeeping started (interval=%ds)", interval)
     tick_count = 0
@@ -5206,7 +5245,7 @@ def _start_gateway_make_shutdown_signal_handler(runner, _signal_initiated_shutdo
                 logger.warning("Shutdown context: %s", format_context_for_log(_shutdown_ctx))
 
             def _diagnostic() -> None:
-                # Heavyweight (ps auxf, pstree, dmesg), detached so it finishes even if our cgroup is torn
+                # Heavyweight (comm-only ps, pstree, dmesg), detached so it finishes even if our cgroup is torn
                 # down; bounded by an internal timeout, never blocks.
                 from gateway.shutdown_forensics import spawn_async_diagnostic
                 spawn_async_diagnostic(
@@ -5254,6 +5293,7 @@ async def _start_gateway_start_control_socket(runner):
         # failure only means consumers fall back to the process-scan/state-file layer, exactly as before
         # this feature. See #92091.
         from gateway.control_socket import GatewayControlServer
+        from gateway.run_profile_reconcile import migrate_profile_identity_verb, purge_profile_identity_verb
         # pause-for-update: the updater asks us to drain + exit (freeing venv handles) vs. a tree-kill
         # (same path as SIGUSR1). Handler runs on the socket executor thread, so marshal onto the loop.
         # pause-for-update (#92091 step 2): the updater asks this gateway to drain in-flight turns and exit
@@ -5301,7 +5341,9 @@ async def _start_gateway_start_control_socket(runner):
 
         _control_server = GatewayControlServer(
             verb_handlers={"pause-for-update": _pause_for_update_handler,
-                           "rescan-profiles": _rescan_profiles_handler})
+                           "rescan-profiles": _rescan_profiles_handler,
+                           "migrate-profile-identity": migrate_profile_identity_verb(runner),
+                           "purge-profile-identity": purge_profile_identity_verb(runner)})
         if not await _control_server.start():
             _control_server = None
         else:
@@ -5640,6 +5682,9 @@ def main():
         import yaml
         with open(args.config, encoding="utf-8") as f:
             config = GatewayConfig.from_dict(yaml.safe_load(f) or {})
+        # Same boot-time verdict the loaded config gets when the file leaves the flag unset.
+        from hermes_cli.gateway_multiplex_mode import log_multiplex_decision, resolve_multiplex_mode
+        log_multiplex_decision(resolve_multiplex_mode(config))
 
     # start_gateway() completes teardown before returning/raising SystemExit; force-exit after so a
     # wedged non-daemon worker can't block Py_FinalizeEx's join. SystemExit caught so EVERY path exits.

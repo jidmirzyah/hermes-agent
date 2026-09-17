@@ -231,4 +231,5 @@ def payload_from_args(args) -> Dict[str, Any]:
         "no_backup": bool(getattr(args, "no_backup", False)),
         "force": bool(getattr(args, "force", False)),
         "force_venv": bool(getattr(args, "force_venv", False)),
+        "no_gateway_restart": bool(getattr(args, "no_gateway_restart", False)),
     }
