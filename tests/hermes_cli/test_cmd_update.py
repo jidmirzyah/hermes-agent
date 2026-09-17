@@ -90,24 +90,14 @@ def _patch_gateway_discovery():
     Discovery returning nothing makes the phase a clean no-op for every test
     in this module (none of them assert on gateway restarts).
     """
-    # _cmd_update_impl calls _purge_stale_hermes_modules() (to pick up
-    # freshly-pulled gateway source on a real update) immediately before
-    # re-importing hermes_cli.gateway — that re-import creates a fresh
-    # module object, silently discarding the three patches above and
-    # reaching the real, unmocked gateway. No-op it for tests; see
-    # hermes_cli.update_cmd._m()'s docstring for this patch surface.
-    # _cmd_update_impl also calls _reload_config_modules() after a real pull,
-    # which force-reloads hermes_cli.dashboard_procs from disk to pick up
-    # post-update code — that reload creates a fresh module object, breaking
-    # object-identity assumptions (e.g. test_lazy_command_exports.py's
-    # hermes_cli.main._scan_dashboard_processes is dashboard_procs.
-    # _scan_dashboard_processes check) for any test that runs later in the
-    # same pytest session. No-op it here too, same rationale as the purge.
+    # The stale-module-purge/reload layer this fixture used to no-op around
+    # (_purge_stale_hermes_modules, _reload_config_modules) was removed
+    # upstream (94ced1a2b2): `hermes update` now hands off to a freshly
+    # spawned interpreter running the pulled code instead of reloading
+    # modules in-process, so there is nothing left to purge or reload here.
     with patch("hermes_cli.gateway.find_gateway_pids", return_value=[]), \
          patch("hermes_cli.gateway.supports_systemd_services", return_value=False), \
-         patch("hermes_cli.gateway.find_profile_gateway_processes", return_value=[]), \
-         patch("hermes_cli.main._purge_stale_hermes_modules", lambda: None), \
-         patch("hermes_cli.update_cmd._reload_config_modules", lambda: None):
+         patch("hermes_cli.gateway.find_profile_gateway_processes", return_value=[]):
         yield
 
 
@@ -289,6 +279,94 @@ class TestUpdateManagedPythonEnvIsolation:
         assert ".hermes-runtime" in uv_env.get("UV_PYTHON_INSTALL_DIR", "")
         assert uv_env.get("UV_MANAGED_PYTHON") == "1"
         assert uv_env.get("UV_NO_CONFIG") == "1"
+
+
+class TestRepairCurrentCheckoutRuntimeRepair:
+    """Already-up-to-date path after a managed SQLite runtime repair (#112571)."""
+
+    @staticmethod
+    def _run(monkeypatch, *, repaired: bool, lazy_refresh_ok: bool = True):
+        from hermes_cli.managed_uv import RuntimeRepairResult
+        from hermes_cli import main as hm
+
+        lazy_features = ["telegram", "hindsight", "edge-tts", "bedrock"]
+        tool_dependencies = ["browser"]
+        restored = []
+
+        monkeypatch.setattr(
+            update_cmd, "_venv_core_imports_healthy", lambda: (True, "core imports healthy")
+        )
+        monkeypatch.setattr(hm, "_is_windows", lambda: False)
+        monkeypatch.setattr(
+            update_cmd, "_pip_install_prefix", lambda _uv: (["uv", "pip"], {"VIRTUAL_ENV": "venv"})
+        )
+        markers = []
+        monkeypatch.setattr(
+            update_cmd, "_write_lazy_refresh_incomplete_marker", lambda: markers.append("write")
+        )
+        monkeypatch.setattr(
+            hm, "_clear_lazy_refresh_incomplete_marker", lambda: markers.append("clear")
+        )
+
+        def refresh(prefix, *, env, features):
+            restored.append(("lazy", prefix, env, features))
+            return lazy_refresh_ok
+
+        monkeypatch.setattr(hm, "_refresh_active_lazy_features", refresh)
+        monkeypatch.setattr(
+            hm, "_restore_active_tool_dependencies",
+            lambda dependencies, prefix, *, env: restored.append(("tools", prefix, env, dependencies)),
+        )
+        monkeypatch.setattr(
+            update_cmd, "_repair_node_deps_on_current_checkout", lambda *args, **kwargs: True
+        )
+
+        def ensure(*, repair_observer, **_kwargs):
+            if repaired:
+                repair_observer(RuntimeRepairResult("repaired"))
+            return "uv"
+
+        monkeypatch.setattr("hermes_cli.managed_uv.update_managed_uv", ensure)
+        monkeypatch.setattr("hermes_cli.managed_uv.ensure_uv", ensure)
+
+        assert update_cmd._repair_current_checkout(
+            assume_yes=True,
+            gateway_mode=False,
+            pre_update_snapshot_id=None,
+            had_desktop_app_before_update=False,
+            active_lazy_features=lazy_features,
+            active_tool_dependencies=tool_dependencies,
+            upstream_checked=True,
+            _windows_gateway_resume=None,
+        )
+        return restored, lazy_features, tool_dependencies, markers
+
+    def test_restores_optional_dependencies_after_runtime_repair(self, monkeypatch):
+        """A SQLite venv replacement passes the core-import probe, yet the swapped-in venv was
+        built from uv.lock alone: the captured lazy backends and Hermes Tools deps must be
+        restored into it, once each, with the repaired installer prefix."""
+        restored, lazy_features, tool_dependencies, markers = self._run(monkeypatch, repaired=True)
+        assert restored == [
+            ("lazy", ["uv", "pip"], {"VIRTUAL_ENV": "venv"}, lazy_features),
+            ("tools", ["uv", "pip"], {"VIRTUAL_ENV": "venv"}, tool_dependencies),
+        ]
+        assert markers == ["write", "clear"]
+
+    def test_failed_lazy_restore_keeps_incomplete_marker(self, monkeypatch, capsys):
+        """Mirror of the pull path (update_cmd_deps): the lazy-refresh breadcrumb is written
+        before the restore and cleared only when the refresh reports success, so a failed
+        restore into the swapped-in venv is picked up by the next `hermes` run instead of
+        being hidden behind "Already up to date!"."""
+        _, _, _, markers = self._run(monkeypatch, repaired=True, lazy_refresh_ok=False)
+        assert markers == ["write"]
+        assert "Lazy-refresh recovery incomplete" in capsys.readouterr().out
+
+    def test_healthy_venv_without_runtime_repair_is_left_alone(self, monkeypatch):
+        """Control: no repair + healthy core imports = the venv was never replaced, so nothing
+        is reinstalled (the up-to-date path stays a no-op for Python deps)."""
+        restored, _, _, markers = self._run(monkeypatch, repaired=False)
+        assert restored == []
+        assert markers == []
 
 
 class TestCmdUpdateBranchFallback:
@@ -537,8 +615,8 @@ class TestCmdUpdateBranchFallback:
             hm, "_sync_with_upstream_if_needed"
         ), patch.object(
             hm,
-            "_reload_updated_runtime_modules",
-            # Reaching the reload step IS the proof the post-update path ran
+            "_upgrade_pip_before_lazy_refresh",
+            # Reaching the lazy-refresh step IS the proof the post-update path ran
             # (the bug returned from "Already up to date!" before it). Abort
             # the pipeline right here: everything past this point (skills
             # sync, desktop rebuild, gateway restart, fleet check) would run
@@ -551,7 +629,7 @@ class TestCmdUpdateBranchFallback:
                 cmd_update(mock_args, approved=True)
 
         assert exit_info.value.code == 0
-        post_update_step.assert_called_once_with()
+        post_update_step.assert_called_once()
         captured = capsys.readouterr()
         assert "Already up to date!" not in captured.out
 
@@ -560,14 +638,10 @@ class TestCmdUpdateBranchFallback:
         with patch("shutil.which", return_value=None), patch(
             "subprocess.run"
         ) as mock_run, patch("builtins.input") as mock_input, patch(
-            "hermes_cli.update_cmd._reload_config_modules"
-        ), patch(
             "hermes_cli.config.get_missing_env_vars", return_value=["MISSING_KEY"]
         ), patch(
             "hermes_cli.config.get_missing_config_fields",
             return_value=[{"key": "new.option", "default": True}],
-        ), patch(
-            "hermes_cli.update_cmd._reload_config_modules"
         ), patch(
             "hermes_cli.update_cmd._run_config_check_fresh", return_value=(1, 2)
         ), patch(
@@ -608,13 +682,9 @@ class TestCmdUpdateMigrationPrompt:
         with patch("shutil.which", return_value=None), patch(
             "subprocess.run"
         ) as mock_run, patch("builtins.input") as mock_input, patch(
-            "hermes_cli.update_cmd._reload_config_modules"
-        ), patch(
             "hermes_cli.config.get_missing_env_vars", return_value=[]
         ), patch(
             "hermes_cli.config.get_missing_config_fields", return_value=[]
-        ), patch(
-            "hermes_cli.update_cmd._reload_config_modules"
         ), patch(
             "hermes_cli.update_cmd._run_config_check_fresh", return_value=(5, 24)
         ), patch(
@@ -654,8 +724,6 @@ class TestCmdUpdateMigrationPrompt:
             "hermes_cli.config.get_missing_env_vars", return_value=[]
         ), patch(
             "hermes_cli.config.get_missing_config_fields", return_value=[]
-        ), patch(
-            "hermes_cli.update_cmd._reload_config_modules"
         ), patch(
             "hermes_cli.update_cmd._run_config_check_fresh", return_value=(33, 34)
         ), patch(
@@ -700,13 +768,9 @@ class TestCmdUpdateMigrationPrompt:
         with patch("shutil.which", return_value=None), patch(
             "subprocess.run"
         ) as mock_run, patch("builtins.input", return_value="n"), patch(
-            "hermes_cli.update_cmd._reload_config_modules"
-        ), patch(
             "hermes_cli.config.get_missing_env_vars", return_value=env_items
         ), patch(
             "hermes_cli.config.get_missing_config_fields", return_value=cfg_items
-        ), patch(
-            "hermes_cli.update_cmd._reload_config_modules"
         ), patch(
             "hermes_cli.update_cmd._run_config_check_fresh", return_value=(1, 24)
         ), patch(
@@ -728,37 +792,6 @@ class TestCmdUpdateMigrationPrompt:
             assert "FOO_API_KEY" in out
             assert "Foo service API key" in out
             assert "display.new_widget" in out
-
-
-class TestConfigVersionCheckUsesFreshModules:
-    """Regression: config migration must use freshly-reloaded modules, not the
-    sys.modules cache from before git pull.
-
-    Before the fix, ``hermes update`` ran in the PRE-pull Python process.
-    After ``git pull`` updated the source on disk, function-level imports
-    returned the OLD cached ``hermes_cli.config`` module — so
-    ``DEFAULT_CONFIG["_config_version"]`` was stale and
-    ``check_config_version()`` reported ``(33, 33)`` "up to date" even though
-    the freshly-pulled code had v34 with a migration to run. The personality
-    reset migration (#81946) was silently skipped this way.
-    """
-
-    def test_run_config_check_fresh_reloads_modules(self):
-        """_run_config_check_fresh must call _reload_config_modules which
-        force-reloads the config modules from disk.
-
-        Regression: config migration was silently skipped because
-        sys.modules held the OLD hermes_cli.config with the OLD
-        DEFAULT_CONFIG["_config_version"] after git pull.
-        """
-        from unittest.mock import patch
-
-        import hermes_cli.update_cmd as update_cmd
-
-        with patch.object(update_cmd, "_reload_config_modules") as mock_reload:
-            update_cmd._run_config_check_fresh()
-
-        mock_reload.assert_called_once()
 
 
 class TestCmdUpdateProfileSkillSync:

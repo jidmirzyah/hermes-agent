@@ -564,6 +564,65 @@ async def get_session_messages(
             "returned": len(projected_messages)}}
 
 
+def _timeline_session_id(db, session_id: str, owner: str) -> str:
+    # Durable jump addresses are exact ids, never title/prefix guesses. A NULL
+    # legacy owner belongs to this profile's store, just like /messages pages.
+    def owned(sid):
+        row = db._read_one("SELECT profile_name FROM sessions WHERE id = ?", (sid,))
+        return row is not None and row["profile_name"] in (None, owner)
+
+    if not owned(session_id):
+        raise HTTPException(status_code=404, detail=_NOT_FOUND)
+    sid = db.resolve_resume_session_id(session_id)
+    if not owned(sid):
+        raise HTTPException(status_code=404, detail=_NOT_FOUND)
+    return sid
+
+
+@manage_router.get("/api/sessions/{session_id}/timeline")
+async def get_session_timeline(
+    session_id: str, profile: Optional[str] = None,
+    limit: int = Query(500, ge=1, le=500), after_row_id: int = Query(0, ge=0),
+):
+    """Prompt metadata only, including compacted display history (never rewind rows).
+
+    ``next_cursor`` is a stable logical first-row id; pass it as ``after_row_id``.
+    Entry ``row_id`` addresses the current representative for /messages/around.
+    """
+    from hermes_state_timeline import get_session_timeline as read_timeline
+
+    owner = _serving_profile(profile)
+
+    def _read(db):
+        sid = _timeline_session_id(db, session_id, owner)
+        return {"session_id": sid, "profile": owner,
+                **read_timeline(db, sid, limit=limit, after_row_id=after_row_id)}
+
+    return await asyncio.to_thread(_with_db, profile, _read, read_only=True)
+
+
+@manage_router.get("/api/sessions/{session_id}/messages/around")
+async def get_session_messages_around(
+    session_id: str, row_id: int = Query(..., ge=1), profile: Optional[str] = None,
+    limit: int = Query(120, ge=1, le=120),
+):
+    """Bounded display page starting at a timeline prompt; no intervening payloads."""
+    from hermes_state_timeline import get_session_messages_around as read_around
+
+    owner = _serving_profile(profile)
+
+    def _read(db):
+        sid = _timeline_session_id(db, session_id, owner)
+        page = read_around(db, sid, row_id, limit=limit)
+        if page is None:
+            raise HTTPException(status_code=404, detail="Prompt not found")
+        return {"session_id": sid, "profile": owner, **page}
+
+    result = await asyncio.to_thread(_with_db, profile, _read, read_only=True)
+    result["messages"] = _project_for_display(result["messages"])
+    return result
+
+
 @manage_router.delete("/api/sessions/{session_id}")
 async def delete_session_endpoint(session_id: str, profile: Optional[str] = None):
     def _delete(db):
@@ -690,8 +749,8 @@ async def export_session_endpoint(session_id: str, profile: Optional[str] = None
     return StreamingResponse(_stream_export(), media_type="application/json")
 
 
-@manage_router.get("/api/sessions/{session_id}/timeline")
-async def get_session_timeline(session_id: str, limit: int = Query(200, ge=1, le=200)):
+@manage_router.get("/api/sessions/{session_id}/timeline/live")
+async def get_session_live_timeline(session_id: str, limit: int = Query(200, ge=1, le=200)):
     """Return the live, in-progress step timeline for a session.
 
     Ephemeral and session-scoped — NOT the persisted message history (see
@@ -700,6 +759,12 @@ async def get_session_timeline(session_id: str, limit: int = Query(200, ge=1, le
     this reflects gateway/CLI/desktop sessions running in a process other
     than this API server, including a step that is still mid-flight
     (``status: "running"``, ``duration: null``).
+
+    Renamed from .../timeline to .../timeline/live 2026-09-17 (upstream
+    reconciliation): upstream independently added its own persisted-history
+    route at the un-suffixed path, and the Desktop app already consumes
+    that one (limit/profile/after_row_id, next_cursor pagination) -- this
+    route moved rather than the actively-used one.
     """
     from tools.session_timeline import read_timeline
 

@@ -223,6 +223,15 @@ def _current_session_profile() -> str:
     return get_session_env("HERMES_SESSION_PROFILE", "")
 
 
+def _get_sudo_password_callback():
+    return getattr(_callback_tls, "sudo_password", None)
+
+
+def set_sudo_password_callback(cb):
+    """Register the CLI's sudo password prompt callback (per-thread slot)."""
+    _callback_tls.sudo_password = cb
+
+
 def _get_approval_callback():
     return getattr(_callback_tls, "approval", None)
 
@@ -629,28 +638,12 @@ def _rewrite_compound_background(command: str) -> str:
     return result
 
 
-def _transform_sudo_command(command: str | None) -> tuple[str | None, str | None]:
-    """
-    Pass *command* through unchanged.
-
-    Hermes no longer pipes a sudo password into commands: the mechanism was
-    a process-global secret (SUDO_PASSWORD in os.environ, or an interactive
-    cache) that every agent-spawned command could potentially read, and the
-    fix was to remove it rather than harden it. `sudo` in an agent-run
-    command now behaves exactly like it would in a normal, non-interactive
-    shell — it fails with "sudo: a password is required" unless the host has
-    a NOPASSWD sudoers rule configured for the relevant commands (see
-    _sudo_nopasswd_works and _handle_sudo_failure's guidance).
-
-    Signature and return shape (transformed_command, sudo_stdin) are kept
-    for the environment callers (local/ssh/docker/singularity stdin-merge
-    paths, and the modal/daytona/vercel_sandbox embed paths) that still call
-    this as their single seam into sudo handling; sudo_stdin is now always
-    None.
-    """
-    if command is None:
-        return None, None
-    return command, None
+# _transform_sudo_command lives in tools/terminal_tool_sudo.py (the real
+# password-cache/prompt/rewrite implementation, restored 2026-09-17 when
+# HOLDFAST Step 4 adopted upstream's sudo module) -- re-exported here so
+# tools.terminal_tool._transform_sudo_command keeps resolving for existing
+# callers (see tools/environments/base.py) without changing every call site.
+from tools.terminal_tool_sudo import _transform_sudo_command  # noqa: F401
 
 
 # Environment classes now live in tools/environments/
@@ -1629,6 +1622,12 @@ def _run_foreground(
     )
 
 
+# Floor for the pre-exec guard's share of the command deadline: a short command timeout
+# (1s in tests, a few seconds in practice) must not turn the guard's own cold-start cost
+# (module imports, git probes under load) into a refusal; the wedge it bounds lasted an hour.
+_PRE_EXEC_GUARD_MIN_TIMEOUT_S = 30
+
+
 def _pre_exec_block(
     command: str, *, env: Any, env_type: str, cwd: str,
     workdir: Optional[str], session_key: str,
@@ -1724,7 +1723,37 @@ def terminal_tool(
 
         session_key = get_current_session_key(default="") or (task_id or "")
 
-        _pre_exec_block(command, env=env, env_type=env_type, cwd=cwd, workdir=workdir, session_key=session_key)
+        # The supervised-gateway identity probe ends in a kernel process query
+        # (psutil create_time) that has wedged for the better part of an hour on
+        # macOS; ``env.execute`` is already behind ``run_bounded_sync`` but this
+        # chain ran ahead of it, so the tool call never returned and the cron
+        # slot stayed occupied (#111922). Share the command's own deadline. A
+        # guard that never rendered a verdict fails CLOSED: these checks apply
+        # unconditionally (``force`` cannot bypass them), so the command is
+        # refused with a retryable error instead of running unguarded.
+        from agent.deadline import run_bounded_sync
+        from tools.interrupt import acting_for_tid
+
+        # The guard chain runs on the deadline worker; keep it answerable to /stop
+        # aimed at this tool thread (a remote-backend script read polls is_interrupted()).
+        guard_timeout = max(plan.effective_timeout, _PRE_EXEC_GUARD_MIN_TIMEOUT_S)
+        _acting_token = acting_for_tid.set(threading.current_thread().ident)
+        try:
+            bounded_guard = run_bounded_sync(
+                lambda: _pre_exec_block(
+                    command, env=env, env_type=env_type, cwd=cwd, workdir=workdir, session_key=session_key,
+                ),
+                guard_timeout,
+                label="terminal.pre-exec-guard",
+            )
+        finally:
+            acting_for_tid.reset(_acting_token)
+        if bounded_guard.timed_out:
+            raise _Rejected(_error_json(
+                f"Terminal pre-execution guard did not finish within {guard_timeout}s "
+                "(process-identity probe wedged); the command was not run. Retry the call.",
+                status="error",
+            ))
         # Pre-exec security checks (tirith + dangerous command detection);
         # force=True means the user already confirmed.
         verdict = _run_approval_guards(command, env_type, plan.config, force=force)
@@ -1819,6 +1848,8 @@ TERMINAL_SCHEMA = {
 
 
 def _handle_terminal(args, **kw):
+    from agent.terminal_approval_batch import validate_prepared_terminal
+    validate_prepared_terminal(args)
     # Models sometimes send execute_code's ``code`` here; name the stray
     # argument and the right tool instead of failing on command=None.
     if "command" not in args and "code" in args:

@@ -1505,10 +1505,10 @@ export interface ProfilesCreateResult {
   model_set?: boolean
   mirrored: ProfileMirrored
 }
-/** What was copied from the launch profile; ``auth`` is ``"shared"`` under ``share_auth``. */
+/** What was copied from the launch profile. */
 export interface ProfileMirrored {
   env?: boolean
-  auth?: boolean | 'shared'
+  auth?: boolean
   model_inherited?: boolean
   voice?: boolean
 }
@@ -2523,6 +2523,8 @@ export interface InflightTurn {
   assistant?: string
   streaming?: boolean
   user?: string
+  display_kind?: string | null
+  display_metadata?: Record<string, unknown> | null
   corrections?: string[] | null
   correction_offsets?: number[] | null
   error?: string | null
@@ -3533,7 +3535,7 @@ export interface McpServerRuntimeRow {
   disabled: boolean
   status: McpRuntimeStatus
 }
-export type McpRuntimeStatus = 'connected' | 'disabled' | 'connecting' | 'failed' | 'configured'
+export type McpRuntimeStatus = 'connected' | 'disabled' | 'connecting' | 'failed' | 'lazy' | 'configured'
 /** ``preset`` (catalog id) and/or ``config`` (url/command/args/env/headers/auth/tools); a ``bearer_token`` is written to the profile's .env, only the header template persists. */
 export interface McpServersAddParams {
   profile?: string | null
@@ -3681,6 +3683,7 @@ export interface AgentPluginRow {
   catalog_tier?: string | null
   installed_sha?: string | null
   catalog_sha?: string | null
+  catalog_version?: string | null
   update_available?: boolean | null
   pinned_sha?: string | null
 }
@@ -3722,15 +3725,20 @@ export interface ApprovalResult {
   choice: ApprovalChoice
   all?: boolean | null
 }
+/** Original command, redacted server-side before any password-injection rewrite. */
+export interface SudoRequestParams {
+  session_id: string
+  command?: string
+}
+/** The answer to any one-string prompt (sudo, secret, vault prompts, desktop bridges): ``''`` means skipped / declined. */
+export interface ValueResult {
+  value: string
+}
 export interface SecretRequestParams {
   session_id: string
   env_var: string
   prompt: string
   metadata?: Record<string, unknown> | null
-}
-/** The answer to any one-string prompt (secret, vault prompts, desktop bridges): ``''`` means skipped / declined. */
-export interface ValueResult {
-  value: string
 }
 export interface VaultUnlockRequestParams {
   session_id: string
@@ -3833,6 +3841,9 @@ export interface SetupReadyPayload {
   has_identity: boolean
   other_providers: boolean
   error?: string
+  error_code?: string | null
+  retryable?: boolean | null
+  retry_after?: number | null
   finished_at: number
   [key: string]: unknown
 }
@@ -4833,6 +4844,8 @@ export interface ServerRequestMap {
   'preview.read': { params: ReadRangeRequestParams; result: ValueResult }
   /** Masked value for a named env var (skills / setup flows). */
   secret: { params: SecretRequestParams; result: ValueResult }
+  /** Masked sudo password for the terminal tool. */
+  sudo: { params: SudoRequestParams; result: ValueResult }
   /** Read the visible in-app terminal buffer (JSON text answer). */
   'terminal.read': { params: ReadRangeRequestParams; result: ValueResult }
   /** Drive a guided tour highlight in the desktop renderer. */
@@ -4853,6 +4866,7 @@ export const SERVER_REQUEST_METHODS = [
   'preview.act',
   'preview.read',
   'secret',
+  'sudo',
   'terminal.read',
   'tour',
   'vault.code',
