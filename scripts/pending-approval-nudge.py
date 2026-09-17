@@ -144,7 +144,10 @@ def main() -> int:
         )
         for item_id, age_h in stranded:
             print(f"  [upstream_fix] {item_id} — completed {age_h:.1f}h ago, undelivered")
-        print("\nReview with: /upstream pending   (or check ~/.hermes/pending/upstream_fix/ directly)")
+        print(
+            "\nNo [ref:...] message was ever delivered for these, so there is nothing to "
+            "quote-reply to. Ask Jarvis directly to review the pending record by ID."
+        )
         if stale:
             print()
 
