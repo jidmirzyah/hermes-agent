@@ -656,8 +656,8 @@ def _init_prompt_cache_config(agent):
         agent._anthropic_prompt_cache_policy()
     )
     agent._cache_disabled = False
-    # cache_ttl: "5m" (default) or "1h" (2x write cost; pays off with >5-minute pauses);
-    # unknown values keep "5m". A falsy/off value disables caching entirely (OAuth plans
+    # cache_ttl: "5m" (default), "1h" (2x write cost; pays off with >5-minute pauses) or "auto"
+    # (1h when a person paces the session, 5m when a machine does); unknown values keep "5m". A falsy/off value disables caching entirely (OAuth plans
     # billing cache writes, proxies adding their own cache_control); the disable survives
     # /model switches and fallback re-derivation.
     # Anthropic supports "5m" (default) and "1h" cache TTL tiers. Read from config.yaml under
@@ -669,10 +669,16 @@ def _init_prompt_cache_config(agent):
     with suppress(Exception):
         from hermes_cli.config import load_config_readonly as _load_pc_cfg
         from agent.agent_runtime_helpers import cache_ttl_means_disabled
+        from agent.prompt_caching import AUTO_CACHE_TTL, auto_cache_ttl_for_source
         _pc_cfg = _load_pc_cfg().get("prompt_caching", {}) or {}
         _ttl = _pc_cfg.get("cache_ttl", "5m")
         if _ttl in {"5m", "1h"}:
             agent._cache_ttl = _ttl
+        elif _ttl == AUTO_CACHE_TTL:
+            # Decided once per session from its source (a delegated child is clamped to 5m again
+            # in delegate_tool regardless).
+            from run_agent import _session_source_for_agent  # late: run_agent imports this module
+            agent._cache_ttl = auto_cache_ttl_for_source(_session_source_for_agent(getattr(agent, "platform", None)))
         elif cache_ttl_means_disabled(_ttl):
             agent._use_prompt_caching = False
             agent._use_native_cache_layout = False
@@ -873,8 +879,8 @@ def _routed_client_kwargs(agent, fallback_model, _provider_timeout) -> Optional[
     from hermes_constants import profile_cli_selector
     _sel = profile_cli_selector()
     raise RuntimeError(
-        f"No LLM provider configured. Run `hermes {_sel}model` to "
-        f"select a provider, or run `hermes {_sel}setup` for first-time "
+        "No LLM provider configured. Run `hermes model` to "
+        "select a provider, or run `hermes setup` for first-time "
         "configuration."
     )
 
@@ -1689,6 +1695,55 @@ def _scope_context_length_to_default_runtime(
     return _config_context_length
 
 
+def set_config_context_length(agent, value: Optional[int]) -> None:
+    """Store the durable ``model.context_length`` pin on EVERY cached copy of it.
+
+    The pin is read from config exactly once, at construction, then cached twice: on
+    ``agent._config_context_length`` (switch/fallback resolution plus every display and ``/usage``
+    surface) and on ``context_compressor._config_context_length`` (the compressor's own
+    re-resolution). Live paths that updated only one copy left the other stale, so a session could
+    report a pinned ceiling while compressing against a different window (#116467).
+    """
+    agent._config_context_length = value
+    _compressor = getattr(agent, "context_compressor", None)
+    if _compressor is not None:
+        _compressor._config_context_length = value
+
+
+def config_context_length_for_runtime(agent, config=None) -> Optional[int]:
+    """Re-read the durable ``model.context_length`` pin for ``agent``'s CURRENT runtime, or ``None``.
+
+    Single re-derivation point for the cached pin: construction resolves it once, and every live path
+    that re-resolves a runtime used to clear the cached copy without re-reading the config — so a
+    model/provider switch or a Desktop config round-trip silently dropped a ceiling the user still had
+    on disk, and resolution fell through to probing / catalog metadata / the 256K fallback (#116467).
+
+    Reuses construction's own scoping (``_scope_context_length_to_default_runtime``): the pin describes
+    the configured default route, so an unrelated runtime never inherits it.
+    """
+    try:
+        from hermes_cli.config import get_compatible_custom_providers, load_config
+        _agent_cfg = config if isinstance(config, dict) else load_config()
+        if not isinstance(_agent_cfg, dict):
+            return None
+        _model_section = _agent_cfg.get("model", {})
+        if not isinstance(_model_section, dict):
+            return None
+        _pin = _model_section.get("context_length")
+        if _pin is None or isinstance(_pin, bool):
+            return None
+        _pin = int(_pin)
+        if _pin <= 0:
+            return None
+        return _scope_context_length_to_default_runtime(
+            agent, _agent_cfg, _model_section, get_compatible_custom_providers(_agent_cfg),
+            _pin, str(getattr(agent, "base_url", "") or ""),
+        )
+    except Exception:
+        logger.debug("Could not re-read model.context_length for the current runtime", exc_info=True)
+        return None
+
+
 _CTX_LEN_REQUIREMENT = "must be a positive integer (e.g. 256000, not '256K')"
 
 
@@ -2354,6 +2409,9 @@ def init_agent(
     agent.request_overrides = dict(request_overrides or {})
     agent.prefill_messages = prefill_messages or []  # Prefilled conversation turns
     agent._force_ascii_payload = False
+    # Every (provider, model) that rejected image content this session. build_api_request strips
+    # images from requests to those models only, so history keeps them for any model that can see.
+    agent._image_rejecting_models = set()
 
     _init_prompt_cache_config(agent)
     _init_turn_state(agent, run_budget_seconds)
