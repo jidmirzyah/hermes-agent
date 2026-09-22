@@ -548,6 +548,13 @@ export interface SessionInfo {
    *  elsewhere. Undefined against a backend predating the flag; treat that as
    *  "no opinion" and leave the local pin set alone. */
   pinned?: boolean
+  /** Server-side hide flag (`sessions.hidden`). Hidden rows (canonical Bot
+   *  Chats, group-chat plumbing) never reach a sidebar page, so a row
+   *  carrying `hidden: true` only exists in the local list through an
+   *  optimistic insert or a keep-list carry — the merge must not let it
+   *  survive a refresh (#113273). Undefined against older backends; treat
+   *  as visible. */
+  hidden?: boolean
   /** Derived read state (backend watermark: `last_read_at` vs `last_active`,
    *  see `SessionDB.session_unread`). True when the conversation was
    *  explicitly marked unread or a response arrived after it was last read.
@@ -757,6 +764,8 @@ export interface SessionRuntimeInfo {
   personality?: string
   provider?: string
   reasoning_effort?: string
+  /** What the route actually sends for `reasoning_effort` (empty when unset; equal when verbatim). */
+  reasoning_effort_wire?: string
   running?: boolean
   service_tier?: string
   skills?: Record<string, string[]> | string[]
@@ -1578,21 +1587,6 @@ export interface StaleAuxAssignment {
   model: string
 }
 
-export type CronModelDriftAxis = 'model' | 'provider'
-
-export interface CronModelImpactJob {
-  id: string
-  name: string
-  drifted_axes: CronModelDriftAxis[]
-}
-
-export interface CronModelImpact {
-  available: boolean
-  affected_count: number
-  truncated: boolean
-  jobs: CronModelImpactJob[]
-}
-
 /** One skill-hub source (official index, GitHub, skills.sh, …) as reported by
  *  `GET /api/skills/hub/sources`. */
 export interface SkillHubSource {
@@ -1761,8 +1755,6 @@ export interface ModelAssignmentResponse {
    *  switching the main provider to Nous. Empty unless provider === 'nous'
    *  and the user is a paid subscriber with unconfigured tools. */
   gateway_tools?: string[]
-  /** Additive profile-local cron impact returned after a persisted main assignment. */
-  cron_model_impact?: CronModelImpact
   confirm_message?: string
   confirm_required?: boolean
   model?: string
