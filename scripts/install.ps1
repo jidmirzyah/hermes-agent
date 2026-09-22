@@ -840,10 +840,14 @@ function Install-Uv {
             if ($existingUv) {
                 Write-Info "Salvaging existing uv from $existingUv"
                 try {
-                    Copy-Item $existingUv $managedUv -Force
                     # Verify the salvaged binary actually runs before
                     # trusting it as the managed uv.
-                    $null = & $managedUv --version
+                    Copy-Item $existingUv $managedUv -Force
+                    $salvagedVersion = & $managedUv --version
+                    if ($LASTEXITCODE -ne 0) {
+                        Write-Info "Copied uv at $managedUv failed validation; continuing fallback"
+                        Remove-Item $managedUv -Force -ErrorAction SilentlyContinue
+                    }
                 } catch {
                     Write-Info "Existing uv at $existingUv could not be salvaged: $_"
                     Remove-Item $managedUv -Force -ErrorAction SilentlyContinue
@@ -4317,12 +4321,13 @@ function Install-Desktop {
     }
 
     # 3b. The Hermes icon + identity are stamped onto Hermes.exe by the
-    #     electron-builder `afterPack` hook (apps/desktop/scripts/after-pack.mjs)
+    #     electron-builder `afterExtract` hook (apps/desktop/scripts/after-extract.mjs)
     #     during `npm run pack` above -- for every build, so the installer's
     #     --update rebuild stays branded too. No separate stamp step needed here.
-    #     electron-builder's own rcedit step stays disabled (signAndEditExecutable
-    #     =false) because enabling it drags in signtool -> winCodeSign -> the
-    #     unfixable symlink crash; the afterPack hook runs rcedit directly.
+    #     It runs BEFORE the ASAR-integrity PE rewrite (rcedit cannot commit to
+    #     the rewritten exe, #105629). electron-builder's own rcedit step stays
+    #     disabled (signAndEditExecutable=false) because enabling it drags in
+    #     signtool -> winCodeSign -> the unfixable symlink crash.
 
     # 3c. Grant ALL APPLICATION PACKAGES (S-1-15-2-2) RX on the unpacked app
     #     directory. Chromium's GPU/renderer sandboxes CHECK-fail with
