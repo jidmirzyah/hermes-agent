@@ -59,6 +59,18 @@ from concurrent.futures import ThreadPoolExecutor, Future
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+def _rmtree_force(path) -> None:
+    """shutil.rmtree that retries a read-only leftover instead of silently skipping it the way
+    ``ignore_errors=True`` would (some fixtures chmod their tmp_path tree read-only and never
+    restore it, leaking it forever)."""
+    def _chmod_retry(fn, p, _exc):
+        try:
+            os.chmod(os.path.dirname(p) if fn is os.rmdir or fn is os.listdir else p, 0o700)
+            os.chmod(p, 0o700)
+            fn(p)
+        except OSError:
+            pass
+    shutil.rmtree(path, onerror=_chmod_retry)
 
 # Default test discovery roots.
 _DEFAULT_ROOTS = ["tests"]
@@ -574,8 +586,9 @@ def _run_one_file_once(
     finally:
         # Delete the temp root for this attempt. Nothing reads it after the
         # subprocess exits. More than 3000 of them fill the disk of the
-        # runner over one suite.
-        shutil.rmtree(per_file_tmp, ignore_errors=True)
+        # runner over one suite. Permission fixtures leave read-only dirs
+        # behind; make them writable and retry instead of skipping them.
+        _rmtree_force(per_file_tmp)
 
     if rc == 5:
         # No tests collected in THIS file — legitimate per-file: a
@@ -1389,7 +1402,7 @@ def main() -> int:
         # shared-TMPDIR race) — reclaim them ourselves once every subprocess
         # has finished, so this doesn't silently leak disk space run over
         # run.
-        shutil.rmtree(runner_tmp_root, ignore_errors=True)
+        _rmtree_force(runner_tmp_root)
 
     elapsed = time.monotonic() - started
     print()
