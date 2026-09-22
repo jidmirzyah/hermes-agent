@@ -182,6 +182,8 @@ That bridges to `ELECTRON_OZONE_PLATFORM_HINT` at launch (an explicit env var st
 
 #### WSLg (Windows GPU from WSL2)
 
+Under local WSLg, Hermes launches with `--ozone-platform=wayland` to avoid the XWayland maximized-window offset and shifted mouse hit-testing ([microsoft/wslg#1015](https://github.com/microsoft/wslg/issues/1015)). The platform must be selected at process launch, before Electron loads application JavaScript. Explicit `--ozone-platform=x11` and `desktop.ozone_platform_hint: x11` remain available. The app draws its own minimize, maximize and close controls on WSLg.
+
 When `hermes gui` runs inside WSL2 with `/dev/dxg` present and Mesa's `d3d12_dri.so` installed, the launcher sets `GALLIUM_DRIVER=d3d12` for Electron so rendering uses the Windows GPU instead of the llvmpipe software rasterizer; an explicit `GALLIUM_DRIVER`, `MESA_LOADER_DRIVER_OVERRIDE`, `LIBGL_ALWAYS_SOFTWARE`, or `LIBGL_DRIVERS_PATH` in your environment is left untouched (for example `GALLIUM_DRIVER=llvmpipe hermes gui` keeps software rendering).
 
 ### Settings & onboarding
@@ -191,7 +193,7 @@ Manage providers, models, tools, and credentials from a real UI instead of editi
 - **Providers settings pane** — a dedicated place to manage inference providers, with an Accounts / API-keys UX for signing in and storing credentials per provider. Accounts and API keys share the Settings **Applies to** selection: credential reads and edits, OAuth account removal, and sign-in launched here target the selected profile, not the active chat profile. The sign-in flow keeps that target through credential saving and model selection. Changing **Applies to** discards unsaved credential drafts. Closing sign-in cancels polling and ignores late results; a credential write already sent may still finish in its original profile. Externally managed CLI credentials use their own CLI and are not covered by this profile selector. Its **Local Models** view installs and manages an on-device llama.cpp runtime — see [Local Models](/user-guide/local-models).
 - **Every provider and model in the menus** — the GUI surfaces the full provider list and every model that `hermes model` knows about, so you pick from the same catalog the CLI sees rather than a curated subset.
 - **xAI Grok OAuth** — Grok is a first-class OAuth provider in the launcher; sign in through the browser flow like the other OAuth providers.
-- **Tool-backend installs from the GUI** — run a tool backend's post-setup install steps directly from the app instead of dropping to a terminal.
+- **Tool-backend installs from the GUI** — run a tool backend's post-setup install steps directly from the app instead of dropping to a terminal. In the terminal backend picker, selecting a backend marked **Needs setup** asks for confirmation first; declining leaves the current backend selected.
 - **Terminal font picker** — choose an installed font in **Settings → Appearance**. Nerd Fonts such as `MesloLGS NF` render Powerlevel10k separators and icons in both interactive and agent terminals; the setting is saved per profile.
 - **Reopen Last Chat on Launch** — by default the app picks up where you left off on cold start. Turn it off in **Settings → Appearance** (or set `display.resume_last_session: false` in `config.yaml`) to always begin with a fresh chat. Deep links and explicit destinations are never overridden either way.
 - **Auxiliary-model warning** — if you switch the main model to a new provider while auxiliary tasks (titling, summarization, and similar helpers) are still pinned to another provider, the app warns you so you don't unknowingly split work across two providers.
@@ -327,7 +329,13 @@ chats decide who replies: [Bot Mode: A Roster of Agents](./bot-mode.md).
 
 The app checks for updates in the background and offers a one-click update when one is ready.
 
-The background check asks the GitHub API for the branch tip. Anonymous GitHub requests are limited to 60 per hour **per network address**, so on a shared connection (office NAT, VPN, proxy) the check can report `GitHub API rate limit reached` even though this machine made almost none of them. If `GITHUB_TOKEN` (or `GH_TOKEN`) is set in the environment the app was launched from, the check spends that token's 5,000/hour budget instead; the token is read from the environment on each request and never stored. Applying an update uses `git`, not the API, and is unaffected.
+The background check asks the GitHub API for the branch tip. Anonymous GitHub requests are limited to 60 per hour **per network address**, so on a shared connection (office NAT, VPN, proxy) the check can report `GitHub API rate limit reached` even though this machine made almost none of them. To spend a 5,000/hour budget instead, the check uses the first credential it finds, in this order:
+
+1. `GITHUB_TOKEN`, then `GH_TOKEN`, from the environment the app was launched from — read on each request, never stored.
+2. The [GitHub CLI](https://cli.github.com/)'s own login (`gh auth token`). This is the rung that helps an app started from the Dock, Finder, or a desktop launcher, which inherits a minimal environment without your shell's variables. `gh` is looked up on `PATH` and in the usual install locations (Homebrew, `/usr/local/bin`, `~/.local/bin`, the Windows GitHub CLI installer); the answer is cached until the app restarts, so `gh` runs at most once per session.
+3. Anonymous.
+
+A credential GitHub rejects (HTTP 401 — expired or revoked) is logged once in `desktop.log`, naming its source and never the token, and the request is retried anonymously. Applying an update uses `git`, not the API, and is unaffected.
 
 During a local update, detailed build output streams into the active profile's
 `logs/update.log`, including detached `--gateway` updates. It stays out of the

@@ -473,8 +473,23 @@ class TestResolvePerModelReasoningEffort:
         result = resolve_per_model_reasoning_effort("claude-opus-4.5", overrides)
         assert result == {"enabled": True, "effort": "high"}
 
+    def test_prefixed_key_matches_bare_model(self):
+        """A custom-provider prefixed key (``ollama-local/qwen3.6:27b``) applies to the bare runtime slug.
 
+        Fallback entries and named custom providers feed ``agent.model`` without the provider
+        prefix while the documented key spelling keeps ``provider/model``; a key for a different
+        model must still miss.
+        """
+        from hermes_constants import resolve_per_model_reasoning_effort
+        overrides = {"ollama-local/qwen3.6:27b-q4_k_m": "low"}
+        assert resolve_per_model_reasoning_effort("qwen3.6:27b-q4_k_m", overrides) == {"enabled": True, "effort": "low"}
+        assert resolve_per_model_reasoning_effort("llama3.2:3b", overrides) is None
 
+    def test_direct_match_wins_over_reverse_lookup(self):
+        """A direct/variant key match keeps priority over a prefixed reverse match."""
+        from hermes_constants import resolve_per_model_reasoning_effort
+        overrides = {"qwen3.6:27b": "medium", "ollama-local/qwen3.6:27b": "low"}
+        assert resolve_per_model_reasoning_effort("qwen3.6:27b", overrides) == {"enabled": True, "effort": "medium"}
 
 
 class TestResolveReasoningConfig:

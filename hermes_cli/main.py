@@ -821,6 +821,7 @@ from hermes_cli.main_desktop import (  # frozen updater surface: update_cmd*.py 
     _desktop_dist_exists,
     _desktop_macos_relaunchable_fixup,
     _desktop_packaged_executable,
+    _install_rebuilt_desktop_app,
 )
 from hermes_cli.main_web_build import (
     _sweep_stale_bytecode_if_checkout_changed,
@@ -1263,6 +1264,10 @@ def _resolve_last_session(source: str = "cli") -> Optional[str]:
     global MRU. Falls back to the unscoped MRU when no session matches the
     current workspace, preserving the old behaviour for fresh directories.
     """
+    # A finite `hermes -z`/`chat -q` run is CLI history too: `hermes -z … --resume latest` chains on it.
+    if source == "cli":
+        from run_agent import CLI_FAMILY_SOURCES
+        source = sorted(CLI_FAMILY_SOURCES)
     with _session_db() as db:
         ws_key = _resolve_workspace_key()
         if ws_key:
@@ -2742,8 +2747,13 @@ def _dashboard_lifecycle_flags(args, token_file) -> None:
         _report_dashboard_status()
         sys.exit(0)  # status is informational, always 0
     if getattr(args, "stop", False):
-        if not _find_stale_dashboard_pids():
-            print("No hermes dashboard processes running.")
+        # Scoped to the invoking home (`-p` applied by _apply_profile_override): another
+        # install's or profile's backend on this machine is never a target (#113978).
+        from hermes_constants import get_hermes_home
+
+        own_home = str(get_hermes_home())
+        if not _find_stale_dashboard_pids(scope_home=own_home):
+            print("No hermes dashboard processes running for this profile.")
             sys.exit(0)
         # Reuse the same SIGTERM-grace-SIGKILL path used after `hermes update`;
         # it prints outcomes itself. Exit 1 only if a pid was unkillable — judged
@@ -2751,7 +2761,7 @@ def _dashboard_lifecycle_flags(args, token_file) -> None:
         # its backend on a fresh PID, which is not a failed stop.
         from hermes_cli.dashboard_procs import _kill_stale_dashboard_processes
 
-        result = _kill_stale_dashboard_processes(reason="requested via --stop")
+        result = _kill_stale_dashboard_processes(reason="requested via --stop", scope_home=own_home)
         sys.exit(1 if result["failed"] else 0)
 
 

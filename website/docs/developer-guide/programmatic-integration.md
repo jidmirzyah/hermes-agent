@@ -47,6 +47,7 @@ session.activate        session.close           session.interrupt
 session.history         session.compress        session.branch
 session.title           session.usage           session.status
 clarify.lock            config.set / config.get commands.catalog
+client.capabilities     gateway.capabilities    ping
 command.resolve         command.dispatch        cli.exec
 reload.mcp              reload.env              process.stop
 delegation.status       subagent.interrupt      subagent.steer
@@ -87,6 +88,8 @@ Approvals, clarify questions, sudo/secret prompts, vault unlock, MCP setup and t
 ```
 
 Methods: `approval` → `{choice}`; `clarify` → `{answer}` (single) or `{answers}` / `{}` cancel (batch, with `clarify.lock` to lock one answer early); `sudo`, `secret`, `vault.code`, `vault.unlock_prompt` → `{value}`; `connection` → `{settled_by, targets}` (the `manage_connections` card: one outcome per target); `terminal.read`, `window.read`, `preview.act`, `tour` → `{value}` (JSON text). Respond with a JSON-RPC error (`-32601`) for a method your host does not implement so the agent fails fast instead of waiting out the timeout.
+
+**Advertise that you answer them (breaking for existing WebSocket integrations).** Once per connection, after `gateway.ready`, call `client.capabilities` with `{"server_requests": true}`; the result lists the request methods this backend may send. A WebSocket client that never does is treated as a build that predates server→client requests: the gateway fails every such request for it immediately (the agent sees the same "no answer" an error response produces; an approval is withdrawn, not denied) instead of stalling for the full deadline. There is no grace path — a third-party WebSocket client that answered `clarify`/`approval`/`sudo`/… before this change but never sends `client.capabilities` now has every such request refused until it adds the one call. A session with no client attached is not affected — its open questions wait in `open_requests` for the reconnect replay. The stdio TUI, the desktop app and the dashboard advertise through the shared `JsonRpcRequestChannel`.
 
 When the gateway withdraws a question (timeout, interrupt, answered from another surface) it emits `request.cancel` `{ id, method, reason }`; clear only the matching prompt. `session.resume` / `session.activate` results and `session.events.since` carry `open_requests` — the still-open frames — so a reconnecting client re-renders (and can still answer) them.
 
@@ -183,6 +186,7 @@ The terminal status of a run is derived from how the agent's turn actually ended
 | Final answer produced | `completed` | `run.completed` | `completed: true` |
 | Interrupted (`/stop`, or an interrupt inside the agent) | `cancelled` | `run.cancelled` | `completed: false`, `interrupted: true`, `turn_exit_reason` naming the issuer — `interrupted_by_user` for a human stop, `interrupted_by_system(<issuer>)` / `interrupted_during_api_call(<issuer>)` when a watchdog (e.g. `cron_inactivity_watchdog`, `turn_liveness_watchdog`, `gateway_inactivity_watchdog`, `session_turn_lease_lost`) ended the turn |
 | Provider/agent failure | `failed` | `run.failed` | `completed: false`, `error` |
+| Gateway shut down while the run was active (`/v1/runs` only) | `interrupted` | `run.interrupted` | `error: "Gateway shutdown interrupted the run."` — recorded before the agent is interrupted and never overwritten by the turn's late result; a client `/stop` still settles as `cancelled` |
 | Ended without finishing (iteration budget, truncated or partial reply) | `failed` | `run.failed` | `completed: false`, `partial` when applicable, `turn_exit_reason` (e.g. `max_iterations_reached(60/60)`), `output` with any fallback text |
 
 A run is never reported as `completed` with `completed: false` or `partial: true` in the same payload. The same rule applies to `/api/sessions/{id}/chat/stream`, whose `assistant.completed` payload carries the real `completed` / `partial` / `interrupted` flags and whose terminal event is `run.completed`, `run.failed`, or `run.cancelled`.
