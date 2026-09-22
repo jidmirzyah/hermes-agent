@@ -168,6 +168,37 @@ def test_complete_retry_with_empty_created_cards_succeeds(worker_env):
         conn.close()
 
 
+def test_complete_reports_registered_attachments(worker_env):
+    """#117360: artifact staging is atomic with the completion write, so the
+    worker's pre-completion `kanban_attachments` readback is always empty and
+    workers narrated "registered at completion: none" even when the rows landed.
+    The completion result must report the card's durable attachment set, in the
+    same shape the readback tool returns."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli import kanban_db_workspace as kbw
+    from tools import kanban_tools as kt
+
+    with kbc.connect() as conn:
+        task = kb.get_task(conn, worker_env)
+        ws = kbw.resolve_workspace(task)
+        kbw.set_workspace_path(conn, worker_env, ws)
+    artifact = ws / "corpus.json"
+    artifact.write_bytes(b"{}")
+
+    out = kt._handle_complete({
+        "summary": "done",
+        "artifacts": [str(artifact)],
+    })
+    d = json.loads(out)
+    assert d["ok"] is True, d
+    assert [(a["filename"], a["size"], a["uploaded_by"]) for a in d["attachments"]] == [
+        ("corpus.json", 2, "kanban_complete")]
+
+    readback = json.loads(kt._handle_attachments({"task_id": worker_env}))
+    assert readback["attachments"] == d["attachments"]
+
+
 def test_request_review_rejects_unknown_reviewer_without_mutation(monkeypatch, worker_env, tmp_path):
     """#106163: a non-profile ``reviewer`` (e.g. the literal "reviewer") must be
     refused with an error the model sees, leaving the task running under the
@@ -507,27 +538,21 @@ def test_comment_happy_path(worker_env):
         conn.close()
 
 
-def test_comment_ignores_caller_supplied_author(worker_env):
-    """``args["author"]`` is no longer honored — the author is always
-    derived from ``HERMES_PROFILE`` so a worker can't forge a comment
-    under an authoritative-looking name like ``hermes-system`` and
-    poison the next worker's prompt context. Cross-task commenting
-    itself remains unrestricted (see #19713); only the author override
-    is removed.
-    """
+def test_comment_rejects_caller_supplied_author(worker_env):
+    """Reject an undeclared author override before a worker can forge a comment."""
     from tools import kanban_tools as kt
     out = kt._handle_comment({
         "task_id": worker_env, "body": "hi", "author": "hermes-system",
     })
-    assert json.loads(out)["ok"]
+    assert "author" in json.loads(out)["error"]
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_db_connect as kbc
     conn = kbc.connect()
     try:
-        comments = kb.list_comments(conn, worker_env)
-        # Author comes from HERMES_PROFILE in the fixture, not the
-        # caller-supplied "hermes-system" override.
-        assert comments[0].author == "test-worker"
+        assert kb.list_comments(conn, worker_env) == []
+        out = kt._handle_comment({"task_id": worker_env, "body": "hi"})
+        assert json.loads(out)["ok"]
+        assert kb.list_comments(conn, worker_env)[0].author == "test-worker"
     finally:
         conn.close()
 
