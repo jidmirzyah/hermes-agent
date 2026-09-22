@@ -51,7 +51,7 @@ An **Advanced** disclosure opens the full capabilities surface:
 
 - **Clone from an existing profile** — start from another Bot's config, skills, SOUL, and memory, or pick **Fresh profile** for a clean start.
 - **Create empty** — skip the bundled skills entirely for a minimal profile.
-- **Model & provider pin** — give the Bot its own model. Any provider/model pair Hermes knows about works, and different Bots can run on different models side by side. Leave it unset to inherit from the launch profile.
+- **Model & provider pin** — give the Bot its own model. Any provider/model pair Hermes knows about works, and different Bots can run on different models side by side. Leave it unset to inherit from the launch profile. Picking a model from the Bot Chat's composer sticks to that chat (it survives reopening the app) until you change the Bot's profile model, which takes over again.
 - **Custom SOUL.md** — the Bot's persona and standing instructions.
 - **Per-skill, per-toolset, and per-MCP-server enablement** — tick exactly the capabilities this specialist needs.
 - **Copy API keys from the main profile** — on by default. Each Bot gets its own credential store: static API keys are copied in, while single-use OAuth logins (Anthropic, OpenAI Codex, xAI) are not copied — sign the Bot in itself with `hermes -p <name> auth add <provider>`. See [Every profile owns its credentials](./profiles.md#every-profile-owns-its-credentials).
@@ -216,7 +216,7 @@ A failed bot turn or relay delivery carries a machine-readable `reason` code alo
 Every gateway you register in **Settings → Connections** — local, remote URL, SSH, Hermes Cloud, docker — is a persistent line the Desktop holds open, and Bot Mode uses those lines for messaging automatically. No extra setup:
 
 - **Rosters propagate on their own.** While the Desktop runs, it periodically tells each connected gateway which agents live on the *other* connections. Every Bot Chat's teammate roster then lists them ("Teammates on OTHER connected machines"), with names, roles, and which machine they're on — and the roster refreshes when agents appear, disappear, or get renamed (capability epoch).
-- **`message_agent` reaches them directly.** A Bot on your laptop messages the cloud agent with `message_agent(target="moxie", …)` exactly like a local teammate. If the same handle exists on several machines, disambiguate with `target="moxie@<connection>"` (the tool's error tells the Bot the exact forms). Delivery rides the Desktop: the sending gateway queues the message, the Desktop relays it to the target connection's own gateway, the target Bot runs a turn in its canonical Bot Chat, and the reply comes back to the sender as the same background completion notification local DMs use. Messages to different Bots are delivered side by side, so one Bot's long turn never delays another Bot's mail (or ages it past `bot_mode.envelope_ttl_seconds`); messages to the *same* Bot are delivered in order, one turn at a time.
+- **`message_agent` reaches them directly.** A Bot on your laptop messages the cloud agent with `message_agent(target="moxie", …)` exactly like a local teammate. If the same handle exists on several machines, disambiguate with `target="moxie@<connection>"` (the tool's error tells the Bot the exact forms). Delivery rides the Desktop: the sending gateway queues the message, the Desktop relays it to the target connection's own gateway, the target Bot runs a turn in its canonical Bot Chat, and the reply comes back to the sender as the same background completion notification local DMs use (the process that waits for it is a Hermes entrypoint, so it starts under `approvals.single_query_mode: deny` — the default for a Bot's one-shot reply turn — too). Messages to different Bots are delivered side by side, so one Bot's long turn never delays another Bot's mail (or ages it past `bot_mode.envelope_ttl_seconds`); messages to the *same* Bot are delivered in order, one turn at a time.
 - **The Desktop is the courier.** Cross-connection delivery works while a Desktop that knows both connections is running (it holds the sockets and the credentials — gateways never see each other's auth). If the Desktop is closed mid-delivery, the sender's Bot is told the reply didn't arrive rather than left hanging. For always-on machine-to-machine messaging with no Desktop in the loop, register a peer (`hermes peer`, below) — the two routes coexist.
 
 ### Bot-initiated DMs across machines (`hermes peer`)
@@ -236,7 +236,10 @@ hermes peer stop spark run_abc123
 `hermes peer dm` delivers into the remote agent's canonical Bot Chat over the peer's existing API server, runs one agent turn there, and prints the reply on stdout — the exact cross-machine twin of the local `hermes -p <bot> chat` command.
 
 Use `peer dm` only for short queries and receipts because it holds one HTTP
-connection until the turn finishes. For a long turn, `peer run` returns a
+connection until the turn finishes. If the peer takes the message but the turn outlasts that
+connection, the message is already in the peer's Bot Chat and the turn keeps running there, so the
+command says exactly that instead of reporting the peer unreachable — resending would run the turn
+twice. A timeout while connecting still reports the peer unreachable. For a long turn, `peer run` returns a
 `run_id` immediately; poll it with `peer status`. The run inherits the
 canonical Bot Chat transcript, and a stable `--idempotency-key` makes a retry
 return the original run instead of starting duplicate work. Use `peer stop`
