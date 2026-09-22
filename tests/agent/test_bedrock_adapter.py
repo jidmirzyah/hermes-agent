@@ -1067,6 +1067,58 @@ class TestBedrockContextLength:
             mock_probe.assert_not_called()
 
 
+class TestInferenceProfileContextLength:
+    """Application-inference-profile ARNs name no model, so the window must come from the model the
+    profile wraps via GetInferenceProfile — on the production call shape (no region, probe=False)."""
+
+    ARN = "arn:aws:bedrock:us-west-2:123456789012:application-inference-profile/abcdef123456"
+
+    def setup_method(self):
+        from agent import bedrock_adapter
+        bedrock_adapter._inference_profile_model_cache.clear()
+
+    def test_arn_resolves_wrapped_model_window_in_the_arn_region(self):
+        # No region passed (agent/model_metadata.py::_resolve_bedrock_context_length passes none) and
+        # AWS_REGION elsewhere: the lookup must still run, in the ARN's own region, with the
+        # parameter name botocore actually validates (inferenceProfileIdentifier).
+        from agent.bedrock_adapter import get_bedrock_context_length
+        client = MagicMock()
+        client.get_inference_profile.return_value = {"models": [
+            {"modelArn": "arn:aws:bedrock:us-west-2::foundation-model/anthropic.claude-sonnet-4-6"}]}
+        with patch("agent.bedrock_adapter._get_bedrock_control_client", return_value=client) as factory, \
+                patch.dict("os.environ", {"AWS_REGION": "us-east-1"}):
+            assert get_bedrock_context_length(self.ARN, probe=False) == 1_000_000
+            assert get_bedrock_context_length(self.ARN, probe=False) == 1_000_000  # cached per process
+        factory.assert_called_once_with("us-west-2")
+        client.get_inference_profile.assert_called_once_with(inferenceProfileIdentifier=self.ARN)
+
+    def test_resolution_denied_falls_back_to_default_with_warning(self, caplog):
+        # Without bedrock:GetInferenceProfile the default window applies and the silence is broken
+        # with a WARNING naming the profile and the explicit-config escape hatch.
+        from agent.bedrock_adapter import get_bedrock_context_length, BEDROCK_DEFAULT_CONTEXT_LENGTH
+        client = MagicMock()
+        client.get_inference_profile.side_effect = Exception("AccessDeniedException")
+        with patch("agent.bedrock_adapter._get_bedrock_control_client", return_value=client), \
+                caplog.at_level("WARNING", logger="agent.bedrock_adapter"):
+            assert get_bedrock_context_length(self.ARN, probe=False) == BEDROCK_DEFAULT_CONTEXT_LENGTH
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert len(warnings) == 1 and self.ARN in warnings[0].getMessage()
+        assert "GetInferenceProfile" in warnings[0].getMessage()
+
+    def test_profile_wrapping_claude_keeps_prompt_cache_markers(self):
+        # build_converse_kwargs gates cachePoint on the model id; the opaque profile ARN must be
+        # resolved to the wrapped Claude (cached lookup) or the profile silently loses prompt caching.
+        from agent.bedrock_adapter import build_converse_kwargs
+        client = MagicMock()
+        client.get_inference_profile.return_value = {"models": [
+            {"modelArn": "arn:aws:bedrock:us-west-2::foundation-model/anthropic.claude-sonnet-4-6"}]}
+        messages = [{"role": "system", "content": "Be helpful."}, {"role": "user", "content": "Hi"}]
+        with patch("agent.bedrock_adapter._get_bedrock_control_client", return_value=client):
+            kwargs = build_converse_kwargs(model=self.ARN, messages=messages)
+        assert kwargs["modelId"] == self.ARN  # the request still targets the profile
+        assert kwargs["system"][-1] == {"cachePoint": {"type": "default"}}
+
+
 class TestBedrockContextProbe:
     """Test the live context-window probe that reads the real window from
     Bedrock's 'prompt is too long' validation error."""

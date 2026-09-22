@@ -127,6 +127,7 @@ def reset_client_cache():
     _bedrock_runtime_client_cache.clear()
     _bedrock_control_client_cache.clear()
     _bedrock_clients_by_home.clear()
+    _inference_profile_model_cache.clear()
 
 
 def invalidate_runtime_client(region: str) -> bool:
@@ -438,6 +439,9 @@ def _model_supports_tool_use(model_id: str) -> bool:
 
 
 def _model_supports_prompt_cache(model_id: str) -> bool:
+    # An application-inference-profile ARN names no model: match on the wrapped model (cached lookup).
+    if _APPLICATION_PROFILE_ARN_RE.search(model_id):
+        model_id = _resolve_inference_profile_model_id(model_id)
     return any(pattern in model_id.lower() for pattern in _CACHE_POINT_PATTERNS)
 
 
@@ -1123,11 +1127,56 @@ def probe_bedrock_context_length(model_id: str, region: str) -> Optional[int]:
 
 def get_bedrock_context_length(model_id: str, region: str = "", probe: bool = True) -> int:
     """Context window: live probe (if ``probe`` and ``region``) → static table → default. The table is fallback
-    only: a stale substring match silently caps the window (a 1M Opus pinned to 200K via "opus-4")."""
+    only: a stale substring match silently caps the window (a 1M Opus pinned to 200K via "opus-4").
+    An application-inference-profile ARN is first resolved to the model it wraps (#114476)."""
+    profile_arn = model_id if _APPLICATION_PROFILE_ARN_RE.search(model_id) else ""
+    if profile_arn:
+        model_id = _resolve_inference_profile_model_id(profile_arn, region)
     if probe and region and (probed := probe_bedrock_context_length(model_id, region)):
         return probed
     matches = [key for key in BEDROCK_CONTEXT_LENGTHS if key in model_id.lower()]
-    return BEDROCK_CONTEXT_LENGTHS[max(matches, key=len)] if matches else BEDROCK_DEFAULT_CONTEXT_LENGTH
+    if matches:
+        return BEDROCK_CONTEXT_LENGTHS[max(matches, key=len)]
+    if profile_arn:
+        logger.warning(
+            "Bedrock inference profile %s resolved no known model window; using the %s default. "
+            "Grant bedrock:GetInferenceProfile or set model.context_length explicitly if the "
+            "wrapped model has a larger window.",
+            profile_arn,
+            f"{BEDROCK_DEFAULT_CONTEXT_LENGTH:,}",
+        )
+    return BEDROCK_DEFAULT_CONTEXT_LENGTH
+
+
+# An application-inference-profile ARN (cost-allocation wrapper) carries an opaque id, so the probe
+# error text and the static substring table both miss and the 128k default silently applies
+# (#114476). System-defined `inference-profile/us.anthropic...` ARNs embed the model id and need no
+# lookup. The ARN's own region (field 4) is authoritative for the control-plane call: the runtime
+# region / base_url may differ, and an empty region must not skip the lookup because the
+# production caller (agent/model_metadata.py::_resolve_bedrock_context_length) passes none.
+_APPLICATION_PROFILE_ARN_RE = re.compile(r":application-inference-profile/")
+_ARN_REGION_RE = re.compile(r"^arn:[^:]+:bedrock:([a-z0-9-]+):", re.IGNORECASE)
+_inference_profile_model_cache: Dict[str, str] = {}
+
+
+def _resolve_inference_profile_model_id(profile_arn: str, region: str = "") -> str:
+    """Application-profile ARN → the wrapped model's ARN (its ``foundation-model/<id>`` tail satisfies the
+    static-table substring match); the profile ARN itself when ``bedrock:GetInferenceProfile`` is not
+    granted or unavailable, so callers keep the default-window behaviour. Both outcomes are cached per
+    process: this runs on every context-length resolution, not once per model."""
+    if profile_arn in _inference_profile_model_cache:
+        return _inference_profile_model_cache[profile_arn]
+    arn_region = _ARN_REGION_RE.match(profile_arn)
+    region = (arn_region.group(1) if arn_region else "") or region or resolve_bedrock_region()
+    resolved = profile_arn
+    try:
+        client = _get_bedrock_control_client(region)
+        models = client.get_inference_profile(inferenceProfileIdentifier=profile_arn).get("models") or []
+        resolved = next((m["modelArn"] for m in models if m.get("modelArn")), profile_arn)
+    except Exception as exc:  # no boto3 / credentials / GetInferenceProfile not granted
+        logger.debug("Inference profile resolution skipped for %s: %s", profile_arn, exc)
+    _inference_profile_model_cache[profile_arn] = resolved
+    return resolved
 
 
 # ---- BEGIN PLUGIN-COMPAT (revert-scheduled; see COMPAT_MANIFEST.md) ----
