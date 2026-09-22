@@ -183,13 +183,13 @@ DEFAULT_CONFIG = {
         "verify_on_stop": False,
         # Inactivity warning (seconds), once per run before gateway_timeout; no interrupt. 0 = off.
         "gateway_timeout_warning": 900,
-        # Max seconds the gateway blocks an agent awaiting a clarify-tool reply; then it unblocks
-        # with "[user did not respond within Xm]". CLI clarify blocks indefinitely and ignores this.
+        # Max seconds any surface (CLI, TUI/Desktop, messaging gateway) blocks an agent awaiting a
+        # clarify-tool reply; then it unblocks with "[user did not respond within Xm]". 0 or less =
+        # unlimited. Resolved by tools/clarify_gateway.py::resolve_clarify_timeout (a legacy
+        # top-level ``clarify.timeout`` still wins when explicitly set).
         # 1h because users step away and a shorter value evicted the entry mid-think so a later
-        # button tap hit a dead entry. Lower it to free the running-agent guard sooner.
-        # Maximum time (seconds) the gateway will block an agent waiting for a clarify-tool response from
-        # the user. Tradeoff: a higher value holds the gateway's running-agent guard longer for a genuinely
-        # abandoned prompt — lower it if a single session must free up the guard sooner. See #32762.
+        # button tap hit a dead entry. Tradeoff: a higher value holds the gateway's running-agent
+        # guard longer for a genuinely abandoned prompt — lower it to free the guard sooner. See #32762.
         "clarify_timeout": 3600,
         # "Still working" status interval (seconds); 0 = off. Lower = faster feedback, more noise;
         # 180 catches spinning weak-model runs before users /restart.
@@ -595,7 +595,9 @@ DEFAULT_CONFIG = {
         "hygiene_max_turn_hold_seconds": 10,
         # Inactivity budget for in-agent compress_context (loop, /compress, preflight); same
         # progress-aware semantics as hygiene_timeout_seconds. 0 = disable the owned wrapper
-        # (callers passing commit_fence, e.g. gateway hygiene, never use it).
+        # (callers passing commit_fence, e.g. gateway hygiene, never use it). Floored at the auxiliary
+        # compression request timeout (auxiliary.compression.timeout, min 300s): the host never judges
+        # silence before the summary request itself would time out.
         "context_timeout_seconds": 120,
         # Absolute cap on the *pre-commit* compress_context wait (summary/stream phase) even while
         # tokens move. Clamped >= context_timeout_seconds when that is > 0. A started SessionDB
@@ -1491,6 +1493,7 @@ DEFAULT_CONFIG = {
             "window_seconds": 21600,  # only inspect messages from the last 6 hours
             "limit": 100,  # global cap on messages scanned per reconnect
             "max_dispatches": 10,  # cap on recovered messages dispatched per reconnect
+            "max_attempts": 3,  # lifetime re-dispatch cap for one message, whatever its outcome
         },
         "reactions": True,  # add 👀/✅/❌ reactions to messages during processing
         # Gateway transport health probe: inspects the WebSocket's ready/open/heartbeat state (never
