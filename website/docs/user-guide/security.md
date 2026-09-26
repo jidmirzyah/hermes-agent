@@ -906,15 +906,28 @@ TERMINAL_SSH_KEY=~/.ssh/hermes_agent_key
 
 The SSH connection details live in `.env` (not `config.yaml`) so they aren't checked in or shared along with profile exports. This keeps the gateway's messaging connections separate from the agent's command execution.
 
-## Trusted-by-placement extension points {#trusted-by-placement}
+## TLS certificate trust
 
-Most third-party code Hermes can run is gated by an explicit allow-list: general plugins need `plugins.enabled`, shell hooks need a first-use approval (or `hooks_auto_accept`), MCP servers are listed in config. One surface is deliberately different:
+Hermes initializes the platform verifier through `truststore`. Windows uses
+its certificate store, macOS uses its system trust services, and Linux uses
+the OpenSSL system trust paths. If initialization fails, Hermes logs the
+failure and falls back to OpenSSL defaults.
 
-| Extension point | Loaded from | Loaded when | Opt-in |
-|-----------------|-------------|-------------|--------|
-| [Gateway event hooks](./features/hooks.md#gateway-event-hooks) | `<profile home>/hooks/<name>/` (`HOOK.yaml` + `handler.py`) | Gateway startup (`HookRegistry.discover_and_load()`), per served profile | **Placing the directory.** No `plugins.enabled` entry, no prompt; `HERMES_SAFE_MODE` does not skip it. |
+For a corporate TLS proxy, install its root through your organization's
+operating-system trust procedure. Hermes' provider resolver no longer selects
+trust through `HERMES_CA_BUNDLE` or the old CA-environment-variable ladder.
+Sandboxed subprocesses can have their own separate CA configuration.
 
-The gateway imports every valid hook directory in-process, with the gateway's own privileges. This is the documented contract (since `3988c3c245f`), not an oversight: the profile home is operator-owned configuration, and anyone who can write into it can already run code as you through `config.yaml` shell hooks or by editing `plugins.enabled`, so a separate consent gate for `hooks/` would add friction without moving the trust boundary. Treat the contents of `~/.hermes/hooks/` like the contents of `config.yaml` — review a `handler.py` before you place it, and include `ls ~/.hermes/hooks/` whenever you audit the rest of the profile home (the directory is not on the [protected-paths denylist](#file-write-safety), so it is ordinary writable state). Full details: [gateway hook trust model](./features/hooks.md#gateway-hook-trust).
+A custom provider can declare `ssl_ca_cert` for its endpoint. That bundle
+replaces platform trust for chat, model metadata, and model catalog probes.
+A missing file produces a warning and falls back to platform trust.
+`ssl_verify: false` disables certificate verification and is unsafe for
+untrusted networks. Do not use it as a permanent fix for a missing corporate root.
+
+Provider HTTP clients keep proxy configuration separate from certificate
+selection. A stale ambient CA-file path cannot prevent those clients from
+starting. PM index credentials are sent only to their exact HTTPS origin;
+redirects to another origin do not receive them.
 
 ## Supply-chain advisory checking
 
@@ -938,35 +951,47 @@ The check itself is stdlib-only and runs from one `importlib.metadata.version()`
 
 ### Lazy install of optional dependencies
 
-Many features (Mistral TTS, ElevenLabs, Honcho memory, Bedrock, Slack, Matrix, …) depend on Python packages that not every user needs. Hermes installs these **lazily** on first use rather than eagerly under `hermes-agent[all]`. The implementation lives in `tools/lazy_deps.py`.
+PM manages optional Python features as extras from `pyproject.toml`.
+Source installers select the `all` extra. Native bundles include all extras
+supported by their target. These are different feature sets.
 
-The trade-off this fixes:
+When a backend requests an unavailable extra, `pm.ensure_import("extra-name")`
+uses the same dependency transaction as plugin admission:
 
-- **Fragility.** When one extra's transitive dependency becomes unavailable on PyPI (quarantined for malware, yanked, broken upload), the entire `[all]` resolve would fail and fresh installs would silently fall back to a stripped tier — losing 10+ unrelated extras at once. Lazy install isolates each backend so one poisoned dep can't break unrelated features.
-- **Bloat.** A user who only ever talks to one provider no longer pulls hundreds of packages they will never import.
+1. PM checks platform support and `security.allow_lazy_installs`.
+2. PM prepares a complete environment with the existing extras and enabled plugin requirements.
+3. Without plugin members, it uses the committed lock unchanged. With members, it resolves from the previous selection before a frozen workspace sync.
+4. It validates the candidate before publishing its selection. A failed candidate leaves the previous environment selected.
+5. If the current process uses the previous environment, PM reports that Hermes must restart. It does not replace imported libraries in place.
 
-How it works:
+Shipped source, locks, and signed payloads remain unchanged. Additional tools
+and Python environments use writable storage outside the base artifact.
+Plugin dependencies share the complete environment; they are not isolated
+Python sandboxes. Compatible transitive dependencies can change, but declared
+constraints and exact pins remain binding.
 
-1. A backend module calls `ensure("feature.name")` at the top of its first-import path.
-2. If the deps are missing, `ensure` checks `security.allow_lazy_installs` in `config.yaml` (default `true`) and runs a venv-scoped `pip install` for the allowlisted specs.
-3. If the install fails or the user has disabled lazy installs, the call raises `FeatureUnavailable` with the actual pip stderr and a pointer at `hermes tools`.
-
-Security guarantees enforced by `tools/lazy_deps.py`:
-
-| Guarantee | What it means |
+| Control | Behavior |
 |---|---|
-| Venv-scoped only | Installs target `sys.executable` in the active venv — never the system Python |
-| PyPI by name only | Specs accept `"package>=1.0,<2"` syntax. No `--index-url`, `git+https://`, or file: paths — a malicious `config.yaml` cannot redirect the install |
-| Allowlist | Only specs that appear in the in-tree `LAZY_DEPS` map can be installed via this path. A typo in a feature name does NOT get install-anything semantics |
-| Opt-out | Set `security.allow_lazy_installs: false` to disable runtime installs entirely. Useful for restricted networks or strict security postures |
-| No silent retries | Failures surface as `FeatureUnavailable` — no caching of bad state, no retry storms |
+| Declared extras | The helper accepts project extra names, not arbitrary pip commands. The removed `LAZY_DEPS` feature-name registry is not used. |
+| Verified tools | Managed tool archives have versions and SHA-256 hashes in `pm/lock.json`. |
+| Atomic selection | Preparation and validation precede publication of the new runtime selection. |
+| Failure reporting | Failures raise `pm.InstallError`. PM sync receipts include failed steps and policy refusals. |
+| No automatic plugin removal | A failed dependency union does not silently disable or delete installed plugins. |
 
-To disable runtime installs:
+To disable on-demand installations, run:
 
-```yaml
-# ~/.hermes/config.yaml
-security:
-  allow_lazy_installs: false
+```bash
+hermes config set security.allow_lazy_installs false
 ```
 
-When disabled, backends that need optional deps will tell the user to run the install manually (`pip install …`) or pick a different backend via `hermes tools`.
+Already installed dependencies remain usable. Explicit PM install commands
+are separate from on-demand installation. A bundle's frozen feature list,
+when present with lazy installs disabled, restricts requested Python extra
+names. This setting is not a blanket ban on explicit plugin admission or
+manual package-manager commands. The official Docker image also disables
+on-demand installs through its internal environment policy.
+
+For missing dependencies, use `hermes tools` and `hermes doctor` to identify
+the requirement. Do not run pip against a signed payload or the system Python.
+See [Package management](../reference/package-management.md) for installation
+ownership, diagnostics, and command boundaries.

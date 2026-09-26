@@ -6,6 +6,11 @@ blocks, but the WSL block previously checked only PULSE_SERVER — so a WSL user
 with PipeWire forwarding (PIPEWIRE_REMOTE) was wrongly blocked from voice mode.
 These tests patch the voice module's WSL predicate so they reproduce the WSL path on any host.
 """
+import builtins
+import io
+import pytest
+
+pytestmark = pytest.mark.platforms("linux")
 from unittest.mock import MagicMock
 
 

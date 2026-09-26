@@ -309,7 +309,7 @@ def _crop_image_region(
         from PIL import Image
     except ImportError:
         return None, None, (
-            "region cropping requires Pillow (`pip install Pillow`); "
+            "region cropping requires Pillow (run `hermes pm repair`); "
             "retry without the region parameter.")
     if not (isinstance(region, (list, tuple)) and len(region) == 4
             and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in region)):

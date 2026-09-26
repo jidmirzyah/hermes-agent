@@ -142,8 +142,8 @@ export function buildFirstTaskRunbook(
     context
       ? `They already said what they are working on: ${context}. Let it shape your choices without re-asking.`
       : '',
-    tools.length && !connectFirst
-      ? `Apps they said they use: ${tools.map(connectorTitle).join(', ')}. Some may already be connected from onboarding; check with manage_connections action="status" before assuming either way, and never require an unconnected one for this first build.`
+    tools.length
+      ? `Apps they said they use: ${tools.join(', ')}. Some may already be connected from onboarding; check with manage_connections action="status" before assuming either way, and never require an unconnected one for this first build.`
       : '',
     connectFirst
       ? 'Their next message is the go signal. Before any plan and before any other tool, connect their apps as the CONNECT FIRST section says; the work itself starts the moment that call returns.'
@@ -164,22 +164,6 @@ export function buildFirstTaskRunbook(
 
 const NO_AUTH_RULE =
   'CRITICAL: this first build must be finishable with NO external account or OAuth (no Gmail, no Slack, no Google sign-in) — connectors get wired only with their consent, and an app that is already connected may be used, one that is not may be offered. Everything else is fair game and the more visible the better: web research with the browser shown to the user as you work, scripts, computer use, a small app, a file-based tracker, a scheduled reminder, a generated page. If the idea needs an account that is not connected, build the no-auth core first and offer the connection as the next step. NEVER route around a connector: an unconnected Gmail is not a cue to install an IMAP client, ask for an app password, or find another way into the same account. The connector IS the way in; if they decline it, the app is out of this build.'
-
-/** The picks are gateway slugs the user chose during setup. The connection operation owns the wait: one call, one
- *  card, and the settled result is the go signal (D85). The card carries Try again and Continue, so neither is a model
- *  action. */
-function connectFirstRunbook(picks: string[]): string[] {
-  const named = picks.map(slug => `${slug} (${connectorTitle(slug)})`).join(', ')
-
-  return [
-    `CONNECT FIRST. During setup the user picked these apps, given here as exact gateway slugs: ${named}. Your first action in this session, before any plan and before any other tool call, is ONE manage_connections call with action="connect" and connectors set to every one of those slugs. Do not call action="status" first; the slugs are exact and the catalog check is already done.`,
-    'That one call shows the user one card with a row per app and blocks until every app is connected, or the user presses Continue, or the deadline passes. Never paste links, and never call "connect" again while the card is up. Its result lists each app as connected, skipped or not_connected.',
-    'When the result shows every app connected, begin the task at once. When some are skipped or not_connected, the user moved on: begin with the connected apps only, build the version of the task that needs no account for the rest, and say in one line what each missing connection would have added. Do not offer to connect again; the user asks when they want that.',
-    'Account data comes from the connected apps first. Tools already signed in on this machine, like a logged-in gh, are fair to use when the task benefits; say so in one line when you do.',
-    "Discover a connected app's tools with tool_search and use real results for the task; never fabricate account data. Reading is separate from sending, deleting or scheduling: ask before those. No recurring job unless that is what they asked for.",
-    'Make the result something they can open: a single HTML page when the idea allows it, and at least one real reading or action through a connected app.'
-  ]
-}
 
 /** What the guide's install card settled (NS-960 D6). This session has no install tool by design (#119491), so
  *  it never retries: it uses what is installed and names what is not. Empty when nothing was picked. */
@@ -209,13 +193,10 @@ export function pluginsRunbook(answers: Pick<OnboardingAnswers, 'pluginOutcomes'
   })
 
   return [
-    'PLUGINS FROM ONBOARDING.',
-    ready.length
-      ? `Installed during onboarding and ready in this chat now: ${ready.join(', ')}. Discover their tools with tool_search and use them when the task benefits; read a named skill with skill_view using that exact name. A tool whose app is not running reports that; say so plainly.`
-      : '',
-    missed.length ? `Offered during onboarding and not installed: ${missed.join(', ')}.` : '',
-    notOffered.length ? `Picked during onboarding but not offered for install: ${notOffered.join(', ')}.` : '',
-    'Do not install plugins yourself and do not ask to; if they want one later, they can add it from Settings, Plugins.'
+    `The user said they use these apps: ${picks.join(', ')}. These are real connector slugs. Offer to connect the ones useful for this task BEFORE the build starts, in your first turn, so the work can use them from the beginning — but keep the no-auth core moving and never require sign-in to finish it. If none of them help this task, say so in one line and move on; do not describe the catalog.`,
+    'Before you mention connecting anything, use manage_connections action="status" once. Anything already connected is yours to use for the task, with consent before reading private data. Match the rest against the returned catalog; never invent a connector slug or claim an unavailable app is supported. For the apps they agree to connect, make ONE action="connect" call carrying every slug at once (connectors=["gmail","googlecalendar"]) — the app renders one Connect card per app, side by side, and the user works through them; one call per app strands them clicking through a queue. Do not paste the authorization links into prose. Never call connect a second time for an app that already has a card: a new link cancels the one they are signing in with.',
+    'THE CARD IS THE ASK. After a status that shows an app unconnected, or after a connect, write ONE short line and END YOUR TURN — the user answers with the card’s buttons, not with text. Do not start work, do not call other tools, do not decide for them. Their click arrives as a hidden [connectors] message telling you exactly which manage_connections call to make next; follow it. When it says to wait, call action="wait" for that slug and hold: wait blocks until the authorization lands, so you never guess whether they are done. A timeout, declined consent or gateway outage means not connected, never an empty inbox. Say which apps remain unavailable and offer to continue without them. Never describe a gateway error as proof they need another Nous login.',
+    'Discover the connected app’s relevant tools with tool_search and use real results for the requested task. Never fabricate sample account data as if it came from a connector. Reading is separate from sending, deleting or scheduling: ask before those actions. No automatic daily brief or recurring job unless that is what the user asked for.'
   ]
     .filter(Boolean)
     .join(' ')

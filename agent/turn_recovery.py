@@ -1386,17 +1386,14 @@ def compute_error_backoff(
             # cooldowns immediately (mirrors the zai_coding_overload_long path).
             agent._emit_diagnostic_status(_retry_status)
         else:
-            agent._buffer_diagnostic_status(_retry_status)
+            agent._buffer_status(_retry_status)
     # The buffered line only replays if every retry fails; the live status
     # line is the one thing the user sees meanwhile. Name the wait there so a
     # 60s backoff after a 5xx is not an anonymous spinner — this is transient
     # (rewritten by the next frame, cleared on recovery), so it does not add
-    # the transcript chatter the buffer exists to avoid. The reset window
-    # belongs here too: during the wait this line is the only place the user
-    # can learn whether to sit it out or switch models.
-    _live_reason = f"{_wait_reason.lower()} — resets in {_reset}," if _reset else "waiting on provider —"
-    agent._emit_diagnostic_wait(
-        f"⏳ {_live_reason} retrying in {wait_time:.0f}s (attempt {retry_count}/{max_retries})"
+    # the transcript chatter the buffer exists to avoid.
+    agent._emit_wait_notice(
+        f"⏳ waiting on provider — retrying in {wait_time:.0f}s (attempt {retry_count}/{max_retries})"
     )
     logger.warning(
         "Retrying API call in %ss (attempt %s/%s) %s policy=%s error=%s",

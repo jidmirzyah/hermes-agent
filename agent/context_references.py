@@ -300,6 +300,7 @@ def _expand_path_reference(ref: ContextReference, cwd: Path, *, allowed_root: Pa
         # A bare "not supported" warning was a dead end (the model gave up); the file IS
         # on disk where the agent's tools run, so hand it an actionable block instead.
         return None, _binary_reference_block(ref, path)
+    text = path.read_text(encoding="utf-8-sig")
     if ref.line_start is not None:
         # A ranged ref wants a slice, not the file: stream to the window so a GB-scale
         # file serves :1-5 without being materialized. Lines are read in bounded pieces

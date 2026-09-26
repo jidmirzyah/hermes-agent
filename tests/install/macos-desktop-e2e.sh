@@ -28,6 +28,9 @@
 #   tests/install/macos-desktop-e2e.sh --phase stage|install|update|all
 #     --update-method open-app-update|hermes-desktop-app-update
 #     [--install-ref REF] [--dmg-url URL]
+#     [--update-ref REF]   update target, default HEAD; pass the next
+#                          release tag for a stable-to-stable leg (label the
+#                          leg stable-to-stable only when both refs are tags)
 #
 # Requires a clean full-history checkout with release tags fetched, on a
 # macOS host with a window server (the GitHub macos runners qualify).
@@ -42,6 +45,7 @@ export TS_BASE=$SECONDS
 PHASE="all"
 UPDATE_METHOD=""
 INSTALL_REF=""
+UPDATE_REF=""
 DMG_URL="https://hermes-assets.nousresearch.com/Hermes-Setup.dmg"
 PLAYWRIGHT_VERSION="1.58.2"
 while [ "$#" -gt 0 ]; do
@@ -55,6 +59,9 @@ while [ "$#" -gt 0 ]; do
     --install-ref)
       [ "$#" -ge 2 ] || { echo 'error: --install-ref needs a value' >&2; exit 1; }
       INSTALL_REF="$2"; shift 2 ;;
+    --update-ref)
+      [ "$#" -ge 2 ] || { echo 'error: --update-ref needs a value' >&2; exit 1; }
+      UPDATE_REF="$2"; shift 2 ;;
     --dmg-url)
       [ "$#" -ge 2 ] || { echo 'error: --dmg-url needs a value' >&2; exit 1; }
       DMG_URL="$2"; shift 2 ;;
@@ -84,6 +91,8 @@ ok()   { printf '  OK %s\n' "$*"; }
 fail() { printf 'E2E ASSERTION FAILED: %s\n' "$*" >&2; exit 1; }
 # shellcheck source=../e2e-assets/ts-prefix.sh
 source "$(dirname "$0")/e2e-assets/ts-prefix.sh" 2>/dev/null || ts_prefix() { cat; }
+# shellcheck source=../install/e2e-assets/preserve-plugins.sh
+source "$(dirname "$0")/e2e-assets/preserve-plugins.sh"
 log_group() {
   printf '::group::%s\n' "$1"
   cat "$2"
@@ -173,10 +182,20 @@ phase_stage() {
     old_ref="$(git -C "$REPO_ROOT" tag --list 'v[0-9]*' --sort=-creatordate | head -1)"
     [ -n "$old_ref" ] || fail "no release tags in the checkout to use as OLD"
   fi
-  local old_sha head_sha
+  local old_sha head_sha target_sha target_label
   old_sha="$(git -C "$REPO_ROOT" rev-parse "${old_ref}^{commit}")"
   head_sha="$(git -C "$REPO_ROOT" rev-parse HEAD)"
-  [ "$old_sha" != "$head_sha" ] || fail "OLD ($old_ref) IS HEAD; no update would be available"
+
+  # The update target defaults to HEAD; --update-ref selects any other ref
+  # so a stable-to-stable leg can target the next release tag instead of
+  # the tip. Only call this leg stable-to-stable when BOTH refs are tags.
+  target_label="HEAD"
+  target_sha="$head_sha"
+  if [ -n "${UPDATE_REF:-}" ]; then
+    target_sha="$(git -C "$REPO_ROOT" rev-parse "${UPDATE_REF}^{commit}")"
+    target_label="$UPDATE_REF"
+  fi
+  [ "$old_sha" != "$target_sha" ] || fail "OLD ($old_ref) IS the update target ($target_label); no update would be available"
 
   git clone --bare --quiet "$REPO_ROOT" "$SERVE_REPO"
   git -C "$SERVE_REPO" update-ref refs/heads/main "$old_sha"
@@ -187,8 +206,9 @@ phase_stage() {
   mkdir -p "$HERMES_HOME"
   touch "$HERMES_HOME/.skip_upstream_prompt"
 
-  printf 'OLD_SHA=%s\nOLD_REF=%s\nHEAD_SHA=%s\n' "$old_sha" "$old_ref" "$head_sha" > "$STATE"
-  ok "serve.git main = $old_sha ($old_ref), update target $head_sha"
+  printf 'OLD_SHA=%s\nOLD_REF=%s\nHEAD_SHA=%s\nTARGET_SHA=%s\nTARGET_LABEL=%s\n' \
+    "$old_sha" "$old_ref" "$head_sha" "$target_sha" "$target_label" > "$STATE"
+  ok "serve.git main = $old_sha ($old_ref), update target $target_sha ($target_label)"
 }
 
 find_installed_app() {
@@ -311,7 +331,7 @@ run_playwright_update() {
   (cd "$pw_dir" && node launch-from-spec.mjs \
     --spec "$spec" \
     --result "$HERMES_HOME/.hermes-update-result.json" \
-    --expect-sha "$HEAD_SHA" \
+    --expect-sha "$TARGET_SHA" \
     --repo-dir "$INSTALL_DIR" 2>&1 \
     | ts_prefix > "$LOG_DIR/app-update.log") || rc=$?
   log_group "app update (Playwright) transcript" "$LOG_DIR/app-update.log"
@@ -322,9 +342,12 @@ phase_update() {
   # shellcheck disable=SC1090
   . "$STATE"
   arm_redirect
-  step "advancing served main to HEAD"
-  git -C "$SERVE_REPO" update-ref refs/heads/main "$HEAD_SHA"
-  ok "serve.git main = $HEAD_SHA"
+  # Snapshot every plugin tree BEFORE the upgrade moves anything: fixtures
+  # seeded here must survive through the verify after the update lands.
+  preserve_before_upgrade
+  step "advancing served main to $TARGET_LABEL ($TARGET_SHA)"
+  git -C "$SERVE_REPO" update-ref refs/heads/main "$TARGET_SHA"
+  ok "serve.git main = $TARGET_SHA"
 
   step "updating via $UPDATE_METHOD"
   # The app must boot configured or the onboarding overlay (a fullscreen
@@ -350,10 +373,10 @@ phase_update() {
       ;;
     installer-script)
       # A dmg user re-running today's install one-liner.
-      run_installer "$HEAD_SHA" head
+      run_installer "$TARGET_SHA" head
       ;;
     installer-script+desktop)
-      run_installer "$HEAD_SHA" head desktop
+      run_installer "$TARGET_SHA" head desktop
       # The desktop stage is this leg's claim: the rebuilt app must exist.
       head_app=""
       for cand in \
@@ -403,8 +426,8 @@ PYEOF
 
   local got
   got="$(git -C "$INSTALL_DIR" rev-parse HEAD)"
-  [ "$got" = "$HEAD_SHA" ] || fail "checkout is $got, expected HEAD ($HEAD_SHA)"
-  ok "checkout landed on HEAD ($HEAD_SHA)"
+  [ "$got" = "$TARGET_SHA" ] || fail "checkout is $got, expected $TARGET_LABEL ($TARGET_SHA)"
+  ok "checkout landed on $TARGET_LABEL ($TARGET_SHA)"
 
   # Install-side state BEFORE the post-update smoke: on app-update legs the
   # updater's own transcript is streamed into the app UI and otherwise lost,
@@ -426,7 +449,8 @@ PYEOF
   "$INSTALL_DIR/venv/bin/hermes" --version 2>&1 | ts_prefix > "$LOG_DIR/version-head.log" \
     || fail "hermes --version failed after update"
   ok "hermes --version works post-update"
-  step "PASS: $OLD_REF -> HEAD via $UPDATE_METHOD"
+  preserve_after_upgrade
+  step "PASS: $OLD_REF -> $TARGET_LABEL via $UPDATE_METHOD"
 }
 
 case "$PHASE" in

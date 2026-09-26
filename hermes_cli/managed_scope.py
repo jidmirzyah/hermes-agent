@@ -15,7 +15,7 @@ import threading
 from pathlib import Path
 from typing import Dict, Optional
 
-import yaml
+import hermes_yaml as yaml
 
 # Stale-module bridge: this module binds ``utils.file_signature`` at import time, so a fresh
 # import in a post-pull updater process (pre-handoff purge keeps root modules cached) dies
@@ -85,7 +85,8 @@ def _cached_read(path: Path, cache: Dict[str, tuple], parse):
         if hit is not None and hit[:len(key)] == key:
             return copy.deepcopy(hit[len(key)])
     try:
-        parsed = parse(path)
+        with open(path, encoding="utf-8-sig") as f:
+            parsed = parse(f)
     except Exception as exc:  # noqa: BLE001 — fail-open, but LOUD
         logger.warning(
             "managed scope: failed to parse %s: %s — IGNORING this managed file. "

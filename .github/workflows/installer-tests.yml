@@ -13,8 +13,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: installer-tests-${{ github.ref }}
-  cancel-in-progress: true
+  group: installer-tests-${{ github.ref_type == 'tag' && github.run_id || github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
 
 jobs:
   powershell:

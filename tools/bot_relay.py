@@ -164,7 +164,8 @@ def write_remote_roster(root: Path | str, rows: Any) -> int:
 def read_remote_roster(root: Path | str) -> list[dict]:
     """The current remote roster (possibly empty). Never raises."""
     try:
-        data = json.loads((relay_root(root) / ROSTER_FILE).read_text(encoding="utf-8"))
+        raw = (relay_root(root) / ROSTER_FILE).read_text(encoding="utf-8-sig")
+        data = json.loads(raw)
         agents = data.get("agents") if isinstance(data, dict) else None
         return [r for r in map(_normalize_roster_row, agents) if r] if isinstance(agents, list) else []
     except FileNotFoundError:
@@ -313,7 +314,7 @@ def _expire_if_stale(root: Path | str, path: Path, ttl: float, now: float) -> bo
     """True when the outbox envelope is older than ``ttl``; writes the 'queued_expired'
     reply so the sender's waiter resolves (best effort). Unreadable envelopes are left for the claim."""
     try:
-        env = json.loads(path.read_text(encoding="utf-8"))
+        env = json.loads(path.read_text(encoding="utf-8-sig"))
         if not isinstance(env, dict):
             raise ValueError(f"expected a JSON object, got {type(env).__name__}")
         created = float(env.get("created_at") or path.stat().st_mtime)
@@ -415,6 +416,9 @@ def _reoffer_unanswered(root: Path | str, base: Path, ttl: float, now: float) ->
                 continue
             envelope["reoffered_at"] = int(now)
             _atomic_write_json(path, envelope)
+            envelope = json.loads(claimed.read_text(encoding="utf-8-sig"))
+            if not isinstance(envelope, dict):
+                raise ValueError(f"expected a JSON object, got {type(envelope).__name__}")
             out.append(envelope)
     return out
 
@@ -489,13 +493,39 @@ def waiter_command(root: Path | str, envelope: dict) -> str:
     """
     reply_path = str(relay_root(root) / REPLIES_DIR / f"{envelope['id']}.json")
     label = f"@{envelope.get('target_handle', '')} on {envelope.get('target_connection', '')}"
-    runner = str(Path(__file__).resolve().with_name("bot_mode_dm.py"))
-    argv = [sys.executable or "python3", runner, "--wait-reply", reply_path, label, str(REPLY_WAIT_SECONDS)]
-    if sys.platform == "win32":
-        # Same rewrite as the delivery runner: the tracked local backend uses Git Bash on native
-        # Windows, where forward-slash drive paths run and backslash paths parse as command names.
-        argv = [part.replace("\\", "/") for part in argv]
-    return shlex.join(argv)
+    # !r keeps roster fields from breaking out of the generated python -c source.
+    # The r-prefix keeps Windows paths viable: the Windows execution layer folds
+    # repr's "\\" back to "\", turning "\U" into an invalid unicode escape; a
+    # raw literal parses the folded backslash literally. No-op on POSIX, and \'
+    # still cannot terminate a raw literal, so the injection defense holds.
+    code = (
+        # Encode label with !r so roster fields cannot break out of the generated python -c source (quotes,
+        # parens, or extra statements in connection_id). See #93590.
+        "import json,os,sys,time\n"
+        f"p = r{reply_path!r}\n"
+        f"label = r{label!r}\n"
+        f"deadline = time.time() + {REPLY_WAIT_SECONDS}\n"
+        "while time.time() < deadline:\n"
+        "    if os.path.exists(p):\n"
+        "        d = json.load(open(p, encoding='utf-8-sig'))\n"
+        "        if d.get('error'):\n"
+        # Typed reason code rides ahead of the free text so the sender can
+        # branch on it without parsing provider prose.
+        # See #93091.
+        "            code = str(d.get('reason') or '').strip()\n"
+        "            tag = ' [reason: ' + code + ']' if code else ''\n"
+        "            print('Delivery to ' + label + ' failed' + tag + ': ' + d['error'])\n"
+        "            sys.exit(1)\n"
+        "        print('Reply from ' + label + ':')\n"
+        "        print(d.get('reply') or '(empty reply)')\n"
+        "        sys.exit(0)\n"
+        # 250ms cadence: stat is cheap and a longer sleep is pure dead air.
+        "    time.sleep(0.25)\n"
+        f"print('No reply from ' + label + ' within {REPLY_WAIT_SECONDS}s. The message may "
+        "still be delivered when the Desktop reconnects; do not resend blindly.')\n"
+        "sys.exit(1)\n"
+    )
+    return f"{shlex.quote(sys.executable or 'python3')} -c {shlex.quote(code)}"
 
 
 def _hermes_cli() -> str:

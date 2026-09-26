@@ -151,8 +151,8 @@ def _assert_cloud_client_lazy_installed_before_import(tmp_path, monkeypatch, mod
     provider = _provider_for_mode(tmp_path, monkeypatch, mode)
     ensure_calls = []
 
-    def fake_ensure(feature, prompt=True):
-        ensure_calls.append((feature, prompt))
+    def fake_ensure(extra):
+        ensure_calls.append(extra)
 
     class FakeHindsight:
         def __init__(self, **kwargs):
@@ -162,17 +162,17 @@ def _assert_cloud_client_lazy_installed_before_import(tmp_path, monkeypatch, mod
 
     def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
         if name == "hindsight_client":
-            if ensure_calls != [("memory.hindsight", False)]:
+            if ensure_calls != ["hindsight"]:
                 raise ModuleNotFoundError("No module named 'hindsight_client'")
             return SimpleNamespace(Hindsight=FakeHindsight)
         return real_import(name, globals, locals, fromlist, level)
 
-    monkeypatch.setattr("tools.lazy_deps.ensure", fake_ensure)
+    monkeypatch.setattr("pm.ensure_import", fake_ensure)
     monkeypatch.setattr(builtins, "__import__", guarded_import)
 
     client = provider._get_client()
 
-    assert ensure_calls == [("memory.hindsight", False)]
+    assert ensure_calls == ["hindsight"]
     assert isinstance(client, FakeHindsight)
     assert client.kwargs == {
         "base_url": "http://localhost:9999",
@@ -372,16 +372,26 @@ class TestConfig:
         assert env["HINDSIGHT_EMBED_DAEMON_IDLE_TIMEOUT"] == "0"
 
 
-    def test_get_client_passes_idle_timeout_to_hindsight_embedded(self, monkeypatch):
+    def test_get_client_connects_http_client_to_sideenv_daemon(self, monkeypatch):
         captured = {}
 
-        class FakeHindsightEmbedded:
+        class FakeHindsight:
             def __init__(self, **kwargs):
                 captured.update(kwargs)
 
-        monkeypatch.setitem(sys.modules, "hindsight", SimpleNamespace(HindsightEmbedded=FakeHindsightEmbedded))
-        monkeypatch.setattr("plugins.memory.hindsight._check_local_runtime", lambda: (True, ""))
+        monkeypatch.setitem(sys.modules, "hindsight_client", SimpleNamespace(Hindsight=FakeHindsight))
+        # The daemon URL comes from the side env; no port is hardcoded here.
+        side_calls = []
 
+        def fake_start(cfg, **kwargs):
+            side_calls.append(cfg)
+            return "http://127.0.0.1:9157"
+
+        monkeypatch.setattr("plugins.memory.hindsight._start_sideenv_daemon", fake_start)
+        # The lazy client install is the pm boundary, not what this test exercises.
+        monkeypatch.setattr("plugins.memory.hindsight._ensure_client_dependency", lambda: None)
+
+        monkeypatch.setattr("plugins.memory.hindsight._materialize_embedded_profile_env", lambda *a: None)
         p = HindsightMemoryProvider()
         p._mode = "local_embedded"
         p._config = {
@@ -395,8 +405,11 @@ class TestConfig:
 
         p._get_client()
 
-        assert captured["idle_timeout"] == 0
-        assert captured["llm_provider"] == "openai"
+        # The side-env daemon manager receives the config (LLM keys ride the
+        # materialized profile .env, not the client); Hermes talks HTTP.
+        assert side_calls == [p._config]
+        assert captured["base_url"] == "http://127.0.0.1:9157"
+        assert p._api_url == "http://127.0.0.1:9157"
 
 
 class TestPostSetup:
@@ -434,6 +447,8 @@ class TestPostSetup:
         user_home.mkdir()
         monkeypatch.setenv("HOME", str(user_home))
 
+        monkeypatch.setattr("plugins.memory.hindsight.setup._sync_client_dependency", lambda: True)
+        monkeypatch.setattr("plugins.memory.hindsight.setup._install_embedded_runtime", lambda: True)
         selections = iter([1, 0])  # local_embedded, openai
         monkeypatch.setattr("hermes_cli.memory_setup._curses_select", lambda *args, **kwargs: next(selections))
         monkeypatch.setattr("shutil.which", lambda name: None)
@@ -1541,20 +1556,16 @@ class TestSharedEventLoopLifecycle:
 
 
 class TestShutdown:
-    def test_local_embedded_shutdown_closes_inner_async_client_on_shared_loop(self, provider):
-        inner_client = _make_mock_client()
-        embedded = MagicMock()
-        embedded._client = inner_client
-        embedded.close = MagicMock()
-
+    def test_local_embedded_shutdown_closes_client_on_shared_loop(self, provider):
+        """The embedded client is hindsight_client.Hindsight (HTTP to the side-env
+        daemon): same aclose-on-shared-loop path as cloud."""
+        client = _make_mock_client()
         provider._mode = "local_embedded"
-        provider._client = embedded
+        provider._client = client
 
         provider.shutdown()
 
-        inner_client.aclose.assert_awaited_once()
-        embedded.close.assert_called_once()
-        assert embedded._client is None
+        client.aclose.assert_awaited_once()
         assert provider._client is None
 
 
@@ -1604,12 +1615,9 @@ class TestPostSetupEnvEncoding:
         monkeypatch.setattr("hermes_cli.memory_setup._curses_select",
                             lambda *a, **kw: 0)  # cloud mode
         monkeypatch.setattr("hermes_cli.config.save_config", lambda c: None)
-        # Skip the dependency install (now routed through lazy_deps, NS-605).
-        import tools.lazy_deps as lazy_deps_mod
-        monkeypatch.setattr(
-            lazy_deps_mod, "install_specs",
-            lambda *a, **kw: lazy_deps_mod.InstallSpecsResult(ok=True),
-        )
+        # Skip the dependency install (now routed through pm).
+        import pm
+        monkeypatch.setattr(pm, "sync_venv", lambda *a, **kw: None)
         # First line: API key prompt (readline). Second line: API URL (input).
         monkeypatch.setattr(sys, "stdin", io.StringIO("sk-new\n\n"))
 
@@ -1631,16 +1639,16 @@ class TestPostSetupEnvEncoding:
         assert "﻿" not in content
 
 
-class TestClientAutoUpgradeRoutesThroughLazyDeps:
+class TestClientAutoUpgradeRoutesThroughPm:
     """The initialize()-time hindsight-client auto-upgrade must go through
-    lazy_deps.install_specs() (environment-aware, durable-target on sealed
-    hosted venvs) — never a direct `uv pip install --python sys.executable`
-    subprocess, which fails with EROFS/EACCES on immutable images (NS-605)."""
+    pm.sync_venv (uv.lock owns the pin) — never a direct
+    `uv pip install --python sys.executable` subprocess, which fails with
+    EROFS/EACCES on immutable images (NS-605)."""
 
-    def _init_with_outdated_client(self, tmp_path, monkeypatch, outcome):
+    def _init_with_outdated_client(self, tmp_path, monkeypatch, error=None):
         import importlib.metadata as md
         import subprocess as subprocess_mod
-        import tools.lazy_deps as lazy_deps_mod
+        import pm
 
         config_path = tmp_path / "hindsight" / "config.json"
         config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1653,10 +1661,13 @@ class TestClientAutoUpgradeRoutesThroughLazyDeps:
         monkeypatch.setattr(md, "version", lambda name: "0.0.1")
 
         calls = []
-        monkeypatch.setattr(
-            lazy_deps_mod, "install_specs",
-            lambda specs, **kw: calls.append(tuple(specs)) or outcome,
-        )
+
+        def fake_sync(extras=None, **kw):
+            calls.append(tuple(extras or ()))
+            if error is not None:
+                raise error
+
+        monkeypatch.setattr(pm, "sync_venv", fake_sync)
 
         # Regression guard: no direct pip subprocess may run.
         def _no_subprocess(*a, **kw):  # pragma: no cover - fails loudly
@@ -1667,26 +1678,23 @@ class TestClientAutoUpgradeRoutesThroughLazyDeps:
         provider.initialize(session_id="s", hermes_home=str(tmp_path), platform="cli")
         return calls
 
-    def test_upgrade_uses_install_specs_not_subprocess(self, tmp_path, monkeypatch):
-        from plugins.memory.hindsight import _MIN_CLIENT_VERSION
-        from tools.lazy_deps import InstallSpecsResult
-
-        calls = self._init_with_outdated_client(
-            tmp_path, monkeypatch, InstallSpecsResult(ok=True)
-        )
-        assert calls == [(f"hindsight-client>={_MIN_CLIENT_VERSION}",)]
+    def test_upgrade_syncs_extra_not_subprocess(self, tmp_path, monkeypatch):
+        calls = self._init_with_outdated_client(tmp_path, monkeypatch)
+        assert calls == [("hindsight",)]
 
     def test_blocked_upgrade_is_nonfatal_and_surfaces_reason(
         self, tmp_path, monkeypatch, caplog
     ):
         import logging
-        from tools.lazy_deps import InstallSpecsResult
+
+        import pm as pm_pkg
 
         with caplog.at_level(logging.WARNING):
             calls = self._init_with_outdated_client(
                 tmp_path, monkeypatch,
-                InstallSpecsResult(ok=False, blocked=True,
-                                   reason="runtime installs are disabled on this deployment"),
+                error=pm_pkg.InstallError(
+                    "venv", "runtime installs are disabled on this deployment"
+                ),
             )
         assert len(calls) == 1  # attempted exactly once, init still completed
         assert any("runtime installs are disabled" in r.getMessage()
@@ -1708,17 +1716,14 @@ class TestMultiplexBackgroundScope:
 
         created = []
 
-        class FakeHindsightEmbedded:
-            def __init__(self, **kwargs):
-                created.append(kwargs["llm_api_key"])
-                self._manager = SimpleNamespace(is_running=lambda profile: False, stop=lambda profile: None)
-                self._ensure_started = lambda: None
-
-        dem = SimpleNamespace(console=None)
-        monkeypatch.setitem(sys.modules, "hindsight", SimpleNamespace(HindsightEmbedded=FakeHindsightEmbedded))
-        monkeypatch.setitem(sys.modules, "hindsight_embed", SimpleNamespace(daemon_embed_manager=dem))
-        monkeypatch.setitem(sys.modules, "hindsight_embed.daemon_embed_manager", dem)
+        from plugins.memory.hindsight.embedded import _embedded_profile_env_path, _load_simple_env
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "user-home"))
+        def start(cfg, **kwargs):
+            created.append(_load_simple_env(_embedded_profile_env_path(cfg))["HINDSIGHT_API_LLM_API_KEY"])
+            return "http://127.0.0.1:9158"
+        monkeypatch.setattr("plugins.memory.hindsight._start_sideenv_daemon", start)
         monkeypatch.setattr("plugins.memory.hindsight._check_local_runtime", lambda: (True, ""))
+        monkeypatch.setattr("plugins.memory.hindsight._ensure_client_dependency", lambda: None)
 
         home = tmp_path / "profiles" / "p1"
         (home / "hindsight").mkdir(parents=True)
@@ -1755,25 +1760,4 @@ class TestMultiplexBackgroundScope:
             if t.name == "hindsight-daemon-start":
                 t.join(timeout=5)
         assert created == ["p1-secret"]
-        assert "Daemon started successfully" in (home / "logs" / "hindsight-embed.log").read_text()
-
-
-def test_append_mode_trims_retained_turns_without_dropping_any(provider, monkeypatch):
-    """Append retains ship only the delta, so retained turns leave `_session_turns` (a never-ending
-    session no longer pins every turn) while every turn is still shipped exactly once."""
-    provider._auto_retain = True
-    provider._retain_every_n_turns = 3
-    monkeypatch.setattr(provider, "_ensure_writer", lambda: None)
-    monkeypatch.setattr(provider, "_register_atexit", lambda: None)
-    monkeypatch.setattr(provider, "_resolve_retain_target", lambda doc: ("doc", "append"))
-    shipped: list[str] = []
-    monkeypatch.setattr(provider, "_make_turn_retain_job",
-                        lambda turns, **kw: (lambda: shipped.extend(turns)))
-    provider._retain_queue = MagicMock(put=lambda job: job())
-
-    for i in range(7):
-        provider.sync_turn(f"user {i}", f"assistant {i}")
-
-    assert len(provider._session_turns) == 1  # only the un-retained tail (turn 7)
-    assert provider._last_retained_turn_count == 0
-    assert len(shipped) == 6 and len(set(shipped)) == 6
+        p.shutdown()

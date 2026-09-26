@@ -174,14 +174,18 @@ class TestMacosClipboardFileUrl:
 
 class TestIsWsl:
     def setup_method(self):
-        # Reset the cache in the module that owns _is_wsl.
-        host_runtime._wsl_detected = None
+        # _is_wsl is hermes_constants.is_wsl; reset the function's own module
+        # globals so this stays stable even if hermes_constants was imported
+        # through a different module object earlier in a large test run.
+        import hermes_constants
+        hermes_constants._wsl_detected = None
         _is_wsl.__globals__["_wsl_detected"] = None
 
     def teardown_method(self):
         # Reset again after the test so we don't leak a cached value
-        # (True/False) into whichever test the xdist worker runs next.
-        host_runtime._wsl_detected = None
+        # (True/False) into whichever test runs next.
+        import hermes_constants
+        hermes_constants._wsl_detected = None
         _is_wsl.__globals__["_wsl_detected"] = None
 
     @pytest.mark.parametrize("content, expected", [
@@ -456,7 +460,7 @@ class TestHasClipboardImage:
     def setup_method(self):
         host_runtime._wsl_detected = None
 
-    @pytest.mark.macos_only
+    @pytest.mark.platforms("macos")
     def test_macos_dispatch(self):
         """Faking darwin selected the branch but left `_macos_has_image`'s real
         facility (osascript) absent — only a real macOS host has it."""
@@ -464,7 +468,7 @@ class TestHasClipboardImage:
             assert has_clipboard_image() is True
             m.assert_called_once()
 
-    @pytest.mark.linux_only
+    @pytest.mark.platforms("linux")
     def test_wsl_falls_through_to_wayland_when_windows_path_empty(self):
         """WSLg often bridges images to wl-paste even when powershell.exe check fails.
 

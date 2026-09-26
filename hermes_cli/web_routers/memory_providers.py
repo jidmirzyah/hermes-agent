@@ -108,7 +108,7 @@ def _read_json_dict(path: Path, what: str) -> Dict[str, Any]:
     if not path.exists():
         return {}
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
     except Exception:
         _log.warning("Failed to read %s from %s", what, path, exc_info=True)
         return {}
@@ -332,30 +332,45 @@ def _command_result(
     }
 
 
-def _install_memory_provider_pip_dependencies(dependencies: List[str]) -> List[Dict[str, Any]]:
-    if not dependencies:
+def _install_memory_provider_pip_dependencies(name: str, dependencies: List[str]) -> List[Dict[str, Any]]:
+    import pm
+
+    manifest = _memory_provider_manifest(name)
+    extra = str(manifest.get("extra") or "").strip()
+    if not dependencies and not extra:
         return []
     missing = [dep for dep in dependencies if not _dependency_importable(dep)]
-    if not missing:
+    if not missing and (not extra or pm.available(extra)):
+        if not dependencies:
+            return []
         return [_command_result(kind="pip", name=", ".join(dependencies), status="already_installed")]
-    # Route through the lazy-install pipeline rather than pip against
-    # sys.executable: on hosted/immutable images the agent venv is sealed
-    # read-only and installs must go to HERMES_LAZY_INSTALL_TARGET, which
-    # install_specs also activates on sys.path so the recheck sees the packages.
-    name = ", ".join(missing)
+    # Setup precedes config selection. Include the candidate without dropping
+    # active providers; PM resolves legacy declarations and pyprojects alike.
+    target = ", ".join(missing) or extra
+    command = "hermes pm install"
     try:
-        from tools.lazy_deps import install_specs
-        outcome = install_specs(missing, timeout=240)
+        from hermes_cli.plugins_admission import candidate_member_dirs
+        from pm.workspace import _is_member_candidate
+        from plugins.memory import find_provider_dir
+
+        plugin_dir = find_provider_dir(name)
+        member = plugin_dir is not None and _is_member_candidate(plugin_dir)
+        if not extra and not member:
+            return [_command_result(
+                kind="pip", name=target, status="failed", command=command,
+                error="no declared extra and no plugin directory to materialize declared dependencies from",
+            )]
+        inputs = {"plugin_dirs": lambda: candidate_member_dirs((), extra_dirs=[plugin_dir])} if member else {}
+        pm.sync_venv([extra] if extra else None, explicit=True, **inputs)
     except Exception as exc:
-        return [_command_result(kind="pip", name=name, status="failed", error=str(exc))]
-    if outcome.blocked:
-        return [_command_result(kind="pip", name=name, status="failed", command=outcome.command, error=outcome.reason)]
-    return [_command_result(
-        kind="pip", name=name, status="installed" if outcome.ok else "failed", command=outcome.command,
-        completed=subprocess.CompletedProcess(
-            args=outcome.command, returncode=0 if outcome.ok else 1, stdout=outcome.stdout, stderr=outcome.stderr,
-        ),
-    )]
+        return [_command_result(kind="pip", name=target, status="failed", command=command, error=str(exc))]
+    still_missing = [dep for dep in missing if not _dependency_importable(dep)]
+    if still_missing or (extra and not pm.available(extra)):
+        # The environment is selected at boot: a sync that succeeded outside
+        # this interpreter's sight is NOT immediate import success — report
+        # the truth instead of stamping installed without the deps visible.
+        return [_command_result(kind="pip", name=target, status="restart_required", command=command)]
+    return [_command_result(kind="pip", name=target, status="installed", command=command)]
 
 
 def _run_setup_step(results: list, kind: str, name: str, command: str, status_of, **kwargs) -> Optional[int]:
@@ -399,7 +414,7 @@ def _install_memory_provider_setup(name: str) -> Dict[str, Any]:
     if provider is None and not manifest:
         raise _unknown_provider(name)
     setup = _memory_provider_setup_manifest(name)
-    results = _install_memory_provider_pip_dependencies(setup["pip_dependencies"])
+    results = _install_memory_provider_pip_dependencies(name, setup["pip_dependencies"])
     results.extend(_install_memory_provider_external_dependencies(setup["external_dependencies"]))
     if not results:
         results.append(_command_result(kind="setup", name=name, status="no_declared_steps"))

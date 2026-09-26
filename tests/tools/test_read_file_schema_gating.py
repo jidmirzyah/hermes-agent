@@ -202,20 +202,23 @@ class TestNeedsOcrPath(unittest.TestCase):
         self.assertNotIn("hosted_ocr", out)
         self.assertNotIn("ocr-and-documents", out)
 
-    def test_anydoc_stays_lazy_and_quarantined(self):
-        """The fresh native wheel must not enter core or bypass cooldown."""
+    def test_pin_lockstep(self):
+        """Core and doc-extract pins of firecrawl-anydoc must agree.
+
+        tools/lazy_deps.py is gone; pyproject.toml is the single pin
+        authority. The self-heal path is now pm.ensure_import("doc-extract"),
+        which syncs the extra — so the remaining lockstep contract is that
+        the core dependency pin and the doc-extract extra pin name the SAME
+        version (a drift here means a lean install re-syncs a different
+        anydoc than a full one).
+        """
         import re
         from pathlib import Path
 
-        py = Path("pyproject.toml").read_text(encoding="utf-8")
-        lz = Path("tools/lazy_deps.py").read_text(encoding="utf-8")
-        lock = Path("uv.lock").read_text(encoding="utf-8")
-        m1 = re.search(r'"firecrawl-anydoc==([\d.]+)"', py)
-        m2 = re.search(r'"firecrawl-anydoc==([\d.]+)"', lz)
-        self.assertIsNone(m1)
-        self.assertIsNotNone(m2)
-        self.assertEqual(m2.group(1), "0.1.6")
-        self.assertNotIn("firecrawl-anydoc = false", lock)
+        py = Path("pyproject.toml").read_text(encoding="utf-8-sig")
+        pins = re.findall(r'"firecrawl-anydoc==([\d.]+)"', py)
+        self.assertTrue(pins, "firecrawl-anydoc pin missing from pyproject")
+        self.assertEqual(len(set(pins)), 1, f"pins disagree: {pins}")
 
 
 if __name__ == "__main__":

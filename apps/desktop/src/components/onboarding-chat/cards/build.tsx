@@ -31,7 +31,6 @@ import { answeredAfter } from '@/lib/chat-messages/parts'
 import { segmentTranscriptDirectives } from '@/lib/transcript-directives'
 import { cn } from '@/lib/utils'
 import { $onboardingAnswers, markStepCommitted } from '@/store/onboarding-answers'
-import { $activeGatewayProfile } from '@/store/profile'
 import { assertSessionOwnerResolved } from '@/store/session-owner-resolution'
 import { isSessionOwnerRoute } from '@/store/session-request-router'
 
@@ -56,10 +55,8 @@ export function FirstBuildCard({ attrs, locked }: CardProps) {
 
   const answeredInComposer = answeredAfter(useStore(view.$messages), messageId)
 
-  const committed =
-    useStore($onboardingAnswers)
-      .committed.find(step => step.startsWith('first:'))
-      ?.slice(6) ?? null
+  const committed = useStore($onboardingAnswers).committed.find(step => step.startsWith('first:'))?.slice(6) ?? null
+  const picked = committed ?? (answeredInComposer ? '' : null)
 
   const picked = committed ?? (answeredInComposer ? '' : null)
 

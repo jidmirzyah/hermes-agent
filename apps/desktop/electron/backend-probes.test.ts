@@ -16,8 +16,6 @@ import { test } from 'vitest'
 import {
   canImportHermesCli,
   DEFAULT_PROBE_TIMEOUT_MS,
-  execProbe,
-  hermesRuntimeImportProbe,
   PROBE_TIMEOUT_MS,
   resolveProbeTimeoutMs,
   shouldTrustHermesOverride,
@@ -96,16 +94,6 @@ test('canImportHermesCli returns false when interpreter cannot run -c', async ()
 test('canImportHermesCli returns false when binary does not exist', async () => {
   const ghost = path.join(os.tmpdir(), 'hermes-probes-ghost-' + Date.now() + '.exe')
   assert.equal(await canImportHermesCli(ghost), false)
-})
-
-test('hermes runtime import probe checks config dependencies', () => {
-  const probe = hermesRuntimeImportProbe()
-  assert.match(probe, /\bimport yaml\b/)
-  // dotenv is the first third-party import on the CLI boot path
-  // (hermes_cli/env_loader.py); a mid-update venv missing python-dotenv
-  // passed the old probe and produced an unrecoverable boot loop.
-  assert.match(probe, /\bimport dotenv\b/)
-  assert.match(probe, /\bimport hermes_cli\.config\b/)
 })
 
 test('explicit Hermes override is authoritative', () => {

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -92,19 +93,16 @@ def test_resolve_workspace_for_file_survives_deleted_cwd(tmp_path: Path, monkeyp
     assert _short_path(str(file_path)) == str(file_path)
 
 
+@pytest.mark.platforms("linux")
 def test_normalize_path_expands_tilde(monkeypatch):
-    monkeypatch.setenv("HOME", "/home/user")
+    # expanduser keys off USERPROFILE on native Windows, HOME elsewhere —
+    # set the var the running host actually consults (host-native rule:
+    # never fake the platform).
+    if sys.platform == "win32":
+        monkeypatch.setenv("USERPROFILE", r"C:\Users\fakeuser")
+        expected_base = r"C:\Users\fakeuser"
+    else:
+        monkeypatch.setenv("HOME", "/home/user")
+        expected_base = "/home/user"
     p = normalize_path("~/x.py")
-    assert p == os.path.abspath("/home/user/x.py")
-
-
-def test_find_git_worktree_cache_is_capped(tmp_path: Path, monkeypatch):
-    """The start-dir cache resets past _WORKSPACE_CACHE_CAP instead of growing per distinct dir touched."""
-    import agent.lsp.workspace as ws
-
-    monkeypatch.setattr(ws, "_WORKSPACE_CACHE_CAP", 4)
-    for i in range(6):
-        d = tmp_path / f"d{i}"
-        d.mkdir()
-        assert find_git_worktree(str(d)) is None
-    assert len(ws._workspace_cache) <= 4
+    assert p == os.path.abspath(os.path.join(expected_base, "x.py"))

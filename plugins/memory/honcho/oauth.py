@@ -112,7 +112,7 @@ def _read_config_strict(path: Path) -> dict[str, Any]:
     from ``{}`` would replace every other host's credentials."""
     try:
         return json.loads(path.read_text(encoding="utf-8-sig"))
-    except FileNotFoundError:
+    except (OSError, json.JSONDecodeError):
         return {}
     except (OSError, ValueError) as exc:
         logger.warning("Honcho config at %s exists but could not be read (%s); refusing to overwrite it.", path, exc)

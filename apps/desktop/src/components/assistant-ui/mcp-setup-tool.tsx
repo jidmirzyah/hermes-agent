@@ -2,7 +2,7 @@
 
 import { type ToolCallMessagePartProps, useAuiState } from '@assistant-ui/react'
 import { useStore } from '@nanostores/react'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { useSessionView } from '@/app/chat/session-view'
 import {
@@ -15,12 +15,21 @@ import {
 } from '@/components/assistant-ui/connector-tool'
 import { ToolFallback } from '@/components/assistant-ui/tool/fallback'
 import { WIDGET_SHELL_CLASS } from '@/components/chat/widget-shell'
-import { Button } from '@/components/ui/button'
-import { ConnectorCard, ConnectorRow, type ConnectorRowAction, ConnectorSummary } from '@/components/ui/connector-card'
-import { SetupFormDialog } from '@/components/ui/setup-form-dialog'
+import { ConnectorCard, type ConnectorCardCopy, ConnectorSummary } from '@/components/ui/connector-card'
+import {
+  addMcpServer,
+  getActionStatus,
+  getMcpCatalog,
+  installMcpCatalogEntry,
+  type McpCatalogEntry,
+  removeMcpServer,
+  setMcpServerEnabled
+} from '@/hermes'
 import { useI18n } from '@/i18n'
-import { connectorText, type McpTarget, mcpTargets } from '@/lib/connector-tools'
+import { triggerHaptic } from '@/lib/haptics'
 import { Loader2 } from '@/lib/icons'
+import { completeMcpDesktopOAuth, McpOAuthCancelled } from '@/lib/mcp-dashboard-oauth'
+import { directoryEntry } from '@/lib/mcp-directory'
 import { prettyName } from '@/lib/text'
 import { cn } from '@/lib/utils'
 import {
@@ -97,43 +106,29 @@ function readSetupAction(args: unknown): SetupAction {
   return target?.action ?? 'install'
 }
 
-interface SettledTarget {
-  name: string
-  state: string
-  tools: number
-  toolsUnavailable: boolean
-}
-
-/** A settled operation is a static per-target summary: one word per row, no controls. */
-function McpSetupSummary({ action, rows }: { action: SetupAction; rows: SettledTarget[] }) {
-  const { t } = useI18n()
-  const copy = t.assistant.mcpSetup
-
-  return (
-    <div className="my-2 grid min-w-0 max-w-lg gap-1" data-connector-offer>
-      {rows.map(row => {
-        const title = prettyName(row.name)
-        const connected = row.state === 'connected'
-
-        const line = connected
-          ? row.toolsUnavailable
-            ? `${DONE[action](copy, title)} · ${t.connectors.authorizedToolsUnavailable}`
-            : DONE[action](copy, title)
-          : row.state === 'skipped'
-            ? t.connectors.skipped
-            : t.connectors.notConnected
-
-        return (
-          <ConnectorSummary
-            connector={{ name: row.name, title }}
-            key={row.name}
-            meta={connected && row.tools > 0 ? `${line} · ${copy.toolCount(row.tools)}` : line}
-            tone={connected ? 'ok' : undefined}
-          />
-        )
-      })}
-    </div>
-  )
+/** The card's strings, from this tool's own copy. The verb changes with the
+ *  action (Install / Enable / Authorize); the rest is the shared consent
+ *  vocabulary every connector card speaks. */
+function cardCopy(copy: ReturnType<typeof useI18n>['t']['assistant']['mcpSetup'], action: SetupAction): ConnectorCardCopy {
+  return {
+    connectAction: action === 'enable' ? copy.enableAction : action === 'authorize' ? copy.authorizeAction : copy.installAction,
+    connectTitle:
+      action === 'enable' ? copy.enableTitle : action === 'authorize' ? copy.authorizeTitle : copy.installTitle,
+    decline: copy.decline,
+    envRequired: copy.envRequired,
+    grantAction: copy.authorizeAction,
+    retryAction: copy.installAction,
+    stateConnected: '',
+    stateDeclined: copy.declined,
+    stateDisabled: '',
+    stateFailed: '',
+    stateNeedsAuth: '',
+    toolCount: copy.toolCount,
+    trustCommunity: '',
+    trustCommunityTip: () => '',
+    trustVerified: () => '',
+    trustVerifiedTip: () => ''
+  }
 }
 
 function readSetupResult(result: unknown): SettledTarget[] {
@@ -175,10 +170,47 @@ const McpSetupLive = (props: ToolCallMessagePartProps) => {
 }
 
 function McpSetupSettled({ args, result }: ToolCallMessagePartProps) {
-  const action = useMemo(() => readSetupAction(args), [args])
-  const rows = useMemo(() => readSetupResult(result), [result])
+  const { t } = useI18n()
+  const copy = t.assistant.mcpSetup
+  const fromArgs = useMemo(() => readSetupArgs(args), [args])
+  const fromResult = useMemo(() => readSetupResult(result), [result])
 
-  return <McpSetupSummary action={action} rows={rows} />
+  const server = fromResult.server || fromArgs.server
+  const status = fromResult.status ?? 'error'
+  const displayName = prettyName(server)
+
+  const line =
+    status === 'installed'
+      ? copy.installed(displayName)
+      : status === 'enabled'
+        ? copy.enabled(displayName)
+        : status === 'authorized'
+          ? copy.authorized(displayName)
+          : status === 'declined'
+            ? copy.declined
+            : status === 'unanswered'
+              ? copy.unanswered
+              : copy.failed(displayName)
+
+  const ok = status === 'installed' || status === 'enabled' || status === 'authorized'
+  const neutral = status === 'declined' || status === 'unanswered'
+  const toolCount = Array.isArray(fromResult.tools) ? fromResult.tools.length : 0
+
+  // Settled is scaffolding, the same line a spent connector offer collapses
+  // to: the name, then the verdict as meta. A failure keeps its reason.
+  return (
+    <ConnectorSummary
+      connector={{ name: server, title: displayName }}
+      meta={
+        ok && toolCount > 0
+          ? `${line} · ${copy.toolCount(toolCount)}`
+          : !ok && !neutral && fromResult.detail
+            ? `${line} — ${fromResult.detail}`
+            : line
+      }
+      tone={ok ? 'ok' : neutral ? undefined : 'error'}
+    />
+  )
 }
 
 export function McpSetupPending(props: ToolCallMessagePartProps) {
@@ -345,7 +377,16 @@ function McpSetupRow({ action, onReissue, reissueBlocked, reissuing, request, ta
       notifyError(error, copy.sendFailed)
       setSentAtSeq(null)
     }
-  }
+  }, [action, copy, entry, envDraft, respond, server])
+
+  const displayName = prettyName(server)
+  const card = cardCopy(copy, action)
+
+  // What connecting actually means — the endpoint that will be contacted.
+  // Catalog entries carry their transport URL in the API response; the
+  // static directory remains a fallback rung for older backends.
+  const known = directoryEntry(server)
+  const sourceLine = action === 'install' ? (entry?.url ?? known?.url ?? copy.catalogSource) : null
 
   const cancelSetup = async () => {
     setSetupOpen(false)
@@ -382,44 +423,37 @@ function McpSetupRow({ action, onReissue, reissueBlocked, reissuing, request, ta
 
   const displayServer = prettyName(server)
 
-  const rowCue = target.discoveryError
-    ? t.connectors.authorizedToolsUnavailable
-    : verb === 'open'
-      ? t.connectors.waiting
-      : undefined
+  if (!ready) {
+    return (
+      <div className={cn(SHELL_CLASS, 'my-1.5 flex items-center gap-2')} data-slot="connector-card">
+        <Loader2 aria-hidden className="size-4 animate-spin text-(--ui-text-tertiary)" />
+        <span className="text-(--ui-text-tertiary)">{card.connectTitle?.(displayName)}</span>
+      </div>
+    )
+  }
 
+  // The same consent card the connector offer renders: one shape for every
+  // "connect this?" in the transcript. `phase` is what flips the card into
+  // its working state (spinner on the action, decline becomes cancel).
   return (
-    <>
-      <ConnectorRow
-        action={verb === 'none' ? undefined : ACTIONS[verb]}
-        connector={{ name: server, title: displayServer }}
-        cue={rowCue}
-        mark={phase.mark}
-        markLabel={MARK_LABEL[phase.mark](t.connectors)}
-      />
-      <SetupFormDialog
-        copy={{
-          cancel: t.connectors.setupCancel,
-          connect: t.connectors.connect,
-          openInBrowser: t.connectors.openInBrowser,
-          setup: t.connectors.setup
-        }}
-        detail={target.detail}
-        fields={fields}
-        instructions={target.instructions}
-        onCancel={() => void cancelSetup()}
-        onConnect={env => void approve(env)}
-        onOpenBrowser={() => {
-          if (target.connectUrl) {
-            void window.hermesDesktop?.openExternal?.(target.connectUrl)
-          }
-        }}
-        open={setupOpen}
-        pending={sending || target.state === 'initiated'}
-        server={displayServer}
-        status={target.state}
-        url={target.connectUrl}
-      />
-    </>
+    <ConnectorCard
+      accelerators
+      connector={{
+        description: reason || undefined,
+        name: server,
+        requiredEnv: entry?.required_env,
+        title: displayName
+      }}
+      copy={{ ...card, decline: working ? t.common.cancel : card.decline }}
+      envDraft={envDraft}
+      envOpen={envOpen && !!entry && entry.required_env.length > 0}
+      onConnect={() => void approve()}
+      onDismiss={decline}
+      onEnvChange={(key, value) => setEnvDraft(prev => ({ ...prev, [key]: value }))}
+      phase={working ? '' : undefined}
+      source={sourceLine ? { text: sourceLine } : undefined}
+      state="not_configured"
+      variant="avatar"
+    />
   )
 }

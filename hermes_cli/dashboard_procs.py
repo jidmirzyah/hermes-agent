@@ -862,10 +862,10 @@ _HEX32 = set("0123456789abcdef")
 
 
 def _hermes_home_dir() -> Path:
-    """The process's Hermes home: remote-backend locks are a process-level asset, so a request scoped
-    to another profile must still see the same lock dir."""
+    """Process home for backend ownership records, independent of request scope."""
     from hermes_constants import get_process_hermes_home
-    return get_process_hermes_home()
+
+    return get_process_hermes_home().expanduser()
 
 
 def _is_hex(value: object, length: int) -> bool:

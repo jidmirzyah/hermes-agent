@@ -1,7 +1,7 @@
 import type { ToolCallMessagePartProps } from '@assistant-ui/react'
 import type { ConnectionTargetState, ConnectorsConnectResult } from '@hermes/shared'
 import { useStore } from '@nanostores/react'
-import { type RefObject, useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
 import { useSessionView } from '@/app/chat/session-view'
 import { sessionRoute } from '@/app/routes'
@@ -9,32 +9,84 @@ import { ToolFallback } from '@/components/assistant-ui/tool/fallback'
 import { Button } from '@/components/ui/button'
 import { ConnectorCard, ConnectorRow, type ConnectorRowMark, ConnectorSummary } from '@/components/ui/connector-card'
 import { useI18n } from '@/i18n'
-import {
-  connectorAuthorizationUrl,
-  connectorIconUrl,
-  connectorText,
-  connectorTitle,
-  recordOf,
-  toolLabels,
-  toolLabelTitle
-} from '@/lib/connector-tools'
-import {
-  $connectionRequests,
-  type ConnectionOwner,
-  connectionOwnerFor,
-  type ConnectionRequest,
-  connectionRequestOpen,
-  type ConnectionTarget,
-  continueConnectionRequest,
-  sessionConnectionRequest
-} from '@/store/connection-request'
+import { connectionRows, connectorCalls, connectorTitle, connectorToolName, recordOf } from '@/lib/connector-tools'
+import { cn } from '@/lib/utils'
+import { createConnectorFlow } from '@/store/connector-flow'
 import { requestGatewayForAgent } from '@/store/gateway'
 import { notifyError } from '@/store/notifications'
 
-/** Resolve that owner. Null until it resolves and null when it cannot: a card RPC must reach the
- *  gateway that holds the operation, never whichever one the window happens to have in front. */
-export function useConnectionOwner(sessionId: null | string, active: boolean): ConnectionOwner | null {
-  const [owner, setOwner] = useState<ConnectionOwner | null>(null)
+export function ConnectorTool(props: ToolCallMessagePartProps) {
+  const view = useSessionView()
+  const runtimeId = useStore(view.$runtimeId)
+  const storedId = useStore(view.$storedId)
+  const messages = useStore(view.$messages)
+
+  // One live card per offer. Every manage_connections call renders through
+  // here, but only ONE is the card the user acts on; the rest are settled
+  // tool rows. Which one: consecutive calls naming the same apps are one
+  // exchange — connect, the wait the agent parks in while the user signs in,
+  // the status it runs when the connection lands — and the FIRST of the last
+  // exchange is the card. The newest would demote the card mid-authorization
+  // into a row and mint a fresh one below it. A catalog listing (status with
+  // nothing named) after a targeted ask never starts an exchange: it is a
+  // read, not an offer.
+  const offers = messages
+    .flatMap(message => message.parts)
+    .filter(
+      part =>
+        part.type === 'tool-call' &&
+        (part.toolName === 'manage_connections' || connectorCalls(part.toolName, part.args).length > 0)
+    )
+
+  const keyOf = (part: (typeof offers)[number]) =>
+    part.type === 'tool-call'
+      ? connectionRows(part.args, part.result)
+          .map(row => row.connector)
+          .sort()
+          .join('|')
+      : ''
+
+  const targeted = (part: (typeof offers)[number]) => {
+    if (part.type !== 'tool-call') {
+      return false
+    }
+
+    const asked = recordOf(part.args).connectors
+
+    return Array.isArray(asked) && asked.length > 0
+  }
+
+  let liveId: string | undefined
+  let liveKey: string | null = null
+  let sawTargeted = false
+
+  for (const part of offers) {
+    if (part.type !== 'tool-call') {
+      continue
+    }
+
+    const key = keyOf(part)
+
+    if (sawTargeted && !targeted(part)) {
+      continue
+    }
+
+    sawTargeted ||= targeted(part)
+
+    if (key !== liveKey) {
+      liveKey = key
+      liveId = part.toolCallId
+    }
+  }
+
+  const historical = liveId !== props.toolCallId
+
+  const [owner, setOwner] = useState<{
+    storedId: string
+    runtimeId: string
+    connectionId: null | string
+    profile: string
+  } | null>(null)
 
   useEffect(() => {
     if (!sessionId || !active) {
@@ -54,7 +106,23 @@ export function useConnectionOwner(sessionId: null | string, active: boolean): C
     return () => {
       cancelled = true
     }
-  }, [active, sessionId])
+  }, [storedId, runtimeId, historical])
+  const rows = connectionRows(props.args, props.result)
+  const signature = rows.map(row => row.connector).join('|')
+  const target = view.kind === 'tile' ? `tile:${storedId}` : 'main'
+
+  // The TUI shape, stolen: the agent parks inside manage_connections
+  // action="wait", which blocks the turn and polls the gateway, instead of
+  // deciding what "not connected" means and building around the app. Each
+  // card action sends one hidden line so the agent takes the right next call.
+  // Read through a ref so the flow (memoised on identity) always nudges the
+  // live composer target, never the one it was built with. Busy is the
+  // composer's problem: a hidden request mid-turn steers or queues there.
+  const nudgeRef = useRef((_text: string) => {})
+
+  nudgeRef.current = (text: string) => {
+    requestComposerSubmit(`[connectors] ${text}`, { displayKind: 'hidden', target })
+  }
 
   return owner
 }
@@ -81,14 +149,12 @@ export async function openConnectionDoneLink(
 
   const owner = await connectionOwnerFor(storedId, 'connectors.operation.wake')
 
-  if (!owner) {
-    return
-  }
-
-  try {
-    await requestGatewayForAgent(owner.connectionId, owner.profile, 'connectors.operation.wake', {
-      op_id: op,
-      owner: { session_id: request.sessionId, type: 'session' }
+        await window.hermesDesktop.openExternal(url)
+      },
+      onWaiting: slug =>
+        nudgeRef.current(
+          `The user clicked Connect for ${connectorTitle(slug)} and the sign-in is open in their browser. Call manage_connections action="wait" connectors=["${slug}"] now and hold there until it reports connected. Do NOT call connect again — a second link cancels the one they are signing in with. Say nothing until wait returns.`
+        )
     })
   } catch {
     // The wake only shortens the wait. The operation can settle and leave the live registry between
@@ -168,45 +234,16 @@ export function ConnectorTool(props: ToolCallMessagePartProps) {
   return owner ? <ConnectorOffer owner={owner} request={request} /> : null
 }
 
-type ConnectorCopy = ReturnType<typeof useI18n>['t']['connectors']
-type ConnectorVerb = 'none' | 'open' | 'reissue'
-
-/** The settled row's word; the card never says why. */
-interface SettledWord {
-  meta: string
-  tone?: 'ok'
-}
-
-interface ConnectorCardPhase {
-  mark: ConnectorRowMark
-  resolved: boolean
-  settled: (copy: ConnectorCopy) => SettledWord
-  verb: ConnectorVerb
-}
-
-const connected = (copy: ConnectorCopy): SettledWord => ({ meta: copy.connected, tone: 'ok' })
-const notConnected = (copy: ConnectorCopy): SettledWord => ({ meta: copy.notConnected })
-const skipped = (copy: ConnectorCopy): SettledWord => ({ meta: copy.skipped })
-
-export const CONNECTOR_CARD_PHASES = {
-  connected: { mark: 'connected', resolved: true, settled: connected, verb: 'none' },
-  expired: { mark: 'idle', resolved: false, settled: notConnected, verb: 'reissue' },
-  failed: { mark: 'idle', resolved: false, settled: notConnected, verb: 'reissue' },
-  initiated: { mark: 'waiting', resolved: false, settled: notConnected, verb: 'open' },
-  not_connected: { mark: 'idle', resolved: false, settled: notConnected, verb: 'none' },
-  pending: { mark: 'idle', resolved: false, settled: notConnected, verb: 'open' },
-  skipped: { mark: 'idle', resolved: true, settled: skipped, verb: 'none' }
-} satisfies Record<ConnectionTargetState, ConnectorCardPhase>
-
-// A disabled verb (a working row, a waiting row with no link yet) refuses focus, and the keyboard
-// would land on the document body; so the first control that can take it, else the row itself.
-const FOCUSABLE_IN_ROW = 'button:not([disabled]), [href], input:not([disabled])'
-// The user is typing a credential; a row moving elsewhere on the card must not take the keyboard.
-const EDITABLE = 'input, textarea, select, [contenteditable]:not([contenteditable="false"])'
-
-function focusChangedRow(card: HTMLElement, name: string): void {
-  const row = [...card.querySelectorAll<HTMLElement>('[data-connector-row]')].find(
-    node => node.dataset.connectorRow === name
+  return (
+    <ConnectorOffer
+      flow={flow}
+      key={`${runtimeId}:${signature}`}
+      onSkipped={slug =>
+        nudgeRef.current(
+          `The user chose Not now for ${connectorTitle(slug)}. Do not connect it, do not route around it with another client, credential or CLI for the same app. Continue the task without it, or ask what they want to do.`
+        )
+      }
+    />
   )
 
   ;(row?.querySelector<HTMLElement>(FOCUSABLE_IN_ROW) ?? row)?.focus()
@@ -256,124 +293,138 @@ export const MARK_LABEL = {
 } satisfies Record<ConnectorRowMark, (copy: ConnectorCopy) => string>
 
 interface ConnectorOfferProps {
-  owner: ConnectionOwner
-  request: ConnectionRequest
+  flow: ReturnType<typeof createConnectorFlow>
+  /** The user waved the app off. */
+  onSkipped: (slug: string) => void
 }
 
-export function ConnectorOffer({ owner, request }: ConnectorOfferProps) {
+export function ConnectorOffer({ flow, onSkipped }: ConnectorOfferProps) {
+  const state = useStore(flow.state)
   const { t } = useI18n()
   const copy = t.connectors
-  const [reissuing, setReissuing] = useState<ReadonlySet<string>>(new Set())
-  // Rows whose link the user opened from this card. `initiated` only means a link was minted: the
-  // connect-first handoff (D85) mints on the watcher's first pass, before anyone clicks, so the
-  // "Waiting for your browser…" cue belongs to a row the user actually opened.
-  const [opened, setOpened] = useState<ReadonlySet<string>>(new Set())
-  const unresolved = request.targets.some(target => !CONNECTOR_CARD_PHASES[target.state].resolved)
-  // A DOM handle for the focus handoff, never rendered state.
-  const cardRef = useRef<HTMLDivElement | null>(null)
+  const [query, setQuery] = useState('')
+  const active = state.rows.some(row => row.phase === 'opening' || row.phase === 'waiting')
 
-  useConnectorFocusHandoff(request.targets, cardRef)
-
-  // The update frame paints the row as waiting with the fresh link; the user opens it from the row.
-  // A refused re-mint is a click that changed nothing, so it gets a toast; the row stays as it was.
-  const reissue = async (target: ConnectionTarget): Promise<void> => {
-    setReissuing(current => new Set(current).add(target.name))
-    setOpened(current => {
-      const next = new Set(current)
-      next.delete(target.name)
-
-      return next
-    })
-
-    try {
-      await reissueConnectionTarget(owner, request, target.name)
-    } catch (error) {
-      notifyError(error, copy.connectErrorFor(connectorTitle(target.name)))
-    } finally {
-      setReissuing(current => {
-        const next = new Set(current)
-        next.delete(target.name)
+  const cardCopy: ConnectorCardCopy = {
+    connectAction: copy.connect,
+    decline: copy.skip,
+    envRequired: '',
+    grantAction: copy.grant,
+    retryAction: copy.retry,
+    stateConnected: copy.connected,
+    stateDeclined: copy.skipped,
+    stateDisabled: copy.disabled,
+    stateFailed: copy.failed,
+    stateNeedsAuth: copy.needsAuth,
+    toolCount: count => String(count),
+    trustCommunity: '',
+    trustCommunityTip: () => '',
+    trustVerified: () => '',
+    trustVerifiedTip: () => ''
+  }
 
         return next
       })
     }
   }
 
-  // A settled operation is a static per-target summary: no controls, no polling, nothing live.
-  if (request.settled) {
-    return (
-      <div className="my-2 grid min-w-0 max-w-lg gap-1" data-connector-offer>
-        {request.targets.map(target => {
-          const { meta, tone } = CONNECTOR_CARD_PHASES[target.state].settled(copy)
-
-          return (
-            <ConnectorSummary
-              connector={{
-                iconUrl: connectorIconUrl(target.name),
-                name: target.name,
-                title: connectorTitle(target.name)
-              }}
-              key={target.name}
-              meta={meta}
-              tone={tone}
-            />
-          )
-        })}
-      </div>
-    )
-  }
+  const rows = state.rows.filter(row => connectorTitle(row.connector).toLowerCase().includes(query.toLowerCase()))
+  // A targeted ask ("connect Gmail") is one or two cards, each already a
+  // complete question. A heading, a disclaimer and a refresh control over
+  // them is a settings panel dropped into the chat. Only a real catalog — the
+  // model asked for status with nothing named — earns the chrome.
+  const catalog = state.rows.length > 4
 
   return (
-    <div className="my-2 grid min-w-0 max-w-lg gap-1" data-connector-offer ref={cardRef}>
-      <ConnectorCard title={copy.title}>
-        {request.targets.map(target => {
-          const phase = CONNECTOR_CARD_PHASES[target.state]
-          const busy = reissuing.has(target.name)
-          const mark = phase.mark === 'waiting' && !opened.has(target.name) ? 'idle' : phase.mark
-
-          const action =
-            phase.verb === 'none'
-              ? undefined
-              : {
-                  busy,
-                  // Prevent concurrent sign-in tabs; a waiting row without a link has nothing to open yet.
-                  disabled: (reissuing.size > 0 && !busy) || (phase.verb === 'open' && target.connectUrl === null),
-                  label: phase.verb === 'open' ? copy.connect : copy.retry,
-                  onClick: () => {
-                    if (phase.verb === 'open' && target.connectUrl && window.hermesDesktop?.openExternal) {
-                      void window.hermesDesktop.openExternal(target.connectUrl)
-                      setOpened(current => new Set(current).add(target.name))
-                    }
-
-                    if (phase.verb === 'reissue') {
-                      void reissue(target)
-                    }
-                  }
-                }
-
-          return (
-            <ConnectorRow
-              action={action}
-              connector={{
-                iconUrl: connectorIconUrl(target.name),
-                name: target.name,
-                title: connectorTitle(target.name)
-              }}
-              cue={mark === 'waiting' ? copy.waiting : undefined}
-              key={target.name}
-              mark={mark}
-              markLabel={MARK_LABEL[mark](copy)}
-            />
-          )
-        })}
-      </ConnectorCard>
-      {unresolved ? (
-        <div className="px-3.5">
-          <Button onClick={() => void continueConnectionRequest(request)} size="xs" variant="textStrong">
-            {t.common.continue}
-          </Button>
+    <div className="my-2 grid min-w-0 max-w-lg gap-1" data-connector-offer>
+      {catalog ? (
+        <div className="grid gap-0.5 px-1">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-sm font-medium">{copy.title}</span>
+            <Button onClick={() => void flow.refresh()} size="xs" variant="text">
+              {copy.refresh}
+            </Button>
+          </div>
+          <p className="text-xs text-muted-foreground">{copy.disclaimer}</p>
         </div>
       ) : null}
+      {state.error ? (
+        <p className="flex flex-wrap items-center gap-2 px-1 text-xs text-destructive" role="alert">
+          {copy.statusError}
+          <Button onClick={() => void flow.refresh()} size="xs" variant="text">
+            {copy.retry}
+          </Button>
+        </p>
+      ) : null}
+      {!state.available && !state.error ? <p className="px-1 text-xs text-muted-foreground">{copy.unavailable}</p> : null}
+      {catalog ? <SearchField onChange={setQuery} placeholder={copy.search} value={query} /> : null}
+      <div className={cn('grid min-w-0', catalog && 'max-h-96 overflow-y-auto')}>
+        {rows.map(row => (
+          <div className="grid" key={row.connector}>
+            <ConnectorCard
+              actionDisabled={!state.available || row.enabled === false || !!state.error}
+              collapseWhenSettled={false}
+              connector={{
+                name: row.connector,
+                title: row.name || connectorTitle(row.connector),
+                description: row.description || copy.describe(row.name || connectorTitle(row.connector))
+              }}
+              copy={{
+                ...cardCopy,
+                connectTitle: copy.connectTitle,
+                decline: row.phase === 'opening' || row.phase === 'waiting' ? copy.cancel : copy.skip,
+                connectAction: ['expired', 'revoked'].includes(row.connectionStatus ?? '') ? copy.grant : copy.connect
+              }}
+              dismissed={row.phase === 'skipped'}
+              onConnect={() => void flow.connect(row.connector)}
+              onDismiss={() => {
+                const wasPending = ['opening', 'waiting'].includes(row.phase)
+                flow.skip(row.connector)
+
+                // A cancel mid-authorization is not a skip: the agent may be
+                // parked in wait and will hear the timeout itself.
+                if (!wasPending) {
+                  onSkipped(row.connector)
+                }
+              }}
+              otherBusy={active && !['opening', 'waiting'].includes(row.phase)}
+              outcome={
+                row.phase === 'connected'
+                  ? { status: 'connected' }
+                  : row.phase === 'error'
+                    ? {
+                        status: 'error',
+                        detail:
+                          row.error === 'connect'
+                            ? copy.connectError
+                            : row.error === 'unavailable'
+                              ? copy.unavailable
+                              : copy.statusError
+                      }
+                    : undefined
+              }
+              phase={row.phase === 'opening' ? copy.opening : row.phase === 'waiting' ? copy.waiting : undefined}
+              state={
+                row.enabled === false
+                  ? 'disabled'
+                  : ['expired', 'revoked'].includes(row.connectionStatus ?? '')
+                    ? 'needs_auth'
+                    : 'not_configured'
+              }
+              variant="avatar"
+            />
+            {row.phase === 'timeout' ? (
+              <div className="flex flex-wrap items-center gap-2 px-3.5 text-xs text-muted-foreground">
+                <span>{copy.timeout}</span>
+                <Button onClick={() => void flow.keepWaiting(row.connector)} size="xs" variant="textStrong">
+                  {copy.keepWaiting}
+                </Button>
+              </div>
+            ) : null}
+          </div>
+        ))}
+        {!rows.length && state.available ? <p className="px-1 text-xs text-muted-foreground">{copy.empty}</p> : null}
+      </div>
     </div>
   )
 }

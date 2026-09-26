@@ -6,8 +6,11 @@ import { cn } from '@/lib/utils'
 import type { InterfaceMode } from '@/store/interface-mode'
 import { readableInk } from '@/themes/color'
 
-// Curated leaders for the first-run picker. Other enabled catalog entries
-// remain searchable, so newly deployed connectors need no client list update.
+// Which live-catalog slugs to lead with, and in what order. The catalog is the
+// source of truth for WHAT can be connected — this is only a sort key for the
+// picker, so the apps most people use land in the first rows and the rest
+// stay reachable by search. A slug the catalog no longer carries is simply
+// not shown; a new one it gains is shown after these.
 export const CONNECTOR_LEAD_ORDER = [
   'gmail',
   'googlecalendar',
@@ -23,20 +26,18 @@ export const CONNECTOR_LEAD_ORDER = [
   'todoist'
 ]
 
-// Connectors are the apps Hermes reads and acts on for the user. Chat channels
-// (Discord, Telegram, WhatsApp) are how a user talks to Hermes; those live on
+// Connectors are the apps Hermes reads and acts on FOR the user. Chat channels
+// (Discord, Telegram, WhatsApp) are how a user talks TO Hermes — those live on
 // the Messaging page, and offering them here as if they were data sources
 // taught users the wrong thing about what "connect" does. The catalog
 // carries them for the agent's sake; the first-run picker leaves them out.
 export const CONNECTOR_PICKER_HIDDEN = new Set(['discord', 'discordbot', 'microsoft_teams'])
 
-// A row the gateway marks `enabled: false` is a toolkit the deployment has
-// turned off; the agent cannot connect it, so the picker does not offer it.
-export function orderConnectorPicks<T extends { connector: string; enabled?: boolean }>(rows: T[]): T[] {
+export function orderConnectorPicks<T extends { connector: string }>(rows: T[]): T[] {
   const rank = new Map(CONNECTOR_LEAD_ORDER.map((slug, index) => [slug, index]))
 
   return rows
-    .filter(row => row.enabled !== false && !CONNECTOR_PICKER_HIDDEN.has(row.connector))
+    .filter(row => !CONNECTOR_PICKER_HIDDEN.has(row.connector))
     .sort((a, b) => {
       const ra = rank.get(a.connector) ?? Number.POSITIVE_INFINITY
       const rb = rank.get(b.connector) ?? Number.POSITIVE_INFINITY
@@ -45,9 +46,10 @@ export function orderConnectorPicks<T extends { connector: string; enabled?: boo
     })
 }
 
-// Each swatch sets the accent override, which `retintTheme` uses to repaint
-// the active skin as soon as the swatch is clicked. Nous blue is the default
-// and sets no override. Mono is black in light mode and white in dark mode.
+// Big accent swatches, Dia-style. Each seeds `retintTheme` through the accent
+// override, so a click repaints the surface live. Nous blue is the default =
+// no override. Mono seeds the current mode's pole — black in light, white in
+// dark — for a full monochrome look.
 export const NOUS_ACCENT = '#0053fd'
 
 export const accentsFor = (dark: boolean): Array<{ hex: string; name: string }> => [

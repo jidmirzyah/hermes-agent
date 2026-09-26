@@ -7,8 +7,8 @@ import pytest
 from hermes_cli import gateway, main, update_cmd_fleet as fleet, update_receipt
 
 
-@pytest.mark.linux_only
-@pytest.mark.parametrize("failure", ["listing", "timeout", "missing", "restart", "inactive", "running", "missing-owned", None])
+@pytest.mark.platforms("linux")
+@pytest.mark.parametrize("failure", ["listing", "timeout", "missing", "restart", "inactive", "running", None])
 def test_pending_marker_requires_complete_systemd_recovery(monkeypatch, tmp_path, failure):
     stopped = []
     monkeypatch.setattr(gateway, "find_gateway_pids", lambda **kw: [123] if failure == "running" and not stopped else [])

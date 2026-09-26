@@ -1,4 +1,4 @@
-"""cua-driver installer, lock hygiene and pip-install helper for `hermes tools` /
+"""cua-driver installer and lock hygiene for `hermes tools` /
 `hermes computer-use install`."""
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import List, Optional
+from typing import Optional
 
 from hermes_cli.cli_output import (
     print_info as _print_info, print_success as _print_success, print_warning as _print_warning)
@@ -140,45 +140,6 @@ def _cua_driver_install_ready() -> bool:
     """Return whether an existing driver needs no install-time repair."""
     return bool(_cua_driver_contract_status().get("ready")) and (
         sys.platform != "win32" or _cua_driver_autostart_registered_windows())
-
-
-def _pip_install(args: List[str], *, timeout: int = 300, capture_output: bool = True):
-    """Install Python packages: ``uv pip install`` (needs no pip in the venv), then ``python -m
-    pip``, then ``ensurepip --upgrade`` + retry — the Windows installer creates the venv via
-    ``uv venv``, which does NOT seed pip, so bare ``-m pip`` failed on fresh installs."""
-    venv_root = Path(sys.executable).parent.parent
-    install_flags = _post_setup_no_window_flags(streams_to_console=not capture_output)
-
-    # Managed uv first: $HERMES_HOME/bin is never on PATH, so a bare which() misses the uv Hermes
-    # installed; ensure_uv() (not a pure lookup) because installing uv is in scope during setup.
-    from hermes_cli.managed_uv import ensure_uv
-    uv_bin = ensure_uv()
-    try:  # a failed uv run falls through to pip — it may have failed for a reason pip can handle
-        result = uv_bin and _run_text([uv_bin, "pip", "install", *args], timeout=timeout,
-                                      capture_output=capture_output, creationflags=install_flags,
-                                      env={**os.environ, "VIRTUAL_ENV": str(venv_root)})
-        if result and result.returncode == 0:
-            return result
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        pass
-    pip_cmd = [sys.executable, "-m", "pip"]
-    try:
-        # Probe for pip; bootstrap via ensurepip if missing (uv venv lacks it).
-        probe = _run_text(pip_cmd + ["--version"], timeout=15,
-                          creationflags=_post_setup_no_window_flags())
-        if probe.returncode != 0:
-            raise FileNotFoundError("pip not in venv")
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        try:
-            _run_text([sys.executable, "-m", "ensurepip", "--upgrade", "--default-pip"],
-                      timeout=120, check=True, creationflags=_post_setup_no_window_flags())
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
-            # Synthesize a result so callers see a clean failure path.
-            return subprocess.CompletedProcess(
-                pip_cmd, returncode=1, stdout="",
-                stderr=f"pip not available and ensurepip failed: {e}")
-    return _run_text(pip_cmd + ["install", *args], capture_output=capture_output, timeout=timeout,
-                     creationflags=install_flags)
 
 
 # No pre-install release/asset probe: cua-driver-rs releases are all prereleases, which GitHub's
@@ -425,7 +386,7 @@ def _clear_stale_cua_install_lock() -> None:
         if not lock_dir.is_dir():
             return
         try:
-            lines = (lock_dir / "info").read_text(encoding="utf-8", errors="replace").splitlines()
+            lines = (lock_dir / "info").read_text(encoding="utf-8-sig", errors="replace").splitlines()
             holder_pid = next((int(line.split("=", 1)[1].strip()) for line in lines
                                if line.startswith("pid=")), None)
         except (OSError, ValueError):

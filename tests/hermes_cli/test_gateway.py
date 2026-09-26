@@ -142,7 +142,7 @@ def _run_native_windows_gateway_start_diag(
     return json.loads(line.removeprefix("DIAG_JSON="))
 
 
-@pytest.mark.windows_only
+@pytest.mark.platforms("windows")
 @pytest.mark.parametrize(
     ("marker", "expected_breakaway"),
     [("1", True), ("0", False), (None, None)],
@@ -304,7 +304,6 @@ def test_s6_runtime_snapshot_reports_supervised_service(monkeypatch, tmp_path):
 class TestSystemdLingerStatus:
     def test_reports_enabled(self, monkeypatch):
         monkeypatch.setattr(gateway, "is_linux", lambda: True)
-        monkeypatch.setattr(gateway, "is_termux", lambda: False)
         monkeypatch.setenv("USER", "alice")
         monkeypatch.setattr(
             gateway.subprocess,
@@ -316,16 +315,9 @@ class TestSystemdLingerStatus:
         assert gateway.get_systemd_linger_status() == (True, "")
 
 
-    def test_reports_termux_as_not_supported(self, monkeypatch):
-        monkeypatch.setattr(gateway, "is_termux", lambda: True)
-
-        assert gateway.get_systemd_linger_status() == (None, "not supported in Termux")
-
-
 class TestContainerSystemdSupport:
     def test_supports_systemd_services_in_container_with_user_manager(self, monkeypatch):
         monkeypatch.setattr(gateway, "is_linux", lambda: True)
-        monkeypatch.setattr(gateway, "is_termux", lambda: False)
         monkeypatch.setattr(gateway, "is_wsl", lambda: False)
         monkeypatch.setattr(gateway, "is_container", lambda: True)
         monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/systemctl")
@@ -1516,3 +1508,78 @@ def test_find_profile_gateway_processes_strict_propagates_profile_listing_failur
 
     with pytest.raises(RuntimeError, match="profile listing failed"):
         gateway.find_profile_gateway_processes(strict=True)
+
+from pathlib import Path
+
+
+# ---------------------------------------------------------------------------
+# Steward-keyed gateway posture: apt-termux sealed installs
+#
+# A Termux APT package ships a sealed tree with no service manager: the
+# service install/uninstall/start lanes refuse (keyed on the steward
+# stamp, not a platform probe), while foreground process management
+# (stop via the PID registry) keeps working on every install.
+# ---------------------------------------------------------------------------
+
+
+def _apt_termux_tree(tmp_path) -> Path:
+    """A sealed (no .git) tree stamped as an apt-termux install."""
+    root = tmp_path / "apt-termux"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "install-stamp.json").write_text(
+        json.dumps({"distribution": "apt-termux"})
+    )
+    return root
+
+
+def test_apt_termux_probe_keys_on_steward_stamp(monkeypatch, tmp_path):
+    """The probe fires only for a sealed apt-termux tree, by provenance."""
+    root = _apt_termux_tree(tmp_path)
+    monkeypatch.setattr(gateway, "PROJECT_ROOT", root)
+    assert gateway._is_apt_termux_install() is True
+
+    # A git checkout (the repo itself) is not steward-owned: not apt-termux.
+    monkeypatch.setattr(gateway, "PROJECT_ROOT", Path(__file__).parent.parent)
+    assert gateway._is_apt_termux_install() is False
+
+
+@pytest.mark.parametrize(
+    "cmd_name",
+    ["_cmd_install", "_cmd_uninstall", "_cmd_start"],
+)
+def test_service_commands_refuse_on_sealed_apt_termux(
+    monkeypatch, tmp_path, capsys, cmd_name
+):
+    """Every gated service lane exits 1 with the no-backend message on a
+    sealed apt-termux tree -- even without TERMUX env set (the refusal is
+    provenance-keyed, not platform-keyed)."""
+    import types as _types
+
+    monkeypatch.delenv("TERMUX_VERSION", raising=False)
+    monkeypatch.setenv("PREFIX", "/usr/local")  # no termux prefix
+    monkeypatch.setattr(gateway, "is_termux", lambda: False)
+    monkeypatch.setattr(gateway, "is_managed", lambda: False)
+    monkeypatch.setattr(gateway, "_refuse_from_inside_gateway", lambda *a: None)
+    monkeypatch.setattr(gateway, "PROJECT_ROOT", _apt_termux_tree(tmp_path))
+
+    with pytest.raises(SystemExit) as exc:
+        getattr(gateway, cmd_name)(_types.SimpleNamespace(
+            force=False, system=False, run_as_user=None, all=False,
+            start_now=None, start_on_login=None, elevated_handoff=False,
+        ))
+    assert exc.value.code == 1
+    out = capsys.readouterr().out
+    assert "Termux" in out
+
+
+def test_python_path_reloads_constants_when_update_added_the_helper(tmp_path, monkeypatch):
+    import hermes_constants
+    from hermes_cli import gateway
+
+    venv = tmp_path / "environment"
+    python = hermes_constants.venv_python_path(venv)
+    python.parent.mkdir(parents=True)
+    python.touch()
+    monkeypatch.setattr(gateway, "_detect_venv_dir", lambda: venv)
+    monkeypatch.delattr(hermes_constants, "venv_python_path")
+    assert gateway.get_python_path() == str(python)

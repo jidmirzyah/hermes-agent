@@ -82,7 +82,7 @@ def _renderer_bundle_torn(dist_dir: Path) -> bool:
     unreadable index or one naming nothing checkable is NOT torn.
     """
     try:
-        html = (dist_dir / "index.html").read_text(encoding="utf-8", errors="replace")
+        html = (dist_dir / "index.html").read_text(encoding="utf-8-sig", errors="replace")
     except OSError:
         return False
 
@@ -1181,7 +1181,7 @@ def _desktop_linux_needs_no_sandbox() -> bool:
     if hasattr(os, "geteuid") and os.geteuid() == 0:
         return False
     try:
-        with open("/proc/sys/kernel/apparmor_restrict_unprivileged_userns", encoding="utf-8") as f:
+        with open("/proc/sys/kernel/apparmor_restrict_unprivileged_userns", encoding="utf-8-sig") as f:
             return f.read().strip() == "1"
     except OSError:
         return False
@@ -1400,7 +1400,8 @@ def _install_desktop_workspace_deps(npm: str, env: dict) -> None:
     # (e.g. electron-winstaller's select-7z-arch.js) resolve it even when the
     # desktop updater chain lost shell PATH customizations. Wrapping the NixOS
     # env keeps its PYTHON hint while restoring managed Node ahead of PATH.
-    nixos_env = with_hermes_node_path(_nixos_build_env())
+    from pm import env_for
+    nixos_env = env_for("npm", base_env=with_hermes_node_path(_nixos_build_env()))
     install_result = _run_npm_install_deterministic(npm, PROJECT_ROOT, capture_output=False, env=nixos_env)
     if install_result.returncode == 0:
         _record_npm_lockfile_hash(hermes_root, DESKTOP_NPM_SCOPE)
@@ -1654,7 +1655,14 @@ def cmd_gui(args: argparse.Namespace):
     from hermes_cli.main import PROJECT_ROOT
     from hermes_cli.main_install_repair import _resolve_node_runtime_npm
     desktop_dir = PROJECT_ROOT / "apps" / "desktop"
-    if not (desktop_dir / "package.json").exists():
+    # A bundled install IS the app: no source tree, no build, and the
+    # launcher is a sibling of this payload rather than something we
+    # produce. Every rung below assembles a checkout build, so the sealed
+    # shape leaves here with the env it just built.
+    from hermes_cli.steward import is_bundled_payload
+
+    bundled = is_bundled_payload(PROJECT_ROOT)
+    if not bundled and not (desktop_dir / "package.json").exists():
         print(f"Desktop GUI source not found at: {desktop_dir}")
         sys.exit(1)
 
@@ -1673,6 +1681,9 @@ def cmd_gui(args: argparse.Namespace):
     if getattr(args, "setup_tcc_identity", False):
         identity = getattr(args, "identity", None) or "Hermes Local Signing"
         sys.exit(0 if _desktop_macos_setup_tcc_identity(identity) else 1)
+
+    if bundled:
+        _launch_bundled_desktop(args, env, config_electron_flags)
 
     packaged_executable = _desktop_packaged_executable(desktop_dir)
 
@@ -1752,3 +1763,65 @@ def cmd_gui(args: argparse.Namespace):
     if deferred_entry is not None:
         deferred_entry.finish()
     sys.exit(launch_result.returncode)
+
+
+def _launch_bundled_desktop(
+    args: argparse.Namespace, env: dict, electron_flags: list[str]
+) -> None:
+    """Start the desktop app this CLI ships inside, then exit.
+
+    A bundled install has no source tree to build: the app is a signed,
+    read-only artifact and this Python is a passenger in its resources.
+    So the whole build ladder below is skipped and the launcher is started
+    DETACHED — the user ran a CLI command, and the app must outlive the
+    terminal it was typed into. The app's own single-instance lock turns a
+    second run into "focus the running window".
+
+    Never returns.
+    """
+    from hermes_cli.bundled_app import NotBundledApp, launch_detached, resolve_bundle_layout
+    from hermes_cli.main import PROJECT_ROOT
+
+    refused = [
+        flag
+        for flag, name in (
+            ("--source", "source"),
+            ("--build-only", "build_only"),
+            ("--force-build", "force_build"),
+        )
+        if getattr(args, name, False)
+    ]
+    if refused:
+        print(f"✗ {', '.join(refused)} cannot apply to a bundled Hermes install.")
+        print("  This app ships prebuilt and has no desktop source tree to build.")
+        sys.exit(2)
+
+    try:
+        layout = resolve_bundle_layout(PROJECT_ROOT)
+    except NotBundledApp as exc:
+        # The stamp says bundled, so a tree that is not one is a damaged or
+        # mispackaged install. Report it — degrading to the build ladder
+        # would run npm inside the app's own resources.
+        print(f"✗ This Hermes is stamped as a bundled desktop install, but {exc}.")
+        print("  The install is damaged — reinstall Hermes from the website.")
+        sys.exit(1)
+
+    if layout.launcher is None:
+        print(f"✗ Found no Hermes Desktop launcher in {layout.app_root}.")
+        print("  The install is damaged — reinstall Hermes from the website.")
+        sys.exit(1)
+
+    launch_command = [str(layout.launcher)]
+    if not _desktop_linux_sandbox_fixup(layout.launcher):
+        if _desktop_linux_needs_no_sandbox() and _desktop_linux_sandbox_helper_is_regular_file(layout.launcher):
+            print("⚠ Falling back to --no-sandbox because this Linux host restricts unprivileged user namespaces and the Electron sandbox helper could not be configured.")
+            launch_command.append("--no-sandbox")
+        else:
+            sys.exit(1)
+
+    launch_command.extend(electron_flags)
+    pid = launch_detached(launch_command, env=env, cwd=layout.app_root)
+    print(f"→ Launched Hermes Desktop: {' '.join(launch_command)} (pid {pid})")
+    sys.exit(0)
+
+

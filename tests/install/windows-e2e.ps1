@@ -98,6 +98,10 @@ param(
     # swallows an empty-string argument ('Missing an argument for
     # parameter'), so the workflow cannot pass "".
     [string]$InstallRef = "auto",
+    # Update target ref (default HEAD). A stable-to-stable leg passes the
+    # next release tag here; only label the leg stable-to-stable when BOTH
+    # refs are release tags.
+    [string]$UpdateRef = "HEAD",
 
     # Repo checkout whose HEAD is the update target.
     [string]$RepoRoot = "",
@@ -189,7 +193,7 @@ function Set-GitRedirect {
     }
     # first, get the set origin url
     $actualGitUrl = Invoke-Git @("-C", $RepoRoot, "remote", "get-url", "origin")
-    # then override it 
+    # then override it
     @"
 [url "$fileUrl"]
 	insteadOf = $actualGitUrl
@@ -546,7 +550,8 @@ function Invoke-PhaseStage {
     # bare-clone below (and everything after) sees the redirect file.
     Set-GitRedirect
 
-    $current = Invoke-Git @("-C", $RepoRoot, "rev-parse", "HEAD")
+    $current = Invoke-Git @("-C", $RepoRoot, "rev-parse", "${UpdateRef}^{commit}")
+    $targetLabel = if ($UpdateRef -eq "HEAD") { "HEAD" } else { $UpdateRef }
     Write-Host "  HEAD (update target): $current"
 
     # OLD: explicit -InstallRef, or the newest release tag -- the version a
@@ -580,7 +585,7 @@ function Invoke-PhaseStage {
     Invoke-Git @("-C", $ServeRepo, "config", "uploadpack.allowAnySHA1InWant", "true") | Out-Null
     Write-Host "  serve.git: uploadpack.allowAnySHA1InWant=true (installer commit pin, if any)"
 
-    @{ old = $old; old_ref = $oldRef; current = $current } |
+    @{ old = $old; old_ref = $oldRef; current = $current; target_label = $targetLabel } |
         ConvertTo-Json | Set-Content -LiteralPath $StatePath -Encoding UTF8
     Write-Host "  state written: $StatePath"
     New-Item -ItemType Directory -Path $ProofRoot -Force | Out-Null
@@ -881,6 +886,38 @@ function Invoke-GuiUpdateDesktopRoute([string]$TargetSha) {
     }
 }
 
+# --- plugin upgrade-preservation hooks -------------------------------------
+# A tagged upgrade must not delete or modify anything under the active
+# home's plugins/** or any profile's plugins/** tree: wrapper markers
+# (mnemosyne-wrapper.json), symlinked runtimes, and the externally-owned
+# sidecar witness outside the home. Fixtures are directory-only (no
+# pyproject in the scanned root, nothing downloaded). Snapshot is taken
+# after install, verified after update.
+function Seed-PreservationFixtures {
+    $external = Join-Path $WorkRoot "external-mnemosyne-runtime"
+    & python (Join-Path $AssetsDir "verify-plugin-preservation.py") seed --home $HermesHome --external $external
+    if ($LASTEXITCODE -ne 0) { throw "could not seed fresh preservation fixtures (exit $LASTEXITCODE)" }
+}
+
+function Invoke-PreserveSnapshot {
+    $out = Join-Path $WorkRoot "plugin-preservation-snapshot.json"
+    if (Test-Path -LiteralPath $out) { throw "refusing to overwrite an existing preservation snapshot" }
+    Seed-PreservationFixtures
+    & python (Join-Path $AssetsDir "verify-plugin-preservation.py") snapshot --home $HermesHome --out $out
+    if ($LASTEXITCODE -ne 0) { throw "plugin preservation snapshot failed (exit $LASTEXITCODE)" }
+
+    Write-Host "  pre-upgrade plugin snapshot: $out"
+}
+
+function Invoke-PreserveVerify {
+    $snap = Join-Path $WorkRoot "plugin-preservation-snapshot.json"
+    if (-not (Test-Path -LiteralPath $snap)) { throw "no pre-upgrade plugin snapshot at $snap; cannot verify preservation" }
+    & python (Join-Path $AssetsDir "verify-plugin-preservation.py") verify --home $HermesHome --snapshot $snap `
+        --report (Join-Path $WorkRoot "logs\plugin-preservation-report.json")
+    if ($LASTEXITCODE -ne 0) { throw "plugin preservation violated by the upgrade (exit $LASTEXITCODE); see the report for deleted/modified entries" }
+    Write-Host "  plugins/** and profile plugin trees survived the upgrade intact"
+}
+
 function Invoke-PhaseInstall {
     # Dispatch on the install axis. Each arm ends with the same contract:
     # checkout at OLD, hermes runs, and state carries how OLD landed so any
@@ -923,6 +960,8 @@ function Invoke-PhaseUpdate {
     # remote's main moves forward. The GUI route re-advances harmlessly
     # (same sha); script routes need it here because only the GUI arm's
     # helper used to own this step.
+    # Snapshot every plugin tree BEFORE the upgrade moves anything.
+    Invoke-PreserveSnapshot
     Invoke-Git @("-C", $ServeRepo, "update-ref", "refs/heads/main", $state.current) | Out-Null
     Write-Host "  serve.git main advanced to $($state.current)"
 
@@ -968,6 +1007,7 @@ function Invoke-PhaseUpdate {
 
     Assert-True ((Get-InstalledHead) -eq $state.current) "checkout landed on HEAD"
     Test-HermesRuns "post-update"
+    Invoke-PreserveVerify
 }
 
 function Invoke-CheckedPhaseUpdate {

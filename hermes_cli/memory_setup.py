@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import os
-import re
 import sys
 import shlex
+from pathlib import Path
 
 from hermes_constants import get_hermes_home
 from hermes_cli.secret_prompt import masked_secret_prompt
@@ -80,73 +80,40 @@ def _prompt(label: str, default: str | None = None, secret: bool = False) -> str
 
 
 def _install_dependencies(provider_name: str, *, force: bool = False) -> None:
-    """Install pip dependencies declared in ``plugin.yaml``.
+    """Prepare provider dependencies without narrowing the active plugin union.
 
-    With ``force`` every declared dependency goes to the installer even if it imports (the resolver
-    no-ops when nothing drifted) — how ``hermes update`` heals a provider after a venv rebuild.
-
-    When ``force`` is true, every declared dependency is handed to the installer even if its import
-    currently succeeds — the resolver then reinstalls anything missing or version-drifted and no-ops on
-    satisfied ranges. This is how ``hermes update`` heals the active memory provider after a venv
-    rebuild/sync removed or downgraded its bridge packages (#53272, #70636).
+    A new provider is not selected in config yet. Include its directory with
+    every active member, and propagate failure before setup saves it.
     """
     import subprocess
+
+    import pm
+    from hermes_cli.plugins_admission import candidate_member_dirs
+    from hermes_cli.plugins_cmd import PluginOperationError, _read_manifest_for_install
+    from pm.package import InstallError
+    from pm.workspace import _is_member_candidate
     from plugins.memory import find_provider_dir
 
     plugin_dir = find_provider_dir(provider_name)
     if not plugin_dir:
         return
-    yaml_path = plugin_dir / "plugin.yaml"
-    if not yaml_path.exists():
-        return
     try:
-        import yaml
-        with open(yaml_path, encoding="utf-8") as f:
-            meta = yaml.safe_load(f) or {}
-    except Exception:
+        meta = _read_manifest_for_install(plugin_dir)
+        member = _is_member_candidate(plugin_dir)
+    except (PluginOperationError, OSError, ValueError) as exc:
+        raise InstallError(provider_name, str(exc)) from exc
+
+    extra = meta.get("extra")
+    extras = [extra] if isinstance(extra, str) and extra else []
+    missing = [e for e in extras if force or not pm.available(e)]
+    if not missing and not member:
         return
 
-    pip_deps = _provider_pip_dependencies(provider_name, meta.get("pip_dependencies", []))
-    if not pip_deps:
-        return
-
-    missing = []
-    for dep in pip_deps:
-        if force:
-            missing.append(dep)
-            continue
-        dep_name = re.match(r"^[A-Za-z0-9_][A-Za-z0-9_.\-]*", dep)
-        base = dep_name.group(0) if dep_name else dep
-        import_name = _IMPORT_NAMES.get(base, base.replace("-", "_").split("[")[0])
-        try:
-            __import__(import_name)
-        except ImportError:
-            missing.append(dep)
-    if not missing:
-        return
-
-    print(f"\n  Installing dependencies: {', '.join(missing)}")
-
-    # install_specs routes to the durable target on sealed hosted images (HERMES_LAZY_INSTALL_TARGET)
-    # and is venv-scoped on normal installs.
-    from tools.lazy_deps import install_specs
-
-    manual_cmd = f"uv pip install {' '.join(missing)}"
-    try:
-        outcome = install_specs(missing, timeout=120)
-        if outcome.ok:
-            print(f"  ✓ Installed {', '.join(missing)}")
-        elif outcome.blocked:
-            print(f"  ⚠ Cannot install {', '.join(missing)}: {outcome.reason}")
-        else:
-            print(f"  ⚠ Failed to install {', '.join(missing)}")
-            stderr = (outcome.stderr or "")[:200]
-            if stderr:
-                print(f"    {stderr}")
-            print(f"  Run manually: {manual_cmd}")
-    except Exception as e:
-        print(f"  ⚠ Install failed: {e}")
-        print(f"  Run manually: {manual_cmd}")
+    print(f"\n  Preparing dependencies for {provider_name}")
+    # Without a proposed home, selection retains every configured member.
+    inputs = {"plugin_dirs": lambda: candidate_member_dirs((), extra_dirs=[plugin_dir])} if member else {}
+    pm.sync_venv(missing, explicit=True, **inputs)
+    print(f"  ✓ Dependencies prepared for {provider_name}")
 
     # Also show external (non-pip) dependencies that are missing.
     for dep in meta.get("external_dependencies", []):
@@ -330,6 +297,7 @@ def cmd_setup(args) -> None:
     if schema and not _prompt_schema_fields(name, schema, provider_config, env_writes):
         return
 
+    # Write activation key to config.yaml
     config["memory"]["provider"] = name
     save_config(config)
 
@@ -354,10 +322,26 @@ def _write_env_vars(
     env_writes: dict, hermes_home: str | os.PathLike[str] | None = None) -> None:
     """Persist memory-provider env vars through the canonical ``.env`` writer.
 
-    ``save_env_value`` applies the shared gate (name regex, ``LD_PRELOAD``/``PYTHONPATH``/``HERMES_HOME``
-    denylist, CR/LF stripping, atomic 0o600 writes). ``ValueError`` is reported and skipped so one
-    bad key doesn't sink the batch; filesystem errors propagate. ``hermes_home`` is applied via the
-    context-local override, not ``os.environ``.
+    Delegates to ``hermes_cli.config.save_env_value`` so every key flows
+    through the same input-validation gate as every other ``.env`` writer:
+    the ``_ENV_VAR_NAME_RE`` regex (no malformed identifiers), the
+    ``_ENV_VAR_NAME_DENYLIST`` (no ``LD_PRELOAD`` / ``PYTHONPATH`` /
+    ``HERMES_HOME`` / etc.), CR/LF stripping on the value, and the atomic
+    0o600-from-creation write (no TOCTOU permission window).
+
+    Validation failures (``ValueError`` from ``save_env_value`` — a
+    denylisted name or an identifier rejected by ``_ENV_VAR_NAME_RE``) are
+    surfaced and skipped rather than aborting the wizard, so a single bad
+    key from one schema field doesn't take down the rest of the batch.
+    Non-validation errors (filesystem failures, permission errors) are
+    intentionally NOT caught — those indicate the wizard cannot safely
+    persist any subsequent key either and should propagate.
+
+    ``hermes_home`` may be supplied by plugin ``post_setup`` hooks that
+    already received an explicit home directory (e.g. a non-default
+    profile). It is applied through the context-local Hermes home override
+    so ``save_env_value`` still owns the validation, sanitization, and
+    atomic-write path without mutating global ``os.environ``.
     """
     from hermes_cli.config import save_env_value
     from hermes_constants import reset_hermes_home_override, set_hermes_home_override
@@ -454,10 +438,17 @@ def cmd_status(args) -> None:
 def memory_command(args) -> None:
     """Route memory subcommands."""
     if getattr(args, "memory_command", None) == "setup":
+        from pm.package import InstallError
+
         provider = getattr(args, "provider", None)
-        if provider:
-            cmd_setup_provider(provider)
-        else:
-            cmd_setup(args)
+        try:
+            if provider:
+                cmd_setup_provider(provider)
+            else:
+                cmd_setup(args)
+        except InstallError as exc:
+            print(f"Memory setup failed: {exc}", file=sys.stderr)
+            print("Correct the dependency error and retry setup.", file=sys.stderr)
+            raise SystemExit(1) from exc
     else:
         cmd_status(args)

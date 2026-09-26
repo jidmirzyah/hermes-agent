@@ -1,4 +1,4 @@
-"""Binary acquisition for the managed llama.cpp runtime."""
+"""Hardware selection for PM-owned llama.cpp binaries; mutable runtime state stays separate."""
 
 from __future__ import annotations
 
@@ -15,53 +15,38 @@ import urllib.request
 import zipfile
 from contextlib import suppress
 from dataclasses import dataclass, field
+import threading
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
 from hermes_platform.host import facts
 
+import pm
+from pm.downloader import ProgressFn
 
-logger = logging.getLogger(__name__)
-
-RELEASE_URL = "https://github.com/ggml-org/llama.cpp/releases/download/{tag}/{asset}"
-
-# Windows CUDA zips ship per CUDA major; the runtime zip must be paired with its cudart zip so
-# end users need no toolkit. 13.3 verified on 13.1 and 13.2 drivers.
-_WIN_CUDA_VERSION = "13.3"
-# arm64 Windows CUDA prebuilts landed upstream (~b1036x) on CUDA 13.4. Tags at or before b10290
-# don't have them; resolution succeeds and the download 404s honestly if a user pins backward.
-_WIN_CUDA_VERSION_ARM64 = "13.4"
-
-
-def default_tag() -> str:
-    """Fallback when the config section is missing entirely; DEFAULT_CONFIG owns the shipped tag."""
-    from hermes_cli.config_defaults import DEFAULT_CONFIG
-
-    return DEFAULT_CONFIG["local_runtime"]["tag"]
+BACKEND_PACKAGES = {
+    "cuda": "llamacpp-cuda",
+    "vulkan": "llamacpp-vulkan",
+    "metal": "llamacpp-metal",
+    "hip": "llamacpp-hip",
+    "cpu": "llamacpp-cpu",
+}
 
 
 class BinaryResolutionError(RuntimeError):
-    """No usable asset combination for this platform/backend."""
+    """The requested backend has no pinned or installed engine."""
 
 
-@dataclass
-class AssetPlan:
-    """The exact zips one runtime install needs, in extraction order."""
-
+@dataclass(frozen=True)
+class Engine:
+    backend: str
     tag: str
-    backend: str            # cuda | metal | vulkan | hip | cpu
-    assets: list[str] = field(default_factory=list)
-
-    @property
-    def install_dir(self) -> Path:
-        return runtimes_root() / self.tag / self.backend
+    binary: Path
 
 
 def runtimes_root() -> Path:
-    """Machine-scoped, deliberately NOT profile-scoped: engine binaries, presets and server state
-    describe this machine's hardware and its one managed server (stable port) — a second profile
-    re-downloading the engine or fighting over the port would be the bug. Profile-scoped things
-    (default model, enabled) live in each profile's config.yaml."""
+    """Machine-scoped presets and server state. Binaries belong to PM's store."""
     from hermes_constants import get_default_hermes_root
 
     return get_default_hermes_root() / "runtimes" / "llamacpp"
@@ -99,19 +84,22 @@ def _host_os_arch() -> tuple[str, str]:
     os_name = {"windows": "win", "darwin": "macos", "linux": "ubuntu"}.get(system, system)
     arch = "arm64" if facts.native_arch() == "arm64" else "x64"
     return os_name, arch
+def pinned_tag(backend: str) -> str:
+    version = pm.Lockfile(pm.paths.lockfile_path()).version(BACKEND_PACKAGES[backend])
+    if version is None:
+        raise BinaryResolutionError(f"llama.cpp {backend} has no PM version pin")
+    return f"b{version}"
 
 
 def select_backend(gpu_vendor: str | None, os_name: str | None = None) -> str:
-    """CUDA if NVIDIA, Metal on macOS, Vulkan if a non-NVIDIA GPU is present, else CPU.
-    ``--list-devices`` validates post-install; the supervisor's touch generation is ground truth."""
     if os_name is None:
-        os_name, _ = _host_os_arch()
+        os_name = "macos" if pm.current_target().startswith("darwin-") else "other"
     if os_name == "macos":
         return "metal"
     vendor = (gpu_vendor or "").lower()
     if "nvidia" in vendor:
         return "cuda"
-    if vendor in ("amd", "intel") or "radeon" in vendor or "arc" in vendor:
+    if any(name in vendor for name in ("amd", "intel", "radeon", "arc")):
         return "vulkan"
     return "cpu"
 
@@ -352,6 +340,72 @@ def ensure_runtime_installed(tag: str, backend: str,
                                          "verified_version": version}, indent=2), encoding="utf-8")
     logger.info("installed llama.cpp %s (%s): %s", tag, backend, version)
     return install_dir
+def _candidates(requested: str, gpu_vendor: str | None, target: str) -> tuple[str, ...]:
+    if requested != "auto":
+        if requested not in BACKEND_PACKAGES:
+            raise BinaryResolutionError(f"unknown backend {requested}")
+        return (requested,)
+    preferred = select_backend(gpu_vendor, "macos" if target.startswith("darwin-") else "other")
+    fallback = ("vulkan", "cpu") if gpu_vendor else ("cpu",)
+    return tuple(dict.fromkeys((preferred, *fallback)))
+
+
+def unavailable_reason(backend: str, target: str | None = None) -> str | None:
+    name = BACKEND_PACKAGES.get(backend)
+    if name is None:
+        return f"unknown backend {backend}"
+    target = target or pm.current_target()
+    reason = pm.get_package(name).missing_reason(target)
+    if reason:
+        return reason
+    lock = pm.Lockfile(pm.paths.lockfile_path())
+    if not lock.version(name) or not lock.artifacts(name, target):
+        return f"{name} is not pinned for {target}"
+    return None
+
+
+def resolve_backend(requested: str = "auto", *, gpu_vendor: str | None = None,
+                    target: str | None = None) -> str:
+    """Explicit choices are strict. Auto only falls back to compatible pinned builds."""
+    if requested == "auto" and target is None and gpu_vendor is None:
+        from hermes_cli.local_runtime.bootstrap import _detect_gpu_vendor
+
+        gpu_vendor = _detect_gpu_vendor()
+    target = target or pm.current_target()
+    reasons = []
+    for backend in _candidates(requested, gpu_vendor, target):
+        reason = unavailable_reason(backend, target)
+        if reason is None:
+            return backend
+        reasons.append(reason)
+    raise BinaryResolutionError("; ".join(reasons))
+
+
+def installed_engine(backend: str = "auto", *, allow_outdated: bool = True) -> Engine | None:
+    """Boot may retain a prior PM pin, but never installs or adopts unmanaged bytes."""
+    vendor = None
+    if backend == "auto":
+        from hermes_cli.local_runtime.bootstrap import _detect_gpu_vendor
+
+        vendor = _detect_gpu_vendor()
+    for candidate in _candidates(backend, vendor, pm.current_target()):
+        found = pm.installed_package(BACKEND_PACKAGES[candidate], allow_outdated=allow_outdated)
+        if found is not None and found.binary is not None:
+            return Engine(candidate, f"b{found.version}", found.binary)
+    return None
+
+
+def ensure_engine(backend: str, *, progress: Callable[[str, int, int, str], None] | None = None,
+                  pause_event: threading.Event | None = None,
+                  download_progress: ProgressFn | None = None) -> Engine:
+    """Only deliberate install/update jobs call this. PM verifies every archive and publishes."""
+    resolved = resolve_backend(backend)
+    pm.ensure(BACKEND_PACKAGES[resolved], explicit=True, progress=progress,
+              pause_event=pause_event, download_progress=download_progress)
+    engine = installed_engine(resolved, allow_outdated=False)
+    if engine is None:
+        raise BinaryResolutionError(f"llama.cpp {resolved} install has no usable pinned binary")
+    return engine
 
 
 # ---- BEGIN PLUGIN-COMPAT (revert-scheduled; see COMPAT_MANIFEST.md) ----

@@ -1,15 +1,8 @@
-"""Lazy dependency installer for opt-in Hermes backends.
+"""Shims to suppress old updater work until relaunch. New code must not use these."""
 
-Backends call :func:`ensure(feature)` on first import; missing packages are installed into the
-active venv (or the durable target) unless ``security.allow_lazy_installs: false``, in which
-case :class:`FeatureUnavailable` carries a remediation hint. Security model: venv-scoped
-(never system Python); durable-target mode (``HERMES_LAZY_INSTALL_TARGET``, sealed images)
-APPENDS the target to ``sys.path`` so core site-packages wins every collision and a lazy
-package can only add modules, never shadow core; PyPI-by-name specs only (``_spec_is_safe``);
-``ensure`` accepts only the :data:`LAZY_DEPS` allowlist; failures surface pip's stderr, no retry.
-"""
+from typing import NoReturn
 
-from __future__ import annotations
+from hermes_cli._old_updater import stop_for_relaunch
 
 import configparser
 import contextlib
@@ -25,9 +18,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from hermes_cli._subprocess_compat import windows_hide_flags
+def ensure(feature: str, *, prompt: bool = True) -> NoReturn:
+    # Shim to suppress old updater work until relaunch. Do not claim readiness.
+    # Preserve the dependency-unavailable failure without claiming a completed install.
+    raise ImportError("Dependencies are unknown to this old updater. Please relaunch Hermes.")
 
-logger = logging.getLogger(__name__)
 
 
 # Allowlist: "namespace.backend" -> pip specs matching the pyproject extra. Pins are exact

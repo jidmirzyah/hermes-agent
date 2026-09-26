@@ -3,6 +3,12 @@ import { FIELD_DESCRIPTIONS, FIELD_LABELS } from '@/app/settings/constants'
 import type { Translations } from './types'
 
 export const en: Translations = {
+  externalOpenFailed: {
+    title: 'Couldn’t open this link',
+    message: 'No browser is registered to open this address. Copy the link and open it manually.',
+    copyUrl: 'Copy link',
+    close: 'Close'
+  },
   connectors: {
     title: 'Connect your apps',
     connect: 'Connect',
@@ -28,257 +34,10 @@ export const en: Translations = {
     search: 'Find an app',
     empty: 'No matching apps',
     disclaimer: 'Connecting is optional. Only authorize the apps you want Hermes to use.',
-    execution: 'Connector tools',
-    setup: server => `Set up ${server}`,
-    openInBrowser: 'Open in browser',
-    setupCancel: 'Cancel',
-    authorizedToolsUnavailable: 'Authorized. Tools unavailable.',
-    required: 'Required'
+    connectTitle: app => `Connect ${app}?`,
+    describe: app => `Hermes signs in to ${app} in your browser and asks before reading anything there.`,
+    execution: 'Connector tools'
   },
-
-  // `connectors.*` above stays the onboarding and chat vocabulary; these are the page's own, and the two are not shared.
-  connectorsPage: {
-    title: 'Connectors',
-    searchPlaceholder: (count: number) => `Search ${count} apps`,
-    filterCategory: 'Category',
-    categoryAll: 'All categories',
-    uncategorised: 'Uncategorised',
-
-    residencyLocal: 'On this device',
-
-    segment: {
-      all: 'All',
-      available: 'Available',
-      connected: 'Connected',
-      off: 'Turned off'
-    },
-
-    group: {
-      connected: 'Connected',
-      connectedNote: 'Broken connections first.',
-      available: 'Available',
-      off: 'Turned off',
-      offNote: 'Sign-ins are kept.'
-    },
-
-    card: {
-      kindManaged: 'Managed',
-      kindCatalog: 'MCP · Catalog',
-      kindCustom: 'MCP · Custom',
-      kindPlugin: (plugin: string) => `MCP · Plugin ${plugin}`,
-      inCatalog: 'In the Hermes catalog',
-      hostedTwin: 'Managed version available',
-      alsoLocal: 'Also runs on this device',
-      open: (name: string) => `Open ${name}`,
-      turnServerOn: (name: string) => `Turn ${name} on`,
-      turnServerOff: (name: string) => `Turn ${name} off`,
-      state: {
-        accessExpired: 'Access expired',
-        available: 'Available',
-        connected: 'Connected',
-        connecting: 'Connecting',
-        connectionUnknown: 'State unknown',
-        couldNotConnect: 'Could not connect',
-        offByYourOrganisation: 'Off by your organisation',
-        offForYou: 'Off for you',
-        serverConnecting: 'Connecting…',
-        serverError: 'Error',
-        serverNeedsAuth: 'Needs authentication',
-        serverOff: 'Off',
-        serverOn: 'On',
-        serverOnUnused: 'On, unused'
-      },
-      fact: {
-        tools: (count: number) => `${count} tool${count === 1 ? '' : 's'}`,
-        toolsOff: (count: number) => `${count} tool${count === 1 ? '' : 's'} off`,
-        toolsOn: (count: number) => `${count} tool${count === 1 ? '' : 's'} on`,
-        toolsSomeOn: (total: number, on: number) => `${total} tools, ${on} on`
-      },
-      verb: {
-        authenticate: 'Authenticate',
-        connect: 'Connect',
-        install: 'Install',
-        openLogs: 'Open logs',
-        reconnect: 'Reconnect',
-        stopWaiting: 'Stop waiting',
-        tryAgain: 'Try again',
-        turnBackOn: 'Turn back on'
-      },
-      reason: {
-        finishSignIn: 'Finish the sign-in in your browser.',
-        reconnect: 'Reconnect to keep this app working.',
-        serverError: 'The server refused the connection.',
-        serverNeedsAuth: 'Sign in to let this server answer.'
-      }
-    },
-
-    page: {
-      loading: 'Reading the catalog and the servers on this computer',
-      emptyTitle: 'No apps here yet. Add a server on this computer to get started.',
-      noMatchTitle: 'No matching apps',
-      noMatchBody: 'Nothing here matches. Point Hermes at your own MCP server to add it.',
-      clearSearch: 'Clear the search',
-      hostedFailedTitle: 'Could not reach the hosted apps.',
-      hostedFailedBody: 'The servers on this computer are unaffected and still running. Nothing was turned off.',
-      retry: 'Retry',
-      matchesElsewhere: (count: number) => `${count} more match${count === 1 ? '' : 'es'} in other groups.`,
-      showAllMatches: 'Show all matches',
-      segmentNoMatch: (segment: string) => `No match in ${segment}, so every match is shown.`,
-      freeTierNote: 'Connections stay on this computer until you sign in.',
-      signInLine: 'Sign in to Nous to use managed apps.',
-      signIn: 'Sign in',
-      managedUnavailable: 'Managed apps are not available for this account yet.',
-      writeFailed: 'That change was not saved.',
-      refreshFailed: 'The tool list was not refreshed.',
-      disconnectNoAccount: 'Hermes has no account to disconnect here. Refresh the page and try again.',
-      disconnectRefused:
-        'Nous could not remove this sign-in right now. Turn the app off with the switch instead, or try again later.'
-    },
-
-    add: {
-      action: 'Add your own',
-      title: 'Connect to a custom MCP',
-      hint: 'one new entry in mcp.json on this device',
-      pasteLabel: 'Paste a command or a snippet',
-      pastePlaceholder: 'npx -y @modelcontextprotocol/server-filesystem /path/to/dir',
-      pasteNoMatch: 'Nothing here reads as a server. Fill the fields below instead.',
-      name: 'Name',
-      nameTaken: 'That name is already used.',
-      type: 'Type',
-      typeStdio: 'STDIO',
-      typeHttp: 'Streamable HTTP',
-      command: 'Command to launch',
-      args: 'Arguments',
-      addArg: '+ Add argument',
-      envVars: 'Environment variables',
-      addEnvVar: '+ Add environment variable',
-      passthrough: 'Environment variable passthrough',
-      addPassthrough: '+ Add variable',
-      cwd: 'Working directory',
-      url: 'URL',
-      headers: 'Headers',
-      addHeader: '+ Add header',
-      auth: 'Auth',
-      authNone: 'None',
-      authOauth: 'OAuth',
-      authBearer: 'Bearer token',
-      keyPlaceholder: 'KEY',
-      valuePlaceholder: 'value',
-      removeRow: 'Remove this row',
-      editJson: 'Edit mcp.json',
-      saveFailed: 'That server was not saved.'
-    },
-
-    dialog: {
-      disconnect: 'Disconnect',
-      disconnectTitle: (name: string) => `Disconnect ${name}?`,
-      disconnectBody: 'Hermes stops acting as this account. You can connect again at any time.',
-      menuRefreshTools: 'Refresh tools',
-      moreActions: 'More actions',
-      removeServerTitle: (name: string) => `Remove ${name}?`,
-      removeServerBody: 'The entry leaves mcp.json on this computer. Nothing else is deleted.',
-      appSwitch: (name: string) => `Hermes can use ${name}`,
-      waysTitle: (name: string) => `Where ${name} runs`,
-      wayNotConnected: (name: string) => `Not connected yet. Sign in to ${name} in your browser.`,
-      wayHosted: 'Managed',
-      bothOn: (name: string) => `Both are on, so Hermes sees every ${name} tool twice.`,
-      turnOffLocal: 'Turn off the local server',
-      providedByPlugin: (plugin: string) => `Provided by plugin ${plugin}`,
-      openPlugins: 'Open the Plugins tab',
-      // Verbatim, by decision of the design of record.
-      nousLine: 'Nous apps follow your account, not the profile.',
-      rulesReadOnly: 'Rules cannot be changed right now.',
-      rulesAppOff: (name: string) => `Turn ${name} on to change its tools.`,
-      rulesSignIn: 'Sign in to change what Hermes may do here.',
-      orgNote: (count: number) => `Your organisation turned ${count} tools off.`,
-      orgLink: 'Open the connectors admin',
-      connectEnded: 'The sign-in did not finish.',
-      connectOpenAgain: 'Open the link again',
-      tokensPerCall: 'tokens per call',
-      usesPerMonth: 'uses in 30 days',
-      advanced: 'Advanced',
-      advancedHint: 'the mcp.json entry and logs'
-    },
-
-    tools: {
-      title: 'Tools',
-      notInstalledBody: 'Install it on this device to see the tools it brings.',
-      summaryTitle: (name: string) => `What Hermes may do with ${name}`,
-      summaryPreviewTitle: (name: string) => `What Hermes could do with ${name} once you connect`,
-      summaryCount: (count: number) => `${count} tool${count === 1 ? '' : 's'}`,
-      summaryAllTools: 'All tools',
-      summaryOther: 'Other',
-      allToolsSwitch: 'Turn every tool on or off',
-      summaryAllOn: 'all on',
-      summarySomeOn: (on: number, total: number) => `${on} of ${total} on`,
-      summaryOff: 'off',
-      showAllTools: (count: number) => `Show all ${count} tool${count === 1 ? '' : 's'}`,
-      showSummary: 'Show summary',
-      facetSwitch: (facet: string) => `Turn ${facet} tools on or off`,
-      moreHints: (count: number) => `+${count}`,
-      staleSignIn: 'Sign in to read the latest tool list.',
-      searchCountPlaceholder: (count: number) => `Search ${count} tools`,
-      toolList: (name: string) => `${name} tools`,
-      categorySelect: (count: number) => `${count} categories`,
-      showDeprecated: (count: number) => `Show ${count} deprecated`,
-      hideDeprecated: (count: number) => `Hide ${count} deprecated`,
-      quickReadOnly: 'Read only',
-      quickNoDestructive: 'Turn off destructive',
-      quickEverythingOn: 'Everything on',
-      lockedHint: 'off by your organisation',
-      turnToolOn: (tool: string) => `Turn ${tool} on`,
-      turnToolOff: (tool: string) => `Turn ${tool} off`,
-      showDetails: (tool: string) => `Show what ${tool} does`,
-      hideDetails: (tool: string) => `Hide what ${tool} does`,
-      noMatch: 'No tool matches these filters.',
-      loading: 'Reading the tool list',
-      unavailableLine: 'Tool list unavailable.',
-      needsAuthTitle: (name: string) => `Sign in to ${name} to read its tools.`,
-      needsAuthBody: 'The sign-in stays on this computer. Nothing leaves it.',
-      retry: 'Retry',
-      goneTitle: (name: string) => `${name} left the catalog.`,
-      goneBody: 'Hermes cannot call it any more. The row stays until you remove it, so nothing vanishes.',
-      remove: 'Remove',
-      offTitle: (name: string) => `${name} is off.`,
-      offBody: 'Turn it on with the switch above to read the tools it brings.',
-      signedOutTitle: 'Sign in to Nous to read the tool list.',
-      signedOutBody: 'Your servers on this computer are unaffected.',
-      conflictTitle: 'Someone changed this rule while you were editing.',
-      // Two sentences at most, and the second says the work is still here.
-      conflictBody: (theyOff: number, theyOn: number) => {
-        const they = [
-          theyOff > 0 ? `turned off ${theyOff} tool${theyOff === 1 ? '' : 's'} you have on` : '',
-          theyOn > 0 ? `left ${theyOn} tool${theyOn === 1 ? '' : 's'} on that you turned off` : ''
-        ].filter(Boolean)
-
-        return `${they.length > 0 ? `They ${they.join(', and ')}. ` : ''}Your edits stay on screen; nothing was written.`
-      },
-      conflictReload: 'Reload their version',
-      conflictSave: 'Save over their version',
-      saveFailed: 'Those tool rules were not saved.',
-      footerDirty: (off: number, backOn: number) =>
-        `${off} tool${off === 1 ? '' : 's'} off, ${backOn === 0 ? 'none' : backOn} back on`,
-      discard: 'Discard',
-      save: 'Save changes',
-      saving: 'Saving...'
-    },
-
-    // The label rides in every tool row, so it stays short enough not to widen one.
-    vocabulary: {
-      facetRead: { label: 'Read', long: 'Reads data out of this app. It changes nothing.' },
-      facetWrite: { label: 'Write', long: 'Creates or changes something in this app.' },
-      facetDestructive: { label: 'Destructive', long: 'Can remove something in this app for good.' },
-      facetUnclassified: { label: 'Unknown effect', long: 'The app never said what this tool does.' },
-      hintReadOnly: { label: 'Read only', long: 'The tool declares that it only reads.' },
-      hintCreate: { label: 'Creates', long: 'Makes something new.' },
-      hintUpdate: { label: 'Updates', long: 'Changes something that already exists.' },
-      hintDelete: { label: 'Deletes', long: 'Removes something.' },
-      hintDestructive: { label: 'Destructive', long: 'The change it makes cannot be undone here.' },
-      hintIdempotent: { label: 'Repeatable', long: 'Running it twice does what running it once does.' },
-      hintOpenWorld: { label: 'External', long: 'Reaches something outside this app.' }
-    }
-  },
-
   sessionImport: {
     title: 'Continue from another app',
     subtitle: 'Bring a conversation into Hermes and pick up where you left off.',
@@ -431,6 +190,9 @@ export const en: Translations = {
       back: 'Back',
       openLogs: 'Open logs',
       repairHint: 'Repair re-runs the installer and can take a few minutes on a fresh machine.',
+      bundledReinstallHint:
+        'This bundled install can’t repair itself from inside the app — reinstall the app to restore its backend.',
+      reinstallApp: 'Reinstall the app',
       remoteSignInHint: signInLabel =>
         `Signs out of the saved remote browser session, then opens ${signInLabel}. Use local gateway to switch to the bundled backend instead.`,
       signOutAndSignIn: 'Sign out & sign in',
@@ -456,6 +218,7 @@ export const en: Translations = {
   },
 
   notifications: {
+    sharedProfileWarning: 'Another Hermes installation is using this profile. Both installations share its settings and data, so changes can conflict. You can continue, or close the other installation before making changes.',
     region: 'Notifications',
     hide: 'Hide',
     show: 'Show',
@@ -473,6 +236,8 @@ export const en: Translations = {
     updateReadyTitle: 'Update ready',
     updateReadyMessage: count => `${count} new change${count === 1 ? '' : 's'} available.`,
     updateReadyMessageUnknown: 'A new update is available.',
+    updateReadyMessageAppInstaller:
+      'A new version of Hermes is ready. Update now and Windows will finish it for you.',
     seeWhatsNew: "See what's new",
     mcp: {
       needsAuthTitle: 'MCP server needs re-authentication',
@@ -1208,41 +973,7 @@ export const en: Translations = {
       driverHealth: 'Driver health'
     },
     about: {
-      heading: 'Hermes Desktop',
-      version: value => `Version ${value}`,
-      versionUnavailable: 'Version unavailable',
-      bundleOutOfSync: 'App build out of date',
-      bundleOutOfSyncDesc:
-        'The Hermes runtime was updated, but the desktop app itself is still an older build — new interface features (like Bot Mode) will be missing until it updates. Run the update below to rebuild the app. If that doesn\u2019t clear this warning, reinstall from the latest desktop installer.',
-      bundleOutOfSyncAction: 'Get the installer',
-      bundleSwapPending: 'Restart to finish the update',
-      bundleSwapPendingDesc:
-        'The updated app is already installed — Hermes only needs to restart to load it. Chats and settings are untouched.',
-      bundleSwapPendingAction: 'Restart Hermes',
       updates: 'Updates',
-      checkNow: 'Check now',
-      checking: 'Checking…',
-      seeWhatsNew: "See what's new",
-      updateNow: 'Update now',
-      releaseNotes: 'Release notes',
-      onLatest: "You're on the latest version.",
-      installing: 'An update is currently installing.',
-      cantUpdate: "This build can't update itself from inside the app.",
-      cantReach: "We couldn't reach the update server.",
-      tapCheck: 'Tap "Check now" to look for updates.',
-      updateReady: count => `A new update is ready (${count} change${count === 1 ? '' : 's'} included).`,
-      updateReadyUnknown: 'A new update is ready.',
-      lastChecked: age => `Last checked ${age}`,
-      justNowSuffix: ' · just now',
-      automaticUpdates: 'Automatic updates',
-      automaticUpdatesDesc:
-        'Hermes checks for updates automatically in the background and lets you know when one is ready.',
-      branchCommit: (branch, commit) => `Branch ${branch} · Commit ${commit}`,
-      never: 'never',
-      justNow: 'just now',
-      minAgo: count => `${count} min ago`,
-      hoursAgo: count => `${count} hours ago`,
-      daysAgo: count => `${count} days ago`
     },
     config: {
       minimizeToTrayTitle: 'Minimize to tray',
@@ -1716,7 +1447,10 @@ export const en: Translations = {
       noRecommendationAction: 'Browse models',
       downloaded: 'Downloaded',
       downloadAction: size => `Download · ${size}`,
-      downloadProgress: (done, total) => `Downloading ${done} of ${total}`,
+      downloadProgress: (done, total) => `${done} of ${total}`,
+      downloadPausedLabel: 'Paused',
+      downloadPauseAction: 'Pause',
+      downloadResumeAction: 'Resume',
       downloadDoneToast: model => `${model} is ready.`,
       installDoneToast: 'Local runtime installed and ready.',
       quickstartTitle: 'Run a model on this machine',
@@ -3573,6 +3307,10 @@ export const en: Translations = {
   },
 
   updates: {
+    channels: { stable: 'Stable', canary: 'Canary' },
+    bundleSwapPending: 'Restart to finish the update',
+    bundleSwapPendingDesc: 'The updated app is already installed — Hermes only needs to restart to load it. Chats and settings are untouched.',
+    bundleSwapPendingAction: 'Restart Hermes',
     stages: {
       idle: 'Getting ready…',
       prepare: 'Getting ready…',
@@ -3605,6 +3343,8 @@ export const en: Translations = {
     availableTitleBackend: 'Backend update available',
     availableBodyBackend: 'A newer version of the connected Hermes backend is ready to install.',
     availableBodyNoChangelog: 'A newer version is ready. Release notes aren’t available for this install type.',
+    availableBodyAppInstaller:
+      'A new version of Hermes is ready. Hermes will close, Windows will finish the update, and Hermes will reopen on its own.',
     updateNow: 'Update now',
     maybeLater: 'Maybe later',
     moreChanges: count => `+ ${count} more change${count === 1 ? '' : 's'} included.`,
@@ -3622,6 +3362,12 @@ export const en: Translations = {
     applyingBodyBackend:
       'The remote backend is applying the update and will restart. Hermes reconnects automatically when it’s back.',
     applyingClose: 'This window will close while the update runs, then Hermes reopens on its own.',
+    applyingBodyAppInstaller:
+      'Hermes will close and Windows will finish the update. Hermes will reopen when it’s done — you don’t need to do anything.',
+    applyingCloseAppInstaller: 'This window will close, Windows finishes the update, and Hermes reopens on its own.',
+    checkUnknownTitleAppInstaller: 'Couldn’t check for updates',
+    checkUnknownBodyAppInstaller:
+      'Windows couldn’t check for updates right now. Updates also install automatically when you restart Hermes.',
     errorTitle: 'Update didn’t finish',
     errorBody: 'No worries — nothing was lost. You can try again now.',
     blockerTitle: 'Close local previews to update Hermes?',
@@ -3654,7 +3400,48 @@ export const en: Translations = {
       notAvailable: 'Update not available for this backend.',
       failed: 'Backend update failed.',
       noReturn: 'Backend didn’t come back online. The update may not have completed — check the backend host.'
-    }
+    },
+    // Update-status overlay + version-details (mechanism-aware update UI).
+    appName: 'Hermes',
+    version: (value: string) => `Version ${value}`,
+    versionUnavailable: 'Version unavailable',
+    checkNow: 'Check now',
+    seeWhatsNew: "See what's new",
+    releaseNotes: 'Release notes',
+    onLatest: "You're on the latest version.",
+    installing: 'An update is currently installing.',
+    cantReach: "We couldn't reach the update server.",
+    tapCheck: 'Tap "Check now" to look for updates.',
+    updateReady: count => `A new update is ready (${count} change${count === 1 ? '' : 's'} included).`,
+    updateReadyUnknown: 'A new update is ready.',
+    availableBodyRelease: tag => `Version ${tag} is ready to install.`,
+    lastChecked: age => `Last checked ${age}`,
+    never: 'never',
+    justNow: 'just now',
+    minAgo: count => `${count} min ago`,
+    hoursAgo: count => `${count}h ago`,
+    daysAgo: count => `${count}d ago`,
+    justNowSuffix: ' · just now',
+    bundleOutOfSync: 'App build out of date',
+    bundleOutOfSyncDesc:
+      'The Hermes runtime was updated, but the desktop app itself is still an older build. Update it to pick up the latest fixes.',
+    bundleOutOfSyncAction: 'Get the installer',
+    checkingShort: 'Checking…',
+    releaseAvailable: tag => `Version ${tag} is available.`,
+    versionDetailsTitle: 'Version details',
+    versionDetailsBody:
+      'This install is managed outside the app. Update it the same way you installed it.',
+    versionDetailsVersion: 'Version',
+    versionDetailsCommit: 'Commit',
+    versionDetailsBuildOrigin: 'Build Origin',
+    versionDetailsDistribution: 'Distribution',
+    versionDetailsDistributionDesktop: 'Desktop app (MSIX)',
+    versionDetailsDistributionStore: 'Microsoft Store',
+    versionDetailsRuntime: 'Runtime',
+    versionDetailsRuntimeEmbedded: 'Embedded runtime',
+    versionDetailsRuntimeExternal: 'External (uses the machine runtime)',
+    versionDetailsInstallId: 'Install ID',
+    versionDetailsUncommittedChanges: 'uncommitted changes'
   },
 
   handoffTour: {
@@ -3690,11 +3477,16 @@ export const en: Translations = {
     setupChoiceTitle: 'Set up Hermes Desktop',
     setupChoiceDesc:
       'Connect this app to a Hermes gateway you already run, or install Hermes locally on this computer.',
+    setupChoiceDescLocal:
+      'Install Hermes on this computer, or connect to a Hermes gateway you already run.',
     connectExistingTitle: 'Connect to existing Hermes',
     connectExistingShort: 'Connect existing',
     connectExistingDesc: 'Use a remote backend with a session token or browser sign-in. No local install will start.',
     installLocalTitle: 'Install Hermes locally',
     installLocalDesc: 'Download Hermes, create its Python environment, and run the backend on this computer.',
+    useLocalTitle: 'Use Hermes on this computer',
+    useLocalDesc: 'A Hermes runtime is already installed here — start it with one click. Nothing downloads.',
+    bundledLocalDesc: 'Use the Hermes runtime included with this app — the bundled backend is the local install.',
     localStartUnavailable: 'Local installation could not start. Restart Hermes Desktop and try again.',
     remoteSetupTitle: 'Connect to existing Hermes',
     remoteSetupDesc: 'Enter your gateway URL. Hermes Desktop will detect whether it needs a token or browser sign-in.',
@@ -3988,6 +3780,7 @@ export const en: Translations = {
       update: 'update',
       updateInProgress: 'Update in progress',
       commitsBehind: (count, branch) => `${count} commit${count === 1 ? '' : 's'} behind ${branch}`,
+      releaseAvailable: (tag: string) => `Version ${tag} is available.`,
       desktopVersion: version => `Hermes Desktop v${version}`,
       backendVersion: version => `Backend v${version}`,
       clientLabel: version => `client v${version}`,

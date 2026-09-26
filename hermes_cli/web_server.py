@@ -55,15 +55,18 @@ except ImportError:
     # running `hermes dashboard` needs fastapi+uvicorn; lazy install keeps
     # them out of every other install path. After install, re-import.
     try:
-        from tools.lazy_deps import ensure as _lazy_ensure
-        _lazy_ensure("tool.dashboard", prompt=False)
-        from fastapi import FastAPI, HTTPException, Request, WebSocket
+        from pm import ensure_import
+        ensure_import("web")
+        from fastapi import (
+            FastAPI, File, Form, HTTPException, Query, Request, UploadFile,
+            WebSocket, WebSocketDisconnect,
+        )
         from fastapi.middleware.cors import CORSMiddleware
         from fastapi.responses import JSONResponse
     except Exception:
         raise SystemExit(
             "Web UI requires fastapi and uvicorn.\n"
-            f"Install with: {sys.executable} -m pip install 'fastapi' 'uvicorn'"
+            "Run hermes pm repair, then restart Hermes."
         )
 
 WEB_DIST = Path(os.environ["HERMES_WEB_DIST"]) if "HERMES_WEB_DIST" in os.environ else Path(__file__).parent / "web_dist"
@@ -83,6 +86,10 @@ from hermes_cli.web_server_lifecycle import (  # noqa: E402
     _write_dashboard_ready_file,
     _write_machine_sentinel_line,
 )
+
+# MERGE-CHECK: upstream moved the parent-start-marker helpers into web_server_lifecycle.py
+# (imported above); our branch's in-file copies were dropped with the rest of the
+# pre-refactor block below. Parent re-verify no desktop caller needed the old in-file copies.
 
 
 def _start_desktop_cron_ticker(stop_event: "threading.Event", interval: int = 60) -> None:
@@ -1561,389 +1568,9 @@ def _voice_list_error_logged_once(signature: Optional[str]) -> bool:
     return True
 
 
-
-
-# Per-row fields that no session LIST consumer reads but that dominate the
-# payload. ``system_prompt`` is the fully rendered prompt — tens of KB per
-# row — and made a 21-row /api/sessions response 528KB (96% dead weight),
-# re-fetched by the desktop sidebar on every refresh. The desktop's
-# SessionInfo type doesn't declare either field and the web UI never touches
-# them; ``GET /api/sessions/{id}`` detail reads stay complete. List callers
-# that genuinely need the full rows can pass ``?full=1``.
-
-
-def _provider_field_entry(field: ProviderField) -> Dict[str, Any]:
-    """Static, storage-independent shape of one field for the UI payload."""
-
-    return {
-        "key": field.key,
-        "label": field.label,
-        "kind": field.kind,
-        "description": field.description,
-        "info": field.info,
-        "placeholder": field.placeholder,
-        "inline": field.inline,
-        "group": field.group,
-        "options": [
-            {"value": opt.value, "label": opt.label, "description": opt.description}
-            for opt in field.options
-        ],
-    }
-
-
-# Sentinel: remove this key so it falls back to the host or built-in default.
-
-
-def _honcho_read_sources() -> tuple[Dict[str, Any], str, Dict[str, Any]]:
-    """Return (root config, active host key, host block) for the current profile."""
-
-    resolve_active_host, resolve_config_path, host_block_of = _honcho_resolvers()
-    host = resolve_active_host()
-    path = resolve_config_path()
-    raw: Dict[str, Any] = {}
-    if path.exists():
-        try:
-            loaded = json.loads(path.read_text(encoding="utf-8"))
-            raw = loaded if isinstance(loaded, dict) else {}
-        except Exception:
-            _log.warning("Failed to read Honcho config from %s", path, exc_info=True)
-    return raw, host, host_block_of(raw, host)
-
-
-def _stringify_submitted_values(values: Dict[str, Any]) -> Dict[str, str]:
-    """The declared-schema path edits strings; the dashboard may send natives."""
-
-    out: Dict[str, str] = {}
-    for key, value in values.items():
-        if value is None:
-            out[key] = ""
-        elif isinstance(value, str):
-            out[key] = value
-        elif isinstance(value, bool):
-            out[key] = "true" if value else "false"
-        elif isinstance(value, (dict, list)):
-            out[key] = json.dumps(value)
-        else:
-            out[key] = str(value)
-    return out
-
-
-def _memory_provider_label(name: str) -> str:
-    return name.replace("_", " ").replace("-", " ").title()
-
-
-def _public_memory_provider_field(field: Dict[str, Any], data: Dict[str, Any]) -> Dict[str, Any]:
-    entry = {
-        "key": field["key"],
-        "label": field["label"],
-        "kind": field["kind"],
-        "description": field["description"],
-        "placeholder": field["placeholder"],
-        "required": field["required"],
-        "value": "" if field["kind"] == "secret" else _field_value(field, data),
-        "is_set": _field_is_set(field, data),
-        "options": field.get("options", []),
-        "url": field.get("url", ""),
-        "when": field.get("when"),
-        "minimum": field.get("minimum"),
-        "maximum": field.get("maximum"),
-        "step": field.get("step"),
-    }
-    return entry
-
-
-def _gateway_platform_config(platform_id: str):
-    from gateway.config import Platform, load_gateway_config
-
-    config = load_gateway_config()
-    platform = Platform(platform_id)
-    platform_config = config.platforms.get(platform)
-    return config, platform, platform_config
-
-
-def _utc_iso_from_ts(ts: float) -> str:
-    return datetime.fromtimestamp(ts, timezone.utc).isoformat().replace("+00:00", "Z")
-
-
-def _supersede_whatsapp_onboarding_sessions(session_path: Path) -> None:
-    for existing in _whatsapp_onboarding_sessions.values():
-        if existing.session_path == str(session_path) and existing.status not in _WHATSAPP_ONBOARDING_TERMINAL_STATUSES:
-            existing.status = "cancelled"
-            existing.error = "Superseded by a newer WhatsApp setup session."
-            _terminate_whatsapp_pairing(existing.proc)
-
-
-def _restart_gateway_after_telegram_onboarding(profile: Optional[str] = None) -> dict[str, Any]:
-    """Best-effort gateway restart after saving Telegram QR onboarding.
-
-    The QR flow naturally pulls users into Telegram on another device. If the
-    saved token waits on a separate dashboard restart click, Hermes appears
-    broken from the chat side. Keep the config save authoritative, but report
-    restart failures so the UI can fall back to the existing manual banner.
-    """
-    try:
-        proc, reused = _spawn_gateway_restart(profile)
-    except Exception as exc:
-        _log.exception("Failed to auto-restart gateway after Telegram onboarding")
-        return {
-            "restart_started": False,
-            "restart_error": str(exc),
-        }
-    if reused:
-        _log.info(
-            "Telegram onboarding: reusing in-flight gateway restart (pid %s)",
-            proc.pid,
-        )
-    return {
-        "restart_started": True,
-        "restart_action": "gateway-restart",
-        "restart_pid": proc.pid,
-    }
-
-
-
-def _import_sessions_for_profile(profile: Optional[str], sessions: List[Dict[str, Any]]) -> Dict[str, Any]:
-    db = _open_session_db_for_profile(profile, read_only=False)
-    try:
-        return db.import_sessions(sessions)
-    finally:
-        db.close()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-async def _action_reaper_loop(poll_interval: float = 5.0) -> None:
-    """Reap spawned dashboard actions so status doesn't depend on a client
-    polling /api/actions/<name>/status.
-
-    Covers every action in _ACTION_PROCS (not just durable ones) — this is
-    the fast path for the common case where this process is still the one
-    that spawned it. It is NOT what makes status survive a restart the
-    action itself causes (that's _reconcile_action_status's fallback to the
-    wrapper's independent exit-code file, also exercised here for durable
-    actions so a stale "running" record left over from a previous process
-    is corrected on the very first tick rather than waiting for a request).
-    """
-    while True:
-        try:
-            for name in list(_ACTION_PROCS.keys()):
-                if name in _DURABLE_ACTIONS:
-                    _reconcile_action_status(name)
-                    continue
-                proc = _ACTION_PROCS.get(name)
-                if proc is None:
-                    continue
-                code = proc.poll()
-                if code is not None:
-                    try:
-                        proc.wait(timeout=1)
-                    except Exception as e:
-                        _log.debug("Reap of finished action %r (pid=%s) failed: %s", name, proc.pid, e)
-                    _ACTION_RESULTS[name] = {"exit_code": code, "pid": proc.pid}
-                    _ACTION_PROCS.pop(name, None)
-                    _ACTION_COMMANDS.pop(name, None)
-        except Exception:
-            _log.debug("action reaper tick failed", exc_info=True)
-        await asyncio.sleep(poll_interval)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-def _mcp_oauth_callback_url_from_base(base_url: str, server_name: str) -> str:
-    from urllib.parse import quote
-
-    return f"{base_url.rstrip('/')}/api/mcp/oauth/callback/{quote(server_name, safe='')}"
-
-
-def _new_dashboard_backup_path() -> Path:
-    stamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
-    return _dashboard_backup_dir() / f"hermes-backup-{stamp}-{secrets.token_hex(4)}.zip"
-
-
-
-def _profile_attr(info, name: str, default: Any = None) -> Any:
-    try:
-        return getattr(info, name)
-    except Exception:
-        return default
-
-
-def _terminal_backend_names() -> set:
-    """Valid ``terminal.backend`` values, including plugin backends."""
-    return {row["name"] for row in _terminal_backend_rows()}
-
-
-def _ws_request_reason(ws: "WebSocket") -> Optional[str]:
-    """First Host/Origin or peer-IP rejection reason, or None when allowed."""
-    return _ws_host_origin_reason(ws) or _ws_client_reason(ws)
-
-
-def _forget_active_session_file(path: Path) -> None:
-    try:
-        path.unlink(missing_ok=True)
-    except OSError:
-        pass
-
-
-def _console_profile_from_ws(ws: WebSocket) -> Optional[str]:
-    profile = (ws.query_params.get("profile") or "").strip()
-    return profile or None
-
-
-async def _console_send(
-    ws: WebSocket,
-    send_lock: asyncio.Lock,
-    payload: Dict[str, Any],
-) -> None:
-    async with send_lock:
-        await ws.send_json(payload)
-
-
-async def _console_send_result(
-    ws: WebSocket,
-    send_lock: asyncio.Lock,
-    result: Any,
-    *,
-    command_id: int,
-) -> None:
-    command = result.command or ""
-    status = result.status
-    if status == "ok":
-        if result.output:
-            await _console_send(
-                ws,
-                send_lock,
-                {
-                    "type": "output",
-                    "id": command_id,
-                    "stream": "stdout",
-                    "data": result.output,
-                    "command": command,
-                },
-            )
-        await _console_send(
-            ws,
-            send_lock,
-            {
-                "type": "complete",
-                "id": command_id,
-                "status": "ok",
-                "command": command,
-                "prompt": _CONSOLE_PROMPT,
-            },
-        )
-        return
-
-    if status == "error":
-        await _console_send(
-            ws,
-            send_lock,
-            {
-                "type": "error",
-                "id": command_id,
-                "message": result.output or "Command failed.",
-                "command": command,
-            },
-        )
-        await _console_send(
-            ws,
-            send_lock,
-            {
-                "type": "complete",
-                "id": command_id,
-                "status": "error",
-                "command": command,
-                "prompt": _CONSOLE_PROMPT,
-            },
-        )
-        return
-
-    if status == "confirm_required":
-        await _console_send(
-            ws,
-            send_lock,
-            {
-                "type": "confirm_required",
-                "id": command_id,
-                "command": command,
-                "message": result.confirmation_message or f"Run `{command}`?",
-                "prompt": _CONSOLE_PROMPT,
-            },
-        )
-        await _console_send(
-            ws,
-            send_lock,
-            {
-                "type": "complete",
-                "id": command_id,
-                "status": "confirm_required",
-                "command": command,
-                "prompt": _CONSOLE_PROMPT,
-            },
-        )
-        return
-
-    if status == "clear":
-        await _console_send(ws, send_lock, {"type": "clear", "id": command_id})
-        await _console_send(
-            ws,
-            send_lock,
-            {
-                "type": "complete",
-                "id": command_id,
-                "status": "clear",
-                "command": command,
-                "prompt": _CONSOLE_PROMPT,
-            },
-        )
-        return
-
-    if status == "exit":
-        await _console_send(
-            ws,
-            send_lock,
-            {
-                "type": "complete",
-                "id": command_id,
-                "status": "exit",
-                "command": command,
-                "prompt": "",
-            },
-        )
-        return
-
-    await _console_send(
-        ws,
-        send_lock,
-        {
-            "type": "error",
-            "id": command_id,
-            "message": f"Unknown console result status: {status}",
-            "command": command,
-        },
-    )
-
-
+# MERGE-CHECK: ours-side of this conflict was ~13k lines of pre-#102117 endpoints
+# (elevenlabs voices, themes, plugin discovery, model/config routers) now decomposed by
+# upstream into web_routers/*, web_server_dashboard.py and audio.py; ours dropped, upstream kept.
 _ACTION_LOG_FILES.setdefault("computer-use-grant", "action-computer-use-grant.log")
 
 # Cache discovered plugins per-process (refresh on explicit re-scan).
@@ -2578,7 +2205,7 @@ import shutil  # noqa: F401,E402
 import stat  # noqa: F401,E402
 import tempfile  # noqa: F401,E402
 from datetime import timezone  # noqa: F401,E402
-import yaml  # noqa: F401,E402
+import hermes_yaml as yaml  # noqa: F401,E402
 import zipfile  # noqa: F401,E402
 
 

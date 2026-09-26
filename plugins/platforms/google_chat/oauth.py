@@ -19,11 +19,8 @@ import os
 import re
 import stat
 import sys
-from importlib.metadata import version as _distribution_version
 from pathlib import Path
 from typing import Any, List, NoReturn, Optional, Tuple
-
-from packaging.requirements import Requirement
 
 from hermes_constants import display_hermes_home, get_hermes_home
 from utils import atomic_write_text
@@ -39,16 +36,7 @@ _EMAIL_FS_RE = re.compile(r"[^a-z0-9._@-]+")
 # subsequent messages.create; no drive.file or other scopes.
 SCOPES: List[str] = ["https://www.googleapis.com/auth/chat.messages.create"]
 
-# Pip packages required by the Google Chat adapter and its OAuth flow.
-_REQUIRED_PACKAGES = [
-    "google-cloud-pubsub==2.39.0",
-    "google-api-python-client==2.194.0",
-    "google-auth==2.55.1",
-    "google-auth-oauthlib==1.3.1",
-    "google-auth-httplib2==0.3.1",
-    "httplib2==0.32.0",
-    "pyasn1==0.6.4",
-]
+_DEPENDENCY_EXTRAS = ["google", "google-chat"]
 
 # Google deprecated the ``oob`` flow: use a localhost redirect that is expected
 # to FAIL; the user pastes the code from the failed browser URL back into chat.
@@ -211,51 +199,29 @@ def _fail(*lines: str) -> NoReturn:
 
 
 def _ensure_deps() -> None:
-    """Check exact dependency versions; install if stale; exit on failure."""
-    if _missing_required_packages() and not install_deps():
-        sys.exit(1)
+    """Auth must stop if new dependencies need a fresh process to activate."""
+    try:
+        import pm
 
-
-def _missing_required_packages() -> List[str]:
-    """Return exact requirements absent or stale in this interpreter."""
-    missing = []
-    for spec in _REQUIRED_PACKAGES:
-        requirement = Requirement(spec)
-        try:
-            installed = _distribution_version(requirement.name)
-            satisfied = requirement.specifier.contains(installed, prereleases=True)
-        except Exception:
-            satisfied = False
-        if not satisfied:
-            missing.append(spec)
-    return missing
+        for extra in _DEPENDENCY_EXTRAS:
+            pm.ensure_import(extra)
+    except Exception as exc:
+        _fail(f"ERROR: Google Chat dependencies unavailable: {exc}")
 
 
 def install_deps() -> bool:
-    missing = _missing_required_packages()
-    if not missing:
-        print("Dependencies already installed.")
-        return True
+    """Install the declared dependency graph without mutating the booted environment."""
     print("Installing Google Chat dependencies...")
     try:
-        from tools.lazy_deps import FeatureUnavailable, ensure as _lazy_ensure
+        import pm
 
-        # lazy_deps honors HERMES_LAZY_INSTALL_TARGET on sealed hosted images;
-        # _pip_install always writes the venv and Permission-denied there.
-        _lazy_ensure("platform.google_chat", prompt=False)
-        remaining = _missing_required_packages()
-        if remaining:
-            raise RuntimeError("dependencies remain stale after install: " + " ".join(remaining))
-        print("Dependencies installed.")
-        return True
-    except FeatureUnavailable as exc:
-        print(f"ERROR: Failed to install dependencies: {exc.reason}")
-        print("Run `hermes setup` to repair the managed installation, then retry.")
-        return False
+        pm.sync_venv(_DEPENDENCY_EXTRAS, explicit=True)
     except Exception as exc:
         print(f"ERROR: Failed to install dependencies: {exc}")
         print("Run `hermes setup` to repair the managed installation, then retry.")
         return False
+    print("Dependencies installed. Restart Hermes to activate any new dependency environment.")
+    return True
 
 
 def check_auth(email: Optional[str] = None) -> bool:
@@ -277,7 +243,7 @@ def store_client_secret(path: str) -> None:
     if not src.exists():
         _fail(f"ERROR: File not found: {src}")
     try:
-        data = json.loads(src.read_text(encoding="utf-8"))
+        data = json.loads(src.read_text(encoding="utf-8-sig"))
     except json.JSONDecodeError:
         _fail("ERROR: File is not valid JSON.")
     if "installed" not in data and "web" not in data:
@@ -301,7 +267,7 @@ def _load_pending_auth(email: Optional[str] = None) -> dict:
     if not pending.exists():
         _fail("ERROR: No pending OAuth session found. Run --auth-url first.")
     try:
-        data = json.loads(pending.read_text(encoding="utf-8"))
+        data = json.loads(pending.read_text(encoding="utf-8-sig"))
     except Exception as exc:
         _fail(f"ERROR: Could not read pending OAuth session: {exc}", "Run --auth-url again to start a fresh session.")
     if not data.get("state") or not data.get("code_verifier"):

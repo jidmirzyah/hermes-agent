@@ -173,7 +173,7 @@ def _current_checkout_sha() -> str | None:
     """Current on-disk checkout HEAD, or None if it cannot be resolved."""
     from hermes_cli.update_cmd import _capture_head_sha, _m
     try:
-        from hermes_cli.build_info import get_code_identity
+        from hermes_cli.version_info import get_code_identity
         sha = (get_code_identity(refresh=True) or {}).get("sha")
         return str(sha) if sha else None
     except Exception:
@@ -1983,8 +1983,9 @@ def _verify_fleet_after_update(restart, *, _pre_update_plan, _windows_gateway_re
                 restart.incomplete = True
             with suppress(Exception):
                 import hermes_cli.update_receipt as _ur
-                if _ur._current is not None:
-                    _ur._current.data["runtime_outcomes"] = _runtime_outcomes
+                _active = _ur._current.get()
+                if _active is not None:
+                    _active.data["runtime_outcomes"] = _runtime_outcomes
 
     with _best_effort('Update receipt finalize failed: %s'):
         from hermes_cli.update_receipt import finalize_update_receipt
