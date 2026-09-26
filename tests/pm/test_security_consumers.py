@@ -177,6 +177,7 @@ def test_tirith_opt_in_background_and_explicit_override(consumer_store, tmp_path
     monkeypatch.setenv("TIRITH_BIN", str(tmp_path / "missing"))
     assert tirith.ensure_installed(explicit=True) is None
     assert not RangeHandler.ranges_seen
+    assert not tirith.missing_is_expected(), "a missing explicit binary must be reported"
     external = tmp_path / "external-tirith"
     external.write_text(f"#!{sys.executable}\nimport json,sys\nprint(json.dumps({{'summary':'external'}}))\nsys.exit(1)\n")
     external.chmod(0o755)
@@ -201,6 +202,7 @@ def test_tirith_opt_in_background_and_explicit_override(consumer_store, tmp_path
         assert tirith.ensure_installed() is None
         assert entered.wait(10)
         assert pm.installed_package("tirith") is None
+        assert tirith.missing_is_expected(), "an in-flight first download is not a fault"
     finally:
         release.set()
         for thread in tirith._install_threads.values():

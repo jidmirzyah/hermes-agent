@@ -41,7 +41,7 @@ def apparmor_restricts_unprivileged_userns() -> bool:
     """Ubuntu 23.10+ default: unprivileged user namespaces are denied, so a Chromium whose
     ``chrome_sandbox`` helper is not setuid (Playwright's bundle) dies with 'No usable sandbox'."""
     try:
-        with open("/proc/sys/kernel/apparmor_restrict_unprivileged_userns", encoding="utf-8-sig") as f:
+        with open("/proc/sys/kernel/apparmor_restrict_unprivileged_userns", encoding="utf-8") as f:
             return f.read().strip() == "1"
     except OSError:
         return False

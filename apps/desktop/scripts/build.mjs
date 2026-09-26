@@ -6,13 +6,13 @@ import { parseArgs } from 'node:util'
 import { generateIcons } from '../../../scripts/generate-icons.mjs'
 import { isMain, repoRoot } from '../../../scripts/build/frontend-common.mjs'
 
-export function buildSourceDesktop({ source = repoRoot, icons, onDemand = false, run = execFileSync, generate = generateIcons } = {}) {
+export function buildSourceDesktop({ source = repoRoot, icons, run = execFileSync, generate = generateIcons } = {}) {
   source = resolve(source)
   const app = join(source, 'apps/desktop')
   const step = (script, args = []) => run(process.execPath, [join(source, script), ...args], { cwd: app, stdio: 'inherit' })
   step('apps/desktop/scripts/assert-root-install.mjs')
   if (!icons) {
-    if (generate(['--source', source, '--out', source, ...(onDemand ? ['--on-demand'] : [])]) !== 0) throw new Error('Icon preparation failed')
+    if (generate(['--source', source, '--out', source]) !== 0) throw new Error('Icon preparation failed')
     icons = source
   }
   icons = resolve(icons)
@@ -28,6 +28,6 @@ export function buildSourceDesktop({ source = repoRoot, icons, onDemand = false,
 }
 
 if (isMain(import.meta.url)) {
-  const { values } = parseArgs({ options: { icons: { type: 'string' }, 'on-demand': { type: 'boolean' } } })
-  buildSourceDesktop({ ...values, onDemand: values['on-demand'] })
+  const { values } = parseArgs({ options: { icons: { type: 'string' } } })
+  buildSourceDesktop(values)
 }

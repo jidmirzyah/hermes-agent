@@ -133,7 +133,8 @@ _BOOTSTRAP_PATHS = ("apps/bootstrap-installer/",)
 _BOOTSTRAP_FILES = {"scripts/install.sh", "setup-hermes.sh"}
 # Windows desktop-update hand-off (scripts/desktop-update/windows.ps1 + the
 # Electron side that launches it) and the pytest files that spawn it.
-_DESKTOP_UPDATER_PATHS = ("scripts/desktop-update/",)
+# tests/_fixtures/ holds the conftest's platform gating, so it re-arms the lane too.
+_DESKTOP_UPDATER_PATHS = ("scripts/desktop-update/", "tests/_fixtures/")
 _DESKTOP_UPDATER_TEST_PREFIX = "tests/scripts/desktop_update/"
 _DESKTOP_UPDATER_FILES = {
     "apps/desktop/electron/updater-process.ts",

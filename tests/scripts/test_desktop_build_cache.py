@@ -10,6 +10,7 @@ import sys
 import pytest
 
 from scripts.ci.setup_toolchain import current_target
+from tests.ci.desktop_release_roles import gate
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -187,8 +188,13 @@ def test_composite_transports_only_and_uses_the_restore_key_for_save(tmp_path):
     assert restore["continue-on-error"] is True
     assert save["continue-on-error"] is True
     for step in steps:
-        assert "!cancelled()" in step["if"], "failure salvage must not run during cancellation"
-    assert any("steps.save.outcome == 'failure'" in step["if"] and "::warning::" in step.get("run", "") for step in steps)
+        assert not gate(step["if"], {}, {}, job_if=False, cancelled=True), \
+            "failure salvage must not run during cancellation"
+    # A cache service failure is reported instead of failing preparation.
+    (report,) = [step for step in steps if "::warning::" in step.get("run", "")]
+    for failed in ("restore", "save"):
+        assert gate(report["if"], {}, {}, job_if=False, failed=True, steps={failed: {"outcome": "failure"}})
+    assert not gate(report["if"], {}, {}, job_if=False, steps={"restore": {"outcome": "success"}})
 
 
 def test_action_path_join_is_an_actual_newline(tmp_path):

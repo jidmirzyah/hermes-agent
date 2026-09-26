@@ -1,6 +1,23 @@
 # Native build dependencies are separate from PM's application environment.
+
+# An interactive console sees one status line per build command, with the
+# full output in $script:HermesBuildLog; CI and a redirected stdout (pm under
+# the installer, which logs that itself) keep the full stream. install.ps1
+# has its own copy: this file is dot-sourced by the build entry point and
+# setup-hermes.ps1, which never load the installer.
+function Test-HermesBuildQuiet {
+    if ($env:CI -or $env:GITHUB_ACTIONS -or $env:HERMES_INSTALL_VERBOSE -or -not $script:HermesBuildLog) { return $false }
+    try { return -not [Console]::IsOutputRedirected } catch { return $false }
+}
+
+function Write-HermesBuildNote {
+    # Discovery details belong in CI transcripts, not on a user's console.
+    param([string]$Message)
+    if (-not (Test-HermesBuildQuiet)) { Write-Host "-> $Message" }
+}
+
 function Invoke-HermesBuildCommand {
-    param([string]$Command, [string[]]$Arguments)
+    param([string]$Command, [string[]]$Arguments, [string]$Label)
     # Windows PowerShell 5.1 returns every match from Get-Command even without
     # -All. .Source on that array is every path joined by a space, and the call
     # operator then treats the joined string as one program name. Git for
@@ -9,11 +26,42 @@ function Invoke-HermesBuildCommand {
     if ($executable -isnot [string] -or -not (Test-Path -LiteralPath $executable -PathType Leaf)) {
         throw "Could not resolve a single executable for $Command (got: $executable)"
     }
+    if (-not $Label) { $Label = "Running $(Split-Path -Leaf $executable)" }
     $previousPreference = $ErrorActionPreference
     try {
         $ErrorActionPreference = 'Continue'
-        & $executable @Arguments | Out-Host
-        $code = $LASTEXITCODE
+        if (Test-HermesBuildQuiet) {
+            $recent = New-Object 'System.Collections.Generic.Queue[string]'
+            $width = 80
+            try { $width = [Math]::Max(20, $Host.UI.RawUI.WindowSize.Width) } catch { $width = 80 }
+            $writer = New-Object System.IO.StreamWriter($script:HermesBuildLog, $true, (New-Object System.Text.UTF8Encoding($false)))
+            try {
+                $writer.WriteLine("==> $Label ($((Get-Date).ToUniversalTime().ToString('s'))Z)")
+                & $executable @Arguments 2>&1 | ForEach-Object {
+                    $line = "$_".TrimEnd("`r")
+                    $writer.WriteLine($line)
+                    $recent.Enqueue($line)
+                    if ($recent.Count -gt 20) { [void]$recent.Dequeue() }
+                    # git and vcpkg redraw progress with bare CRs; show the newest.
+                    $shown = "  ${Label}: $((($line -split "`r")[-1]).Trim())"
+                    if ($shown.Length -ge $width) { $shown = $shown.Substring(0, $width - 1) }
+                    Write-Host ("`r" + $shown.PadRight($width - 1)) -NoNewline -ForegroundColor DarkGray
+                }
+                $code = $LASTEXITCODE
+            } finally {
+                $writer.Dispose()
+                Write-Host ("`r" + (' ' * ($width - 1)) + "`r") -NoNewline
+            }
+            if ($code -ne 0) {
+                Write-Host "[X] $Label failed (exit $code). Last output:" -ForegroundColor Red
+                foreach ($line in $recent) { Write-Host "    $line" }
+                Write-Host "    full log: $script:HermesBuildLog"
+            }
+        } else {
+            Write-Host "-> $Label"
+            & $executable @Arguments | Out-Host
+            $code = $LASTEXITCODE
+        }
     } finally { $ErrorActionPreference = $previousPreference }
     if ($code -ne 0) { throw "$Command failed with exit code $code" }
 }
@@ -24,10 +72,9 @@ function Install-HermesArm64OpenSSL {
     $required = @('include\openssl\ssl.h', 'lib\libcrypto.lib', 'lib\libssl.lib')
     $missing = @($required | Where-Object { -not (Test-Path -LiteralPath (Join-Path $prefix $_) -PathType Leaf) })
     if ($missing.Count) {
-        Write-Host 'Installing static ARM64 OpenSSL development libraries via vcpkg...'
-        Invoke-HermesBuildCommand $Vcpkg @('install', 'openssl:arm64-windows-static-md', '--classic', '--disable-metrics', "--x-install-root=$(Join-Path $Root 'installed')")
+        Invoke-HermesBuildCommand $Vcpkg @('install', 'openssl:arm64-windows-static-md', '--classic', '--disable-metrics', "--x-install-root=$(Join-Path $Root 'installed')") 'Building static ARM64 OpenSSL via vcpkg (several minutes)'
     } else {
-        Write-Host "ARM64 OpenSSL development libraries found: $prefix"
+        Write-HermesBuildNote "ARM64 OpenSSL development libraries found: $prefix"
     }
     foreach ($relative in $required) {
         if (-not (Test-Path -LiteralPath (Join-Path $prefix $relative) -PathType Leaf)) {
@@ -66,6 +113,7 @@ function Initialize-HermesArm64BuildTools {
     }
     $buildRoot = Join-Path $StateRoot 'build-tools'
     New-Item -ItemType Directory -Force -Path $buildRoot | Out-Null
+    $script:HermesBuildLog = Join-Path $buildRoot 'build.log'
     $vs = Get-HermesArm64VisualStudio
     $clangPath = Get-HermesClang -VisualStudio $vs
     if (-not $vs -or -not $clangPath) {
@@ -75,13 +123,17 @@ function Initialize-HermesArm64BuildTools {
             throw 'ARM64 C++ or Clang build tools are missing. Run setup-hermes.ps1 once in an Administrator PowerShell to install them.'
         }
         $installer = Join-Path $buildRoot 'vs-buildtools.exe'
+        Write-Host '-> Installing Visual Studio Build Tools (ARM64 C++ and Clang) to compile dependencies that have no ARM64 Windows wheel (such as cryptography).'
+        Write-Host '-> This downloads several GB and can take 20+ minutes. The Visual Studio installer shows its progress in its own window.'
         Invoke-WebRequest -UseBasicParsing 'https://aka.ms/vs/17/release/vs_BuildTools.exe' -OutFile $installer
         $signature = Get-AuthenticodeSignature -LiteralPath $installer
         if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation(?:,|$)') {
             throw 'Visual Studio installer does not have a valid Microsoft signature'
         }
+        # --passive shows the installer's progress window without asking
+        # anything; --quiet showed nothing for the whole install.
         $installArgs = @(
-            '--quiet', '--wait', '--norestart', '--nocache',
+            '--passive', '--wait', '--norestart', '--nocache',
             '--add', 'Microsoft.VisualStudio.Workload.VCTools', '--includeRecommended',
             '--add', 'Microsoft.VisualStudio.Component.VC.Tools.ARM64',
             '--add', 'Microsoft.VisualStudio.Component.VC.Llvm.Clang'
@@ -94,7 +146,7 @@ function Initialize-HermesArm64BuildTools {
         $clangPath = Get-HermesClang -VisualStudio $vs
         if (-not $clangPath) { throw 'The Clang compiler is still missing after Visual Studio setup.' }
     }
-    Write-Host "ARM64 C++ build tools found: $vs"
+    Write-HermesBuildNote "ARM64 C++ build tools found: $vs"
     # CI, desktop builds and native staging can inherit the same developer
     # environment. VsDevCmd prepends its paths again on every call, eventually
     # overflowing cmd.exe's line limit. Reuse only a matching, usable environment.
@@ -147,19 +199,19 @@ function Initialize-HermesArm64BuildTools {
         if ((Get-FileHash -Algorithm SHA256 $installer).Hash.ToLowerInvariant() -ne 'de9f7d29ccd39efa59a3dda3ec363b396e09b92681229b9b8f6aaa4c84285e9c') {
             throw 'rustup installer SHA256 mismatch'
         }
-        Invoke-HermesBuildCommand $installer @('-y', '--no-modify-path', '--profile', 'minimal', '--default-toolchain', '1.98.0-aarch64-pc-windows-msvc')
+        Invoke-HermesBuildCommand $installer @('-y', '--no-modify-path', '--profile', 'minimal', '--default-toolchain', '1.98.0-aarch64-pc-windows-msvc') 'Installing the Rust toolchain (1.98.0, ARM64) for those source builds'
         $rustup = Get-Command rustup.exe -ErrorAction Stop
     }
     $rustc = Get-Command rustc.exe -ErrorAction SilentlyContinue
     $rustInfo = if ($rustc) { (& $rustc.Source -vV) -join "`n" } else { '' }
     if ($rustInfo -notmatch 'host: aarch64-pc-windows-msvc') {
-        Invoke-HermesBuildCommand $rustup.Source @('toolchain', 'install', '1.98.0-aarch64-pc-windows-msvc', '--profile', 'minimal')
+        Invoke-HermesBuildCommand $rustup.Source @('toolchain', 'install', '1.98.0-aarch64-pc-windows-msvc', '--profile', 'minimal') 'Installing Rust 1.98.0 for ARM64'
         $env:RUSTUP_TOOLCHAIN = '1.98.0-aarch64-pc-windows-msvc'
     }
-    Write-Host 'ARM64 Rust toolchain ready'
+    Write-HermesBuildNote 'ARM64 Rust toolchain ready'
 
     $env:CC_aarch64_pc_windows_msvc = $clangPath
-    Write-Host "ARM64 Rust C compiler: $clangPath"
+    Write-HermesBuildNote "ARM64 Rust C compiler: $clangPath"
 
     $vcpkgRoot = $null
     $vcpkgCommand = Get-Command vcpkg.exe -ErrorAction SilentlyContinue
@@ -177,10 +229,14 @@ function Initialize-HermesArm64BuildTools {
     if (-not $vcpkgRoot) {
         $vcpkgRoot = Join-Path $buildRoot 'vcpkg'
         if (-not (Test-Path -LiteralPath (Join-Path $vcpkgRoot '.git'))) {
-            Invoke-HermesBuildCommand 'git' @('clone', 'https://github.com/microsoft/vcpkg.git', $vcpkgRoot)
-            Invoke-HermesBuildCommand 'git' @('-C', $vcpkgRoot, 'checkout', '--detach', '00c5775211f45cd08b37fce0484b4cb940e422ab')
+            # Phase lines ("Receiving objects: 42%") feed the status line;
+            # git prints none to a pipe unless asked.
+            $progress = @()
+            if (Test-HermesBuildQuiet) { $progress = @('--progress') }
+            Invoke-HermesBuildCommand 'git' (@('clone') + $progress + @('https://github.com/microsoft/vcpkg.git', $vcpkgRoot)) 'Downloading vcpkg to build OpenSSL for ARM64'
+            Invoke-HermesBuildCommand 'git' @('-C', $vcpkgRoot, 'checkout', '--detach', '00c5775211f45cd08b37fce0484b4cb940e422ab') 'Pinning vcpkg'
         }
-        Invoke-HermesBuildCommand (Join-Path $vcpkgRoot 'bootstrap-vcpkg.bat') @('-disableMetrics')
+        Invoke-HermesBuildCommand (Join-Path $vcpkgRoot 'bootstrap-vcpkg.bat') @('-disableMetrics') 'Building vcpkg'
     }
     $env:VCPKG_ROOT = $vcpkgRoot
     # The install tree can be cached independently of the discovered checkout.

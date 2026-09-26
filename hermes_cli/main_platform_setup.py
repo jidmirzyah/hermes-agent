@@ -109,7 +109,8 @@ def _whatsapp_install_bridge(bridge_dir) -> bool:
         if npm is None:
             env = pm.ensure("npm", explicit=True).env
             installed = pm.installed_package("npm")
-            assert installed is not None and installed.binary is not None
+            if installed is None or installed.binary is None:
+                raise pm.InstallError("npm", "npm binary is missing after preparation")
             npm = str(installed.binary)
         result = subprocess.run(
             [npm, "install", "--no-fund", "--no-audit", "--progress=false"],
@@ -191,7 +192,8 @@ def cmd_whatsapp(args):
         try:
             pm.ensure("node", explicit=True)
             installed = pm.installed_package("node")
-            assert installed is not None and installed.binary is not None
+            if installed is None or installed.binary is None:
+                raise pm.InstallError("node", "Node.js binary is missing after preparation")
             node = str(installed.binary)
         except pm.InstallError as exc:
             print(f"  ✗ Node.js preparation failed: {exc}")

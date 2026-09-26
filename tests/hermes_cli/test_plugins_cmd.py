@@ -17,12 +17,12 @@ from hermes_cli.plugins_cmd import (
     PluginOperationError,
     _copy_example_files,
     _read_manifest,
-    _refuse_unavailable_portable_plugin,
     _repo_name_from_url,
     _resolve_git_url,
     _resolve_subdir_within,
     _sanitize_plugin_name,
 )
+from hermes_cli.plugins_cmd_install import _refuse_unavailable_portable_plugin
 
 
 def _write_portable_app_plugin(root: Path, app: Path) -> None:
@@ -358,7 +358,7 @@ class TestCmdInstall:
     @patch("hermes_cli.plugins_cmd.rmtree_readonly")
     @patch("hermes_cli.plugins_cmd._plugins_dir")
     @patch("hermes_cli.plugins_cmd._read_manifest")
-    @patch("hermes_cli.plugins_cmd.subprocess.run")
+    @patch("subprocess.run")
     def test_install_rejects_manifest_name_pointing_at_plugins_root(
         self,
         mock_run,
@@ -711,6 +711,7 @@ class TestSubdirInstallE2E:
         import subprocess as sp
 
         from hermes_cli import plugins_cmd as pc
+        from hermes_cli.plugins_cmd_update import _pull_plugin_update
 
         repo_root = tmp_path / "monorepo"
         self._make_repo_with_subdir_plugin(repo_root)
@@ -726,13 +727,13 @@ class TestSubdirInstallE2E:
         new_sha = sp.run(["git", "rev-parse", "HEAD"], cwd=repo_root, check=True,
                          capture_output=True, text=True).stdout.strip()
 
-        output = pc._pull_plugin_update(target, lambda rec: "pinned", lambda: "not git")
+        output = _pull_plugin_update(target, lambda rec: "pinned", lambda: "not git")
 
         assert "VERSION = 2" in (target / "__init__.py").read_text(encoding="utf-8")
         assert pc._read_install_metadata()["my-plugin"]["revision"] == new_sha
         assert "Already up to date" not in output
         # A second update with nothing new upstream reports up to date, like `git pull`.
-        assert "Already up to date" in pc._pull_plugin_update(target, lambda rec: "pinned", lambda: "not git")
+        assert "Already up to date" in _pull_plugin_update(target, lambda rec: "pinned", lambda: "not git")
 
     def test_installs_portable_root_package_disabled(self, tmp_path, monkeypatch):
         if shutil.which("git") is None:
@@ -904,7 +905,7 @@ def test_autostash_dirty_tree_promotes_intent_to_add_entries(tmp_path):
     """
     import subprocess
 
-    from hermes_cli.plugins_cmd import _autostash_dirty_tree
+    from hermes_cli.plugins_cmd_git import _autostash_dirty_tree
 
     def git(*args, check=True):
         return subprocess.run(

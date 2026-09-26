@@ -24,14 +24,13 @@ from collections import defaultdict
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# Import AUTHOR_MAP and resolve_author from the sibling release.py module
+# Import resolve_author from the release tooling's author map
 # ---------------------------------------------------------------------------
 SCRIPT_DIR = Path(__file__).resolve().parent
-sys.path.insert(0, str(SCRIPT_DIR))
-
-from release import resolve_author  # noqa: E402
-
 REPO_ROOT = SCRIPT_DIR.parent
+sys.path.insert(0, str(REPO_ROOT))
+
+from scripts.releases.authors import resolve_author  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # AI assistants, bots, and machine accounts to exclude from contributor lists

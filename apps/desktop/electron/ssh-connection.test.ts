@@ -109,6 +109,45 @@ test('controlSocketPath default base stays under sun_path even with the temp-lis
   assert.ok(!p.includes('/var/folders/'), 'default base must not be os.tmpdir() on macOS')
 })
 
+test.runIf(process.platform !== 'win32')(
+  'deep HOME uses a private short directory and binds a real listener',
+  async () => {
+    const previousHome = process.env.HOME
+    process.env.HOME = path.join(os.tmpdir(), 'deep-home-' + 'x'.repeat(110))
+    const net = await import('node:net')
+    const listener = net.createServer()
+
+    try {
+      const spawnFn = scriptedSpawn(args => (args.includes('check') ? { code: 255 } : { code: 0 }))
+      const conn = new SshConnection({ host: 'box', user: 'me' }, { spawnFn, mux: true })
+      assert.equal(conn.controlPath, controlSocketPath('me', 'box', 22))
+      assert.ok(!conn.controlPath.startsWith(process.env.HOME))
+      await conn.open()
+      const dir = path.dirname(conn.controlPath)
+      const st = fs.lstatSync(dir)
+      assert.ok(st.isDirectory() && !st.isSymbolicLink())
+      assert.equal(st.uid, process.getuid())
+      assert.equal(st.mode & 0o777, 0o700)
+      const temporaryPath = `${conn.controlPath}.0123456789abcdef`
+      assert.ok(Buffer.byteLength(temporaryPath) <= 104)
+      await new Promise<void>((resolve, reject) => {
+        listener.once('error', reject)
+        listener.listen(temporaryPath, resolve)
+      })
+    } finally {
+      if (previousHome === undefined) {
+        delete process.env.HOME
+      } else {
+        process.env.HOME = previousHome
+      }
+
+      if (listener.listening) {
+        await new Promise<void>((resolve, reject) => listener.close(error => (error ? reject(error) : resolve())))
+      }
+    }
+  }
+)
+
 test('baseSshOptions carries the house ControlMaster/BatchMode/accept-new policy', () => {
   const opts = baseSshOptions('/tmp/x.sock', 15000)
   const joined = opts.join(' ')
@@ -552,6 +591,7 @@ test('mux open() does not classify a signal-killed master with empty stderr as u
 
     return { signal: 'SIGHUP', stderr: '' }
   })
+
   const conn = new SshConnection({ host: 'box', user: 'me' }, { spawnFn, controlDir: '/tmp/d' })
 
   await assert.rejects(() => conn.open(), (err: any) => assertSignalDeathNotUnreachable(err, 'SIGHUP'))
@@ -573,6 +613,7 @@ test('forward() does not classify a signal death with empty stderr as unreachabl
 
 test('close() does not report a signal-killed -O exit with empty stderr as unreachable', async () => {
   const logs: string[] = []
+
   const spawnFn = scriptedSpawn(args => {
     if (args.includes('check')) {
       return { code: 255 }
@@ -584,6 +625,7 @@ test('close() does not report a signal-killed -O exit with empty stderr as unrea
 
     return { signal: 'SIGINT', stderr: '' }
   })
+
   const conn = new SshConnection(
     { host: 'box', user: 'me' },
     { spawnFn, controlDir: '/tmp/d', rememberLog: line => logs.push(line) }
@@ -619,6 +661,7 @@ test('a signal death that already printed an unreachable ssh error stays unreach
       stderr: 'ssh: connect to host box port 22: Connection refused'
     }
   ])
+
   const conn = new SshConnection({ host: 'box', user: 'me' }, { spawnFn, mux: false })
 
   await assert.rejects(

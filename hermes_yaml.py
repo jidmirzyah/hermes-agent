@@ -78,9 +78,18 @@ def safe_dump(
     return output.getvalue()
 
 
+# ruamel's emitter can change a double-quoted value when it folds a long line right after an
+# escaped backslash (``D:\\Cent…`` → ``D:\\`` + bare newline): the fold reloads as a literal space
+# and a no-op save mutates the stored value (#119844). Config writes must be value-preserving, so
+# every round-trip emitter in the tree keeps scalars on one line instead of folding (``None``
+# does NOT disable folding on 0.18.x; only a large width does).
+ROUNDTRIP_YAML_WIDTH = 2**31 - 1
+
+
 def roundtrip_yaml() -> YAML:
     """Create a fresh comment/quote-preserving editor for user-authored YAML."""
     yaml = YAML(typ="rt")
+    yaml.width = ROUNDTRIP_YAML_WIDTH
     yaml.Resolver = _Yaml11Resolver
     yaml.preserve_quotes = True
     yaml.allow_unicode = True

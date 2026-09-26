@@ -3,15 +3,20 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 import json
-import re
+
+# Keep this list aligned with the Desktop bundle banner and channel decoder.
+_ALLOWED = frozenset({
+    "HERMES_HOME", "HERMES_DATA_DIR_SUFFIX", "HERMES_DESKTOP_USER_DATA_DIR",
+    "HERMES_SHARED_AUTH_DIR", "HERMES_GUEST_ONBOARDING", "HERMES_SKIP_INTRO",
+})
 
 
 def validate(values: object) -> dict[str, str | None]:
     if not isinstance(values, dict):
         raise ValueError("Bundle environment must be a JSON object")
     for key, value in values.items():
-        if not isinstance(key, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
-            raise ValueError("Bundle environment names must be valid environment identifiers")
+        if not isinstance(key, str) or key not in _ALLOWED:
+            raise ValueError(f"Bundle environment name is not permitted: {key}")
         if value is not None and (not isinstance(value, str) or "\0" in value):
             raise ValueError(f"Bundle environment value for {key} must be a string without NUL or null")
     return values

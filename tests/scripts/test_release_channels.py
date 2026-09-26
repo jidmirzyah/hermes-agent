@@ -109,8 +109,8 @@ def test_unknown_channel_created_over_http_retains_identity_and_immutable_reques
             reader.resolve("not-registered-in-code")
         record = pub.create("not-registered-in-code")
         assert reader.resolve(record["name"]).manifest is None
-        one = pub.allocate(record["name"], "a" * 40, "1.2.3", {"FEATURE": "one"})
-        two = pub.allocate(record["name"], "a" * 40, "1.2.3", {"FEATURE": "two"})
+        one = pub.allocate(record["name"], "a" * 40, "1.2.3", {"HERMES_GUEST_ONBOARDING": "1"})
+        two = pub.allocate(record["name"], "a" * 40, "1.2.3", {"HERMES_GUEST_ONBOARDING": "0"})
         assert one["identity"] == two["identity"] == record["identity"]
         assert one["buildId"] != two["buildId"]
         assert one["sequence"] < two["sequence"]
@@ -436,8 +436,9 @@ def test_accepted_release_receipts_feed_the_protected_head_without_rebuilding(tm
         monkeypatch.setattr(channel_releases, "admit_transaction",
                             lambda policy, env, **_kwargs: (tag, commit))
         monkeypatch.setattr(channel_releases.stable, "final_context",
-                            lambda env: (tag, commit, {"claim_epoch": 1_787_965_323}))
-        monkeypatch.setattr(channel_releases, "accepted_stable", lambda *args: accepted)
+                            lambda env: (tag, commit, {"claim_epoch": 1_787_965_323,
+                                                       "skip_bundles": False, "skip_tests": False}))
+        monkeypatch.setattr(channel_releases, "accepted_stable", lambda *args, **kwargs: accepted)
         promotion_attempts = [0]
         def promote_stable_feeds(*args):
             promotion_attempts[0] += 1
@@ -468,12 +469,12 @@ def test_accepted_release_receipts_feed_the_protected_head_without_rebuilding(tm
 def test_protected_transaction_refuses_custom_workflow_and_unpublished_release(monkeypatch):
     from scripts.releases import channel_releases
     from hermes_cli.release_channels import ChannelError
-    tag, commit = "v2.0.0", "a" * 40
+    attempt, tag, commit = "rc.1-v2.0.0", "v2.0.0", "a" * 40
     env = {"GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "workflow_dispatch",
-           "GITHUB_REPOSITORY": "example/hermes-agent", "RELEASE_TAG": tag,
-           "RELEASE_COMMIT": commit, "RELEASE_CLAIM_TAG": tag + "-rc",
+           "GITHUB_REPOSITORY": "example/hermes-agent", "RELEASE_TAG": attempt,
+           "RELEASE_COMMIT": commit, "RELEASE_CLAIM_TAG": attempt,
            "RELEASE_CLAIM_OBJECT": "b" * 40,
-           "GITHUB_WORKFLOW_REF": "example/hermes-agent/.github/workflows/stable-release.yml@refs/tags/" + tag + "-rc"}
+           "GITHUB_WORKFLOW_REF": "example/hermes-agent/.github/workflows/stable-release.yml@refs/tags/" + attempt}
     published = [True]
 
     def final_context(_env, run):
@@ -488,20 +489,61 @@ def test_protected_transaction_refuses_custom_workflow_and_unpublished_release(m
             return "main"
         return ""
 
-    assert channel_releases.admit_transaction("stable-release", env, run=run) == (tag, commit)
+    assert channel_releases.admit_transaction("stable-release", env, run=run) == (attempt, commit)
     published[0] = False
     with pytest.raises(ChannelError, match="published"):
         channel_releases.admit_transaction("stable-release", env, run=run)
     published[0] = True
     with pytest.raises(ChannelError, match="controller"):
         channel_releases.admit_transaction("stable-release", dict(env, GITHUB_WORKFLOW_REF="custom.yml"), run=run)
-    from hermes_cli.release_channels import canonical_json
+    with pytest.raises(ChannelError, match="protected release tag"):
+        channel_releases.admit_transaction(
+            "stable-release", dict(env, RELEASE_TAG=tag + "-rc"), run=run)
+
+
+def test_stable_admission_requires_an_attempt_ref_release_tag(monkeypatch):
+    from scripts.releases import channel_releases
+    from hermes_cli.release_channels import ChannelError
+    attempt, commit = "rc.2-v1.2.3", "c" * 40
+    env = {"GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "workflow_dispatch",
+           "GITHUB_REPOSITORY": "example/hermes-agent", "RELEASE_TAG": attempt,
+           "RELEASE_COMMIT": commit, "RELEASE_CLAIM_TAG": attempt,
+           "RELEASE_CLAIM_OBJECT": "b" * 40,
+           "GITHUB_WORKFLOW_REF": "example/hermes-agent/.github/workflows/stable-release.yml@refs/tags/" + attempt}
+    monkeypatch.setattr(channel_releases.stable, "final_context",
+                        lambda _env, run: ("v1.2.3", commit, {}))
+
+    def run(command):
+        if command[-1] == ".default_branch":
+            return "main"
+        return ""
+
+    assert channel_releases.admit_transaction("stable-release", env, run=run) == (attempt, commit)
+    # The v-tag the final receipt binds is derived from the attempt ref, so the
+    # candidate manifest custody is checked against the claim's own version.
+    seen = {}
+    def final_context_checked(patched_env, run):
+        seen["RELEASE_TAG"] = patched_env["RELEASE_TAG"]
+        return "v1.2.3", commit, {}
+    monkeypatch.setattr(channel_releases.stable, "final_context", final_context_checked)
+    channel_releases.admit_transaction("stable-release", env, run=run)
+    assert seen["RELEASE_TAG"] == "v1.2.3"
+    with pytest.raises(ChannelError, match="protected release tag"):
+        channel_releases.admit_transaction("stable-release", dict(env, RELEASE_TAG="v1.2.3"), run=run)
+
+
+def test_accepted_stable_reads_the_release_archive_by_tag(monkeypatch):
+    from scripts.releases import channel_releases
+    from hermes_cli.release_channels import ChannelError, canonical_json
+    tag, commit = "v2.0.0", "c" * 40
+    attempt = "rc.1-v2.0.0"
     with object_server() as (url, objects, headers, requests, faults):
         pub = publisher(url)
         # Exercise HTTPS authority validation through the loopback transport.
         pub.public_base = "https://releases.example"
         release_epoch = 1_787_965_323
         candidate = {"schema": 2, "tag": tag, "commit": commit, "releaseEpoch": release_epoch,
+                     "archive": attempt,
                      "smoke_results": {job: {"result": "success"} for job in channel_releases.stable.SMOKE_JOBS},
                      "packages": []}
         for platform in ("macos", "windows"):
@@ -510,15 +552,21 @@ def test_protected_transaction_refuses_custom_workflow_and_unpublished_release(m
                     "version": "2.0.0" if platform == "macos" else "2026.5761.123.0", "identity": "fixture.identity",
                     **({"executableVersion": "2026.5761.123.0"} if platform == "windows" else {}),
                     "teamId": "ABCDEFGHIJ", "publisher": "CN=Fixture", "applicationId": "Fixture",
-                    "artifact": {"url": f"{pub.public_base}/releases/tag/{tag}/fixture-{arch}." + ("zip" if platform == "macos" else "msixbundle"), "sha256": "d" * 64}})
+                    "artifact": {"url": f"{pub.public_base}/releases/tag/{attempt}/fixture-{arch}." + ("zip" if platform == "macos" else "msixbundle"), "sha256": "d" * 64}})
         raw = canonical_json(candidate)
-        key = f"releases/tag/{tag}/release-candidates.json"
+        key = f"releases/tag/{attempt}/release-candidates.json"
         objects[key] = raw
         candidate_env = {"CANDIDATE_MANIFEST_SHA256": hashlib.sha256(raw).hexdigest(), "CANDIDATE_MANIFEST_URL": pub.public_base + "/" + key}
-        assert channel_releases.accepted_stable(pub, candidate_env, tag, commit, release_epoch) == candidate
+        assert channel_releases.accepted_stable(pub, candidate_env, attempt, commit, release_epoch,
+                                                skip_tests=False) == candidate
+        # Passed smokes cannot stand behind a claim that skipped tests, or the reverse.
+        with pytest.raises(ValueError, match="test policy"):
+            channel_releases.accepted_stable(pub, candidate_env, attempt, commit, release_epoch,
+                                             skip_tests=True)
         faults["stale_public"] = b"{}"
         with pytest.raises(ChannelError):
-            channel_releases.accepted_stable(pub, candidate_env, tag, commit, release_epoch)
+            channel_releases.accepted_stable(pub, candidate_env, attempt, commit, release_epoch,
+                                             skip_tests=False)
 
 
 def test_request_inputs_are_rejected_before_allocating():
@@ -539,3 +587,27 @@ def test_canary_native_version_is_derived_from_the_current_tag():
     from scripts.releases.channel_releases import canary_windows_version
 
     assert canary_windows_version("v0.27.1+canary.20260829T010203Z") == "26.829.1.203"
+
+
+def test_stable_requests_name_the_attempt_archive_only_when_given():
+    from hermes_cli.release_channels import ChannelError
+    from scripts.releases.channels import preview_identity
+    with object_server() as (url, objects, headers, requests, faults):
+        pub = publisher(url)
+        identity = preview_identity("archived", "3" * 16)
+        gate = lambda request: True
+
+        def allocate(commit, version, archive_ref):
+            return pub.allocate_protected(
+                "archived", commit, version, release_tag="v" + version, version=version,
+                windows_version=version + ".0", identity=identity, policy="stable-release",
+                release_gate=gate, archive_ref=archive_ref)
+
+        request = allocate("a" * 40, "2.0.0", "rc.2-v2.0.0")
+        assert request["archiveRef"] == "rc.2-v2.0.0"
+        assert pub.request(request["buildId"]) == request
+        bare = allocate("b" * 40, "2.1.0", None)
+        assert "archiveRef" not in bare
+        assert pub.request(bare["buildId"]) == bare
+        with pytest.raises(ChannelError, match="(?i)archive ref"):
+            allocate("c" * 40, "2.2.0", "rc.2-v2.9.9")

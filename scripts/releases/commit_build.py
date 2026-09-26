@@ -188,7 +188,7 @@ def dispatch_command(commit: str, repository: str, branch: str,
     require_commit(commit)
     command = ["gh", "workflow", "run", WORKFLOW, "--ref", branch, "--repo", repository,
             "-f", f"build_commit={commit}", "-f", "tag=", "-f", "upload_release=false",
-            "-f", "termux_only=false", "-f", "termux_upgrade_from_tag="]
+            "-f", "termux_upgrade_from_tag="]
     if bundle_env:
         command += ["-f", "bundle_env=" + json.dumps(validate(bundle_env), sort_keys=True)]
     return command

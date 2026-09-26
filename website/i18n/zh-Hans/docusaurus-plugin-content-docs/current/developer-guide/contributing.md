@@ -91,7 +91,7 @@ npm run build:fast --prefix website
 ```
 
 图标从 `assets/nous-girl-*.svg` 和 `assets/backgrounds/` 生成。
-`node scripts/generate-icons.mjs` 使用隔离的 `icon-build` 依赖组，不应将这些构建依赖加入生产包。
+`node scripts/generate-icons.mjs` 使用 Hermes 运行时 Python（`HERMES_PYTHON`，否则为 PATH 上的 `python`）渲染图标：Pillow 和 resvg-py 是核心依赖。不要提交生成的 PNG/ICO/ICNS 文件。
 
 ### 运行测试
 

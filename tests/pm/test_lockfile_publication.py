@@ -8,7 +8,19 @@ import threading
 
 import pytest
 
-from pm.lock import Lockfile
+from pm.lock import Facts, Lockfile
+
+
+def test_corrupt_package_state_cannot_be_replaced_by_a_partial_write(tmp_path):
+    path = tmp_path / "facts.json"
+    facts = Facts(path)
+    facts.record_state("venv", "old", ["all"])
+    path.write_bytes(b"not JSON")
+    with pytest.raises(ValueError, match="recorded package state"):
+        facts.reload()
+    with pytest.raises(ValueError, match="recorded package state"):
+        facts.record_state("venv", "new", [])
+    assert path.read_bytes() == b"not JSON"
 
 
 def test_pin_writers_merge_without_losing_other_rows(tmp_path):

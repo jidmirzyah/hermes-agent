@@ -380,7 +380,8 @@ def _ensure_whatsapp_bridge_dependencies(bridge_dir: Path) -> None:
         if npm is None:
             env = pm.ensure("npm", explicit=True).env
             installed = pm.installed_package("npm")
-            assert installed is not None and installed.binary is not None
+            if installed is None or installed.binary is None:
+                raise pm.InstallError("npm", "npm binary is missing after preparation")
             npm = str(installed.binary)
         # npm output is UTF-8; encoding= guards the Windows ANSI-code-page
         # default against undefined bytes crashing the reader thread.
@@ -415,7 +416,8 @@ def _spawn_whatsapp_pairing_process(session_path: Path, mode: str) -> subprocess
         try:
             pm.ensure("node", explicit=True)
             installed = pm.installed_package("node")
-            assert installed is not None and installed.binary is not None
+            if installed is None or installed.binary is None:
+                raise pm.InstallError("node", "Node.js binary is missing after preparation")
             node = str(installed.binary)
         except pm.InstallError as exc:
             raise HTTPException(status_code=500, detail=f"Node.js preparation failed: {exc}") from exc

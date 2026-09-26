@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import builtins
-from functools import wraps
+from functools import lru_cache, wraps
 import io
 import os
 from pathlib import Path
@@ -65,8 +65,11 @@ class HomeIOGuard:
             # ``shutil.which`` stats/accesses ``<PATH entry>/<name>``. A developer shell puts
             # PM's tool store (~/.hermes/tools/...) on PATH; probing an executable there is
             # command lookup, not reading Hermes state. CI has no such entries.
-            if metadata and any(absolute.parent == entry for entry in self._path_entries()):
-                return
+            if metadata:
+                path = os.environ.get("PATH", "")
+                cwd = os.getcwd() if self._relative_path_entries(path) else None
+                if absolute.parent in self._path_entries(path, cwd):
+                    return
             # The interpreter's own installation (a PM-managed python under ~/.hermes/tools):
             # stdlib source reads (linecache, traceback) are not Hermes state either, nor is
             # realpath() walking up through its ancestors.
@@ -96,8 +99,18 @@ class HomeIOGuard:
         )
 
     @staticmethod
-    def _path_entries():
-        return [Path(os.path.abspath(entry)) for entry in os.environ.get("PATH", "").split(os.pathsep) if entry]
+    @lru_cache(maxsize=8)
+    def _relative_path_entries(path: str) -> bool:
+        return any(entry and not os.path.isabs(entry) for entry in path.split(os.pathsep))
+
+    @staticmethod
+    @lru_cache(maxsize=8)
+    def _path_entries(path: str, cwd: str | None):
+        # Relative PATH entries change meaning after chdir; absolute ones need no cwd.
+        return frozenset(
+            Path(os.path.normpath(os.path.join(cwd or "", entry)))
+            for entry in path.split(os.pathsep) if entry
+        )
 
     def install(self, monkeypatch):
         def wrap(module, name, parameters, *, metadata=False):

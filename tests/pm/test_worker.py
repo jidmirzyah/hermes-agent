@@ -11,6 +11,7 @@ import pytest
 
 from pm import paths
 from pm.package import InstallError
+from pm.plugin_inputs import Members, Selection
 from pm.runtime import runtime_python
 from tests.pm._range_server import RangeHandler, dl_server, url  # noqa: F401
 from tests.pm.test_runtime_wheelhouse import locked_wheelhouse  # noqa: F401
@@ -117,22 +118,22 @@ def test_currency_probe_preserves_union_and_candidate_inputs(client, tmp_path, m
     Facts(facts_path).record_state("venv", Venv(repo).expected_stamp(recorded, plugin_dirs=members), recorded,
                                    environment=environment)
     before = snapshot()
-    assert client.venv_is_current(extras=["provider-extra"], plugin_dirs=members, **root_args)
-    assert client.venv_is_current(extras=[], plugin_dirs=members, **root_args)
-    assert not client.venv_is_current(extras=["new-extra"], plugin_dirs=members, **root_args)
-    assert not client.venv_is_current(extras=recorded, plugin_dirs=[], **root_args)
+    assert client.venv_is_current(extras=["provider-extra"], plugins=Members(members), **root_args)
+    assert client.venv_is_current(extras=[], plugins=Members(members), **root_args)
+    assert not client.venv_is_current(extras=["new-extra"], plugins=Members(members), **root_args)
+    assert not client.venv_is_current(extras=recorded, plugins=Members([]), **root_args)
     assert snapshot() == before, "currency queries changed dependency state"
     assert bool(acquisitions) is (route != "direct")
     pins.set_pin("uv", "unrelated", {"any": {"url": "https://example.invalid/uv", "sha256": "3" * 64}})
     pins.save()
     unchanged = snapshot()
-    assert client.venv_is_current(extras=[], plugin_dirs=members, **root_args)
+    assert client.venv_is_current(extras=[], plugins=Members(members), **root_args)
     assert snapshot() == unchanged
     for version, digest in [("test.1", "2" * 64), ("test.2", "1" * 64)]:
         pins.set_pin("python", version, {"any": {"url": "https://example.invalid/python", "sha256": digest}})
         pins.save()
         changed = snapshot()
-        assert not client.venv_is_current(plugin_dirs=members, **root_args)
+        assert not client.venv_is_current(plugins=Members(members), **root_args)
         assert snapshot() == changed
     pins.set_pin("python", "test.1", {"any": {"url": "https://example.invalid/python", "sha256": "1" * 64}})
     pins.save()
@@ -140,14 +141,14 @@ def test_currency_probe_preserves_union_and_candidate_inputs(client, tmp_path, m
     contents = marker.read_bytes()
     marker.unlink()
     changed = snapshot()
-    assert not client.venv_is_current(plugin_dirs=members, **root_args)
+    assert not client.venv_is_current(plugins=Members(members), **root_args)
     assert snapshot() == changed
     marker.write_bytes(contents)
-    assert client.venv_is_current(plugin_dirs=members, **root_args)
+    assert client.venv_is_current(plugins=Members(members), **root_args)
 
     manifest.write_text('name: candidate\npython_dependencies: ["candidate-dep==2"]\n')
     changed = snapshot()
-    assert not client.venv_is_current(extras=["provider-extra"], plugin_dirs=members, **root_args)
+    assert not client.venv_is_current(extras=["provider-extra"], plugins=Members(members), **root_args)
     assert snapshot() == changed
     assert selected_venv(repo) == environment
     # Corruption must not be mistaken for a missing or current environment.
@@ -156,16 +157,16 @@ def test_currency_probe_preserves_union_and_candidate_inputs(client, tmp_path, m
     facts_path.write_text(json.dumps(data))
     malformed = snapshot()
     with pytest.raises(ValueError, match="invalid recorded dependency state"):
-        client.venv_is_current(extras=[], plugin_dirs=members, **root_args)
+        client.venv_is_current(extras=[], plugins=Members(members), **root_args)
     assert snapshot() == malformed
 
 
 def _assert_worker_holds_lock(repo):
     from pm.environments import install_state_dir
-    from hermes_cli.runtime_state import _lock
+    from pm.filesystem import lock_fd
 
     with (install_state_dir(repo) / ".install.lock").open("a+b") as lock:
-        assert not _lock(lock.fileno(), wait=False), "callback escaped the worker's runtime lock"
+        assert not lock_fd(lock.fileno(), wait=False), "callback escaped the worker's runtime lock"
 
 
 @pytest.mark.parametrize("explicit", [True, False])
@@ -187,9 +188,9 @@ def test_sync_discovers_profile_members_after_worker_acquires_lock(client, tmp_p
         "    with original(project, **kwargs) as held:\n        yield held\nstate.runtime_lock = lock\n")
     with ThreadPoolExecutor() as executor:
         with runtime_lock(repo):
-            future = executor.submit(client.sync_venv, explicit=explicit, selection={
+            future = executor.submit(client.sync_venv, explicit=explicit, plugins=Selection({
                 "home": str(tmp_path / "home"), "enabled": ["plain"], "disabled": [],
-            })
+            }))
             deadline = time.monotonic() + 15
             while not ready.exists() and time.monotonic() < deadline:
                 time.sleep(0.01)
@@ -227,7 +228,7 @@ def test_lazy_disabled_sync_does_not_bootstrap_tools(client, tmp_path, monkeypat
                         lambda *a, **kw: pytest.fail("lazy-disabled sync prepared PM runtime"))
     with receipt.worker_context("lazy-disabled-sync"):
         with pytest.raises(InstallError, match="lazy installs are disabled") as caught:
-            client.sync_venv([], plugin_dirs=[])
+            client.sync_venv([], plugins=Members([]))
         result = receipt.last_for_update("lazy-disabled-sync", consume=True)
     assert caught.value.package == "pm-runtime"
     assert result is not None
@@ -241,18 +242,18 @@ def test_lazy_disabled_sync_does_not_bootstrap_tools(client, tmp_path, monkeypat
 def test_invalid_selection_waits_for_failed_receipt_and_lock_release(client, tmp_path, monkeypatch):
     import json
     from pm.environments import install_state_dir
-    from hermes_cli.runtime_state import _lock
+    from pm.filesystem import lock_fd
 
     repo = _current_environment(tmp_path, monkeypatch, [])
     home = tmp_path / "home"
     (home / "config.yaml").write_text("plugins: []\n")
     with pytest.raises(ValueError, match="plugins must be a mapping"):
-        client.sync_venv([], explicit=True, selection={"home": str(home), "enabled": [], "disabled": []})
+        client.sync_venv([], explicit=True, plugins=Selection({"home": str(home), "enabled": [], "disabled": []}))
     receipts = list((home / "logs" / "update_receipts").glob("pm_*.json"))
     assert len(receipts) == 1
     assert json.loads(receipts[0].read_text())["outcome"] == "failed"
     with (install_state_dir(repo) / ".install.lock").open("a+b") as lock:
-        assert _lock(lock.fileno(), wait=False)
+        assert lock_fd(lock.fileno(), wait=False)
 
 
 def _node_archive(server, body=b"#!/bin/sh\nexit 0\n"):
@@ -420,7 +421,7 @@ def test_worker_receipt_is_exact_even_if_latest_is_replaced(client, tmp_path, mo
 
     monkeypatch.setattr(receipt, "accept_worker_receipt", accept)
     with receipt.worker_context("my-update"):
-        client.sync_venv([], explicit=True, plugin_dirs=[])
+        client.sync_venv([], explicit=True, plugins=Members([]))
         result = receipt.last_for_update("my-update", consume=True)
     assert received and result == received[0]
     assert result["update_id"] == "my-update" and result["outcome"] == "ok"
@@ -456,7 +457,7 @@ def test_resolution_conflict_survives_worker_and_receipt(client, tmp_path, monke
                         "raise ResolutionConflict('venv', 'impossible union', 'change member')")
     with receipt.worker_context("conflict-update"):
         with pytest.raises(ResolutionConflict) as caught:
-            client.sync_venv([], explicit=True, plugin_dirs=[])
+            client.sync_venv([], explicit=True, plugins=Members([]))
         result = receipt.last_for_update("conflict-update", consume=True)
     assert (caught.value.package, caught.value.cause, caught.value.remedy) == (
         "venv", "impossible union", "change member")
@@ -482,7 +483,7 @@ def test_failed_facts_write_restores_exact_config_before_reporting(client, tmp_p
         f"    assert b'new' in Path({str(config)!r}).read_bytes()\n"
         "    raise OSError('facts disk full')\nFacts.record_state = fail\n")
     with pytest.raises(OSError, match="facts disk full"):
-        client.sync_venv(explicit=True, selection={"home": str(home), "enabled": ["new"], "disabled": []})
+        client.sync_venv(explicit=True, plugins=Selection({"home": str(home), "enabled": ["new"], "disabled": []}))
     assert config.read_bytes() == previous
     assert (install_state_dir(repo) / "facts.json").read_bytes() == facts
     assert not (install_state_dir(repo) / "publication.json").exists()
@@ -517,7 +518,7 @@ def test_foreign_checkout_sync_uses_its_own_pm_generation(client, tmp_path, monk
     client.lock_project(foreign, offline=True, explicit=True)
     assert not venv_is_current(project_root=foreign)
     original_root = paths.repo_root()
-    client.sync_venv([], project_root=foreign, plugin_dirs=[], explicit=True)
+    client.sync_venv([], project_root=foreign, plugins=Members([]), explicit=True)
     selected = selected_venv(foreign)
     assert selected != foreign / "venv"
     assert selected.is_relative_to(runtime_facts_path(foreign).parent)

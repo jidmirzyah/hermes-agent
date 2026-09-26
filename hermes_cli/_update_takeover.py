@@ -37,7 +37,9 @@ def prepare(request: dict) -> tuple[Path, dict[str, str]]:
         problems = [problem for problem in activate(allow_incomplete=True) if not problem.startswith("venv:")]
         if problems:
             raise RuntimeError(f"tools not on PATH before venv sync: {'; '.join(problems)}")
-        extras = ["all"] if not runtime_facts_path(root).is_file() else None
+        from pm.extras import legacy_selection
+
+        extras = legacy_selection(root) if not runtime_facts_path(root).is_file() else None
         repair_marker = install_state_dir(root) / ".repair-incomplete"
         # Repair preserves the old stamp. Changed source inputs instead need
         # an ordinary sync, which builds and validates a fresh generation too.

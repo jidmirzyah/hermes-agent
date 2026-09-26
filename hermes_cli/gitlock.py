@@ -388,3 +388,22 @@ def prune_stale_shallow_grafts(repo_root: Path) -> int:
     except Exception:
         logger.debug("shallow graft prune failed for %s", repo_root, exc_info=True)
         return 0
+
+
+def fetch_full_commit_graph(repo_root: Path, **run_kwargs) -> bool:
+    """Turn a shallow checkout into a treeless partial clone of ``origin``.
+
+    Version identity is the nearest reachable release tag plus the commit count since
+    it, and a shallow boundary hides both. Only commits (and the tags that follow
+    them) are fetched; trees and blobs stay on demand, so this costs a fraction of a
+    full unshallow. Returns False when the checkout was not shallow; raises
+    ``subprocess.CalledProcessError`` / ``TimeoutExpired`` when the fetch fails.
+    """
+    if _shallow_file_path(repo_root) is None:
+        return False
+    subprocess.run(
+        ["git", "fetch", "--quiet", "--unshallow", "--filter=tree:0", "origin"],
+        cwd=str(repo_root), check=True, capture_output=True, text=True,
+        encoding="utf-8", errors="replace", timeout=900, **run_kwargs,
+    )
+    return True

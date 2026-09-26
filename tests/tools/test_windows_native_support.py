@@ -1,7 +1,7 @@
 """Behavioral tests for Windows-specific compatibility fixes.
 
 Host-independent tests run everywhere; tests that need a real Windows host
-are marked ``windows_only`` (they mock only dependencies such as
+are marked ``platforms("windows")`` (they mock only dependencies such as
 ``subprocess.run`` / ``os.kill``, never ``sys.platform``).
 """
 

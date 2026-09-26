@@ -162,6 +162,22 @@ def test_ensure_import_syncs_when_missing(monkeypatch, synced, tmp_path):
     assert synced == [["fal"]]
 
 
+def test_ensure_import_respects_terminal_decline_without_installing(monkeypatch, synced):
+    import builtins
+
+    monkeypatch.setattr(extras, "available", lambda _: False)
+    monkeypatch.setattr(extras, "missing", lambda _: ["fal_client"])
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setattr(sys, "stdout", SimpleNamespace(isatty=lambda: True))
+    prompts = []
+    monkeypatch.setattr(builtins, "input", lambda text: prompts.append(text) or "n")
+    with pytest.raises(pm.InstallError, match="declined"):
+        extras.ensure_import("fal")
+    # Users know the feature, not the Python modules behind it.
+    assert "'fal' feature" in prompts[0] and "fal_client" not in prompts[0]
+    assert synced == []
+
+
 def test_ensure_import_propagates_install_error(monkeypatch):
     def boom(x=None):
         raise pm.InstallError("venv", "lazy installs are disabled")
@@ -200,3 +216,38 @@ def test_every_anchor_extra_exists_in_pyproject():
     declared = set(py["project"]["optional-dependencies"])
     orphans = set(extras.ANCHORS) - declared
     assert not orphans, f"ANCHORS names extras pyproject does not declare: {sorted(orphans)}"
+
+
+def test_legacy_selection_carries_extras_the_main_era_venv_lazily_installed(monkeypatch, tmp_path):
+    """Migrating a main-era venv must keep opt-in extras it already had (FAL
+    image generation, a messaging SDK), or the first PM launch prompts to
+    reinstall them. Umbrella and gated-off extras are never carried."""
+    monkeypatch.setattr(extras, "_PLATFORM_GATES", {"piper": "python_version < '0'"})
+    site = tmp_path / "venv" / "lib" / "python3.11" / "site-packages"
+    (site / "fal_client").mkdir(parents=True)
+    (site / "telegram").mkdir()
+    (site / "piper").mkdir()
+    (site / "google").mkdir()
+    (site / "google" / "auth").mkdir()
+    (site / "exa_py.cpython-311-x86_64-linux-gnu.so").write_bytes(b"")
+
+    selection = extras.legacy_selection(tmp_path)
+
+    assert selection[0] == "all"
+    assert {"fal", "telegram", "vertex", "exa"} <= set(selection)
+    assert "messaging" not in selection
+    assert "piper" not in selection
+    assert extras.legacy_selection(tmp_path / "no-venv") == ["all"]
+
+
+def test_runtime_marker_evaluation_answers_for_the_given_environment():
+    """The delegate really evaluates the marker (in PM's runtime interpreter)."""
+    import subprocess
+    from pathlib import Path
+
+    helper = Path(extras.__file__).with_name("_marker_eval.py")
+    env = '{"sys_platform": "linux"}'
+    out = [subprocess.run([sys.executable, str(helper), marker, env], capture_output=True,
+                          text=True, timeout=60, check=True).stdout.strip()
+           for marker in ("sys_platform == 'linux'", "sys_platform == 'win32'")]
+    assert out == ["1", "0"]

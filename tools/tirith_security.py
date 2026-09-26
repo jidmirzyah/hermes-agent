@@ -229,6 +229,24 @@ def ensure_installed(*, log_failures: bool = True, explicit: bool = False):
     return None
 
 
+def missing_is_expected() -> bool:
+    """Whether an unresolved default tirith is by design rather than a fault.
+
+    The first launch after a PM install starts the download in the background,
+    and a lazy-install policy refusal is the operator's choice; neither is
+    actionable. A missing explicit ``tirith_path`` always is.
+    """
+    import pm
+
+    configured = _load_security_config()["tirith_path"]
+    if configured != "tirith":
+        return False
+    thread = _install_threads.get(hermes_home_key())
+    if thread is not None and thread.is_alive():
+        return True
+    return _local_tirith(configured) is not None or not pm.lazy_installs_allowed()
+
+
 # --- Main API ---
 _MAX_FINDINGS = 50
 _MAX_SUMMARY_LEN = 500

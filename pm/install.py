@@ -16,6 +16,7 @@ from pm import paths
 from pm.downloader import DownloadPaused, ProgressFn
 from pm.lock import Facts, Lockfile
 from pm.package import InstallError, Package, Runner, StatePackage, compose_env
+from pm.plugin_inputs import Candidates, Members, PluginInput, Selection, StagedUpdate
 from pm.registry import get_package, walk
 from pm.store import Store, current_target, merge_tree, tree_digest
 
@@ -259,6 +260,54 @@ def _publish_entry(package, store, staged, entry, previous_entry, target):
         _remove_entry(store, previous_entry.name)
 
 
+def _settle_previous_entry(package, store, entry, previous_entry, previous, target) -> None:
+    """Finish or undo a publication an earlier install left behind."""
+    if not previous_entry.exists():
+        return
+    # Facts commit last. Stages have no host-side commit record, so
+    # an interrupted stage always restores its prior usable bytes.
+    if (previous and previous.get("entry") == entry.name
+            and _entry_verified(package, previous, store, target)):
+        _remove_entry(store, previous_entry.name)
+    else:
+        _restore_previous_entry(store, entry, previous_entry)
+
+
+def _entry_current(package, lockfile, facts, store, entry, previous, version, pin, target) -> bool:
+    if facts is not None:
+        return previous is not None and facts.installed(
+            package.name, version, store.root, _identity(lockfile, package.name, target)
+        ) and _entry_verified(package, previous, store, target)
+    try:
+        recorded = (entry / ".pm-stage-pin.json").read_text(encoding="utf-8-sig")
+    except OSError:
+        recorded = None
+    return recorded == pin and not package.verify(entry, target)
+
+
+def _copy_verified_source(package, lockfile, copy_from, staged, version, target) -> None:
+    source_facts, source_store = copy_from
+    source = source_facts.get(package.name)
+    if (not source_facts.installed(package.name, version, source_store.root,
+                                   _identity(lockfile, package.name, target))
+            or not _entry_verified(package, source, source_store, target)):
+        raise InstallError(package.name, "bundled copy source failed verification")
+    shutil.copytree(source_store.entry(source["entry"]), staged, symlinks=True)
+    if tree_digest(staged) != source["digest"]:
+        raise InstallError(package.name, "copied bytes do not match the bundled source")
+
+
+def _log_repair(package, previous, version, artifacts) -> None:
+    """Work item 6: replacing an ESTABLISHED fact is a repair — log it,
+    no transaction system, no receipt file."""
+    if not previous or "entry" not in previous:
+        return
+    old_artifact = (previous.get("artifacts") or ["?"])[0]
+    old = f"{previous.get('version', '?')}/{str(old_artifact)[:12]}"
+    new = f"{version}/{artifacts[0]['sha256'][:12]}" if artifacts else version
+    LOG.info("repair: %s re-realized %s -> %s", package.name, old, new)
+
+
 def _install(
     package: Package,
     lockfile: Lockfile,
@@ -298,25 +347,9 @@ def _install(
             facts.reload()
         previous = facts.get(package.name) if facts is not None else None
         previous_entry = store.entry(f".previous-{'stage-' if facts is None else ''}{entry_name}")
-        if previous_entry.exists():
-            # Facts commit last. Stages have no host-side commit record, so
-            # an interrupted stage always restores its prior usable bytes.
-            if (previous and previous.get("entry") == entry_name
-                    and _entry_verified(package, previous, store, target)):
-                _remove_entry(store, previous_entry.name)
-            else:
-                _restore_previous_entry(store, entry, previous_entry)
-        if facts is not None:
-            current = previous is not None and facts.installed(
-                package.name, version, store.root, _identity(lockfile, package.name, target)
-            ) and _entry_verified(package, previous, store, target)
-        else:
-            try:
-                recorded = (entry / ".pm-stage-pin.json").read_text(encoding="utf-8-sig")
-            except OSError:
-                recorded = None
-            current = recorded == pin and not package.verify(entry, target)
-        if current and not _fresh_copy:
+        _settle_previous_entry(package, store, entry, previous_entry, previous, target)
+        if (_entry_current(package, lockfile, facts, store, entry, previous, version, pin, target)
+                and not _fresh_copy):
             _remove_downloads(store, artifacts)
             return entry
         if not artifacts:
@@ -329,15 +362,7 @@ def _install(
             staged = scratch / "tree"
             try:
                 if copy_from is not None:
-                    source_facts, source_store = copy_from
-                    source = source_facts.get(package.name)
-                    if (not source_facts.installed(package.name, version, source_store.root,
-                                                   _identity(lockfile, package.name, target))
-                            or not _entry_verified(package, source, source_store, target)):
-                        raise InstallError(package.name, "bundled copy source failed verification")
-                    shutil.copytree(source_store.entry(source["entry"]), staged, symlinks=True)
-                    if tree_digest(staged) != source["digest"]:
-                        raise InstallError(package.name, "copied bytes do not match the bundled source")
+                    _copy_verified_source(package, lockfile, copy_from, staged, version, target)
                 else:
                     staged = _prepare_artifacts(package, store, scratch, artifacts, version, target,
                                                 progress=progress, pause_event=pause_event,
@@ -364,17 +389,7 @@ def _install(
             except Exception as e:
                 raise InstallError(package.name, f"install failed: {e}") from e
 
-        if previous and "entry" in previous:
-            # Work item 6: replacing an ESTABLISHED fact is a repair —
-            # log it, no transaction system, no receipt file.
-            old_artifact = (previous.get("artifacts") or ["?"])[0]
-            old = f"{previous.get('version', '?')}/{str(old_artifact)[:12]}"
-            new = (
-                f"{version}/{artifacts[0]['sha256'][:12]}"
-                if artifacts
-                else version
-            )
-            LOG.info("repair: %s re-realized %s -> %s", package.name, old, new)
+        _log_repair(package, previous, version, artifacts)
     return entry
 
 
@@ -514,7 +529,20 @@ def _runtime_state_matches(fact: dict, stamp: str, *, project_root: Path | None 
     return (environment / "pyvenv.cfg").is_file()
 
 
-def venv_is_current(*, extras: list[str] | None = None, plugin_dirs=None, extra_plugin_dirs=(),
+def _member_inputs(plugins: PluginInput | None) -> dict:
+    """The ``plugin_dirs`` argument of the venv package; empty means config discovery."""
+    from pm.publication import candidate_members
+
+    if isinstance(plugins, Candidates):
+        return {"plugin_dirs": candidate_members(plugins.dirs)}
+    if isinstance(plugins, Members):
+        return {"plugin_dirs": plugins.dirs}
+    if plugins is None:
+        return {}
+    raise TypeError(f"{type(plugins).__name__} changes plugin state; only a sync may carry it")
+
+
+def venv_is_current(*, extras: list[str] | None = None, plugins: Members | Candidates | None = None,
                     project_root: Path | None = None) -> bool:
     """Probe the requested union without changing recorded dependency state."""
     from pm.environments import runtime_facts_path
@@ -532,23 +560,136 @@ def venv_is_current(*, extras: list[str] | None = None, plugin_dirs=None, extra_
             or any(not isinstance(extra, str) for extra in fact["extras"])):
         raise ValueError("invalid recorded dependency state")
     enabled = sorted(set(fact["extras"]) | set(extras or []))
-    from pm.publication import candidate_members
-    if extra_plugin_dirs and plugin_dirs is not None:
-        raise ValueError("additional candidates require member discovery")
-    members = candidate_members(extra_plugin_dirs) if extra_plugin_dirs else plugin_dirs
-    inputs = {} if members is None else {"plugin_dirs": members}
-    stamp = package.expected_stamp(enabled, **inputs)
+    stamp = package.expected_stamp(enabled, **_member_inputs(plugins))
     return _runtime_state_matches(fact, stamp, project_root=root)
 
 
-def sync_venv(extras: Optional[list[str]] = None, *, explicit: bool = False, plugin_dirs=None, extra_plugin_dirs=(), selection=None, staged_plugin=None, repair: bool = False) -> None:
+def _feature_policy(extras: Optional[list[str]], *, repair: bool) -> tuple[list[str] | None, list[str] | None]:
+    """Refuse extras this platform or a frozen bundle cannot carry; return (shipped, frozen)."""
+    from pm.features import read_features
+
+    if extras:
+        from pm.extras import extra_supported
+        unsupported = [extra for extra in extras
+                       if not extra_supported(extra, importable=lambda _: False)]
+        if unsupported:
+            raise InstallError("venv", f"extras {unsupported} are not supported by this Python/platform",
+                               "choose a supported provider; no dependency environment was changed")
+    shipped = read_features()
+    frozen = shipped
+    # Without a frozen declaration, explicit source setup needs no policy
+    # read: the config loader initializes/chmods unrelated user state.
+    if frozen is not None and not repair and lazy_installs_allowed():
+        frozen = None
+    if frozen is not None and extras:
+        outside = sorted(set(extras) - set(frozen))
+        if outside:
+            raise _refuse_lazy(
+                "venv",
+                f"extras {outside} are outside this bundle's frozen feature "
+                "set (security.allow_lazy_installs is false)",
+            )
+    return shipped, frozen
+
+
+@contextmanager
+def _venv_install_lock(*, patient: bool):
+    """Hold the dependency lock, or refuse when an impatient caller would queue."""
+    from pm import receipt
+    from hermes_cli.runtime_state import INSTALL_LOCK_TIMEOUT_SECONDS, runtime_lock
+
+    # Holding this lock means rebuilding the whole dependency environment, which takes tens of
+    # seconds on a bundle. Only an install the user asked for may queue for it; an opportunistic
+    # one (a lazy extra at first use, the only non-explicit caller) refuses instead of holding
+    # a sibling profile's backend off its port behind a rebuild it did not request.
+    with runtime_lock(paths.repo_root(), timeout=None if patient else INSTALL_LOCK_TIMEOUT_SECONDS) as held:
+        if not held:
+            error = InstallError(
+                "venv",
+                f"another Hermes process is installing dependencies (waited {INSTALL_LOCK_TIMEOUT_SECONDS:.0f}s)",
+                "retry in a moment, or run `hermes pm install` to install explicitly",
+            )
+            receipt.record_refusal("install-busy", str(error))
+            raise error
+        yield
+
+
+def _publication(plugins: PluginInput | None):
+    """Snapshot a plugin state change under the held lock, or None for member-only inputs."""
+    from pm.publication import PluginSelection, StagedPlugin
+
+    if isinstance(plugins, Selection):
+        return PluginSelection(dict(plugins.data))
+    if isinstance(plugins, StagedUpdate):
+        return StagedPlugin(dict(plugins.data))
+    return None
+
+
+def _publish_inactive(change) -> None:
+    """A disabled plugin's code changes without touching the dependency environment."""
+    from pm import receipt
+    from hermes_cli.runtime_state import finish_publication, recover_publication
+
+    try:
+        change.publish(paths.repo_root())
+        finish_publication(paths.repo_root())
+    except BaseException:
+        recover_publication(paths.repo_root())
+        raise
+    receipt.record_venv_rebuild(False, "inactive plugin")
+
+
+def _target_selection(package, fact: dict, *, extras, inputs: dict, repair: bool, shipped, frozen):
+    """Return (enabled extras, expected stamp, package inputs) this sync must reach."""
+    if repair:
+        if fact and (not isinstance(fact.get("extras"), list)
+                     or any(not isinstance(extra, str) for extra in fact["extras"])
+                     or not isinstance(fact.get("stamp"), str) or not fact["stamp"]):
+            raise InstallError("venv", "recorded dependency selection is incomplete; refusing to change its graph")
+        enabled = list(fact.get("extras", frozen if frozen is not None else ["all"]))
+        stamp = fact.get("stamp") or package.expected_stamp(enabled, plugin_dirs=[])
+        return enabled, stamp, {"repair": True}
+    # The first writable generation replaces, rather than layers on,
+    # the payload. Retain its extras until a recorded selection owns them.
+    enabled = sorted(set(fact.get("extras", shipped or [])) | set(extras or []))
+    return enabled, package.expected_stamp(enabled, **inputs), inputs
+
+
+def _commit_selection(package, facts: Facts, change, *, enabled: list[str], stamp: str, inputs: dict,
+                      current: bool, repair: bool, explicit: bool) -> None:
+    """Build (unless current), publish the plugin change, then record the selection."""
+    from pm import receipt
+    from hermes_cli.runtime_state import finish_publication, recover_publication
+
+    try:
+        result = {} if current else (package.apply(enabled, explicit=explicit, **inputs) or {})
+        if not repair and package.expected_stamp(enabled, **inputs) != stamp:
+            raise ValueError("Dependency inputs changed while preparing publication; retry.")
+        if change is not None:
+            change.publish(paths.repo_root())
+        if not current:
+            if result.get("environment") is not None:
+                from pm.environments import flush_before_selecting
+                flush_before_selecting()
+            facts.record_state("venv", stamp, enabled, **result)
+        if change is not None:
+            finish_publication(paths.repo_root())
+        receipt.record_venv_rebuild(not current, "already in sync" if current else "")
+    except BaseException:
+        recover_publication(paths.repo_root())
+        raise
+
+
+def sync_venv(extras: Optional[list[str]] = None, *, explicit: bool = False,
+              plugins: PluginInput | None = None, repair: bool = False) -> None:
     """Make the venv match uv.lock + the enabled extras. Extras union into
     the installed state (one ledger); no-op when the stamp already matches.
     ``repair`` restores the recorded dependency graph into a fresh generation,
     bypassing both that shortcut and config discovery. It cannot add features.
     ``explicit`` marks a deliberate install command (`hermes pm install`,
     `hermes update`) — those are the remedy the lazy-install policy points
-    at, so the policy does not apply to them.
+    at, so the policy does not apply to them. ``plugins`` names the one
+    source of plugin members (see pm.plugin_inputs); None discovers them from config.
 
     Lazy installs OFF = the frozen feature set: when
     security.allow_lazy_installs is false AND the bundle's
@@ -563,104 +704,33 @@ def sync_venv(extras: Optional[list[str]] = None, *, explicit: bool = False, plu
     a receipt. Plugin selection data is discovered and published by the worker
     under this lock; no executable transaction phases cross the process boundary."""
     from pm import receipt
-    from pm.features import read_features
 
     token = receipt.begin("sync")
     outcome = "failed"
     try:
-        if repair and (extras is not None or plugin_dirs is not None or selection is not None or staged_plugin is not None or extra_plugin_dirs):
+        if repair and (extras is not None or plugins is not None):
             raise ValueError("repair restores the recorded environment; it cannot change features or plugins")
-        if extras:
-            from pm.extras import extra_supported
-            unsupported = [extra for extra in extras
-                           if not extra_supported(extra, importable=lambda _: False)]
-            if unsupported:
-                raise InstallError("venv", f"extras {unsupported} are not supported by this Python/platform",
-                                   "choose a supported provider; no dependency environment was changed")
-        shipped = read_features()
-        frozen = shipped
-        # Without a frozen declaration, explicit source setup needs no policy
-        # read: the config loader initializes/chmods unrelated user state.
-        if frozen is not None and not repair and lazy_installs_allowed():
-            frozen = None
-        if frozen is not None and extras:
-            outside = sorted(set(extras) - set(frozen))
-            if outside:
-                raise _refuse_lazy(
-                    "venv",
-                    f"extras {outside} are outside this bundle's frozen feature "
-                    "set (security.allow_lazy_installs is false)",
-                )
-
+        shipped, frozen = _feature_policy(extras, repair=repair)
         package = get_package("venv")
-        from hermes_cli.runtime_state import (
-            INSTALL_LOCK_TIMEOUT_SECONDS, runtime_lock, recover_publication, finish_publication)
-        from pm.publication import PluginSelection, StagedPlugin, candidate_members
-        # Holding this lock means rebuilding the whole dependency environment, which takes tens of
-        # seconds on a bundle. Only an install the user asked for may queue for it; an opportunistic
-        # one (a lazy extra at first use, the only non-explicit caller) refuses instead of holding
-        # a sibling profile's backend off its port behind a rebuild it did not request.
-        lock_timeout = None if (explicit or repair) else INSTALL_LOCK_TIMEOUT_SECONDS
-        with runtime_lock(paths.repo_root(), timeout=lock_timeout) as held:
-            if not held:
-                error = InstallError(
-                    "venv",
-                    f"another Hermes process is installing dependencies (waited {INSTALL_LOCK_TIMEOUT_SECONDS:.0f}s)",
-                    "retry in a moment, or run `hermes pm install` to install explicitly",
-                )
-                receipt.record_refusal("install-busy", str(error))
-                raise error
+        from hermes_cli.runtime_state import recover_publication
+        from pm.publication import StagedPlugin
+        with _venv_install_lock(patient=explicit or repair):
             recover_publication(paths.repo_root())
-            if sum(value is not None for value in (selection, staged_plugin, plugin_dirs)) + bool(extra_plugin_dirs) > 1:
-                raise ValueError("publication owns plugin member discovery")
-            change = (PluginSelection(selection) if selection is not None else
-                      StagedPlugin(staged_plugin) if staged_plugin is not None else None)
+            change = _publication(plugins)
             if isinstance(change, StagedPlugin) and not change.active:
-                try:
-                    change.publish(paths.repo_root())
-                    finish_publication(paths.repo_root())
-                except BaseException:
-                    recover_publication(paths.repo_root())
-                    raise
-                receipt.record_venv_rebuild(False, "inactive plugin")
-                outcome = "ok"
-                return
-            members = (change.members if change is not None else
-                       candidate_members(extra_plugin_dirs) if extra_plugin_dirs else plugin_dirs)
-            inputs = {} if members is None else {"plugin_dirs": members}
-            facts = Facts(paths.runtime_facts_path(), strict=repair)
-            fact = facts.get("venv") or _facts().get("venv") or {}
-            if repair:
-                if fact and (not isinstance(fact.get("extras"), list)
-                             or any(not isinstance(extra, str) for extra in fact["extras"])
-                             or not isinstance(fact.get("stamp"), str) or not fact["stamp"]):
-                    raise InstallError("venv", "recorded dependency selection is incomplete; refusing to change its graph")
-                enabled = list(fact.get("extras", frozen if frozen is not None else ["all"]))
-                stamp = fact.get("stamp") or package.expected_stamp(enabled, plugin_dirs=[])
-                inputs = {"repair": True}
+                _publish_inactive(change)
             else:
-                # The first writable generation replaces, rather than layers on,
-                # the payload. Retain its extras until a recorded selection owns them.
-                enabled = sorted(set(fact.get("extras", shipped or [])) | set(extras or []))
-                stamp = package.expected_stamp(enabled, **inputs)
-            if not repair and not explicit and not lazy_installs_allowed() and not _runtime_state_matches(fact, stamp):
-                raise _refuse_lazy("venv", str(extras) if extras else "venv out of sync")
-            current = not repair and _runtime_state_matches(fact, stamp)
-            receipt.record_feature_list(enabled)
-            try:
-                result = {} if current else (package.apply(enabled, explicit=explicit, **inputs) or {})
-                if not repair and package.expected_stamp(enabled, **inputs) != stamp:
-                    raise ValueError("Dependency inputs changed while preparing publication; retry.")
-                if change is not None:
-                    change.publish(paths.repo_root())
-                if not current:
-                    facts.record_state("venv", stamp, enabled, **result)
-                if change is not None:
-                    finish_publication(paths.repo_root())
-                receipt.record_venv_rebuild(not current, "already in sync" if current else "")
-            except BaseException:
-                recover_publication(paths.repo_root())
-                raise
+                inputs = {"plugin_dirs": change.members} if change is not None else _member_inputs(plugins)
+                facts = Facts(paths.runtime_facts_path(), strict=repair)
+                fact = facts.get("venv") or _facts().get("venv") or {}
+                enabled, stamp, inputs = _target_selection(package, fact, extras=extras, inputs=inputs,
+                                                           repair=repair, shipped=shipped, frozen=frozen)
+                current = not repair and _runtime_state_matches(fact, stamp)
+                if not current and not repair and not explicit and not lazy_installs_allowed():
+                    raise _refuse_lazy("venv", str(extras) if extras else "venv out of sync")
+                receipt.record_feature_list(enabled)
+                _commit_selection(package, facts, change, enabled=enabled, stamp=stamp, inputs=inputs,
+                                  current=current, repair=repair, explicit=explicit)
         outcome = "ok"
     except BaseException as exc:
         receipt.record_step("dependency-sync", False, f"{type(exc).__name__}: {exc}")

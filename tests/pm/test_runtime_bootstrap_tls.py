@@ -56,11 +56,11 @@ print(result.stdout)
     result = subprocess.run(command, cwd=tmp_path, env=env, capture_output=True, text=True, timeout=180)
     assert result.returncode == 0, result.stdout + result.stderr
     assert Path(json.loads(result.stdout)["tls"]).is_relative_to(home)
-    assert "Preparing the isolated PM runtime" in result.stderr
+    assert "Preparing the isolated Hermes runtime" in result.stderr
     assert "must-not-fetch.invalid" not in result.stderr
     warm = subprocess.run(command, cwd=tmp_path, env=env, capture_output=True, text=True, timeout=30)
     assert warm.returncode == 0, warm.stdout + warm.stderr
-    assert "Preparing the isolated PM runtime" not in warm.stderr
+    assert "Preparing the isolated Hermes runtime" not in warm.stderr
     assert warm.stdout == result.stdout
     assert not (store / "facts.json").exists(), "preparing PM must not realize its tool closure"
     assert not list(store.glob("python-*"))
@@ -175,3 +175,13 @@ raise SystemExit(module['main']())
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+def test_importing_launch_does_not_patch_ssl_context():
+    import subprocess
+    import sys
+
+    from pm.paths import repo_root
+    child = subprocess.run(
+        [sys.executable, "-c", "import ssl; original = ssl.SSLContext; import pm.launch; assert ssl.SSLContext is original"],
+        cwd=repo_root(), capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert child.returncode == 0, child.stderr

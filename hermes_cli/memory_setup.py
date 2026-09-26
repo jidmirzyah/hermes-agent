@@ -55,6 +55,7 @@ def memory_provider_dependency_inputs(provider_name: str) -> tuple[dict, dict]:
     """Read one candidate declaration for preparation and passive readiness."""
     from hermes_cli.plugins_cmd import PluginOperationError, _read_manifest_for_install
     from pm.package import InstallError
+    from pm.plugin_inputs import Candidates
     from pm.workspace import _is_member_candidate
     from plugins.memory import find_provider_dir
 
@@ -73,7 +74,7 @@ def memory_provider_dependency_inputs(provider_name: str) -> tuple[dict, dict]:
         return meta, {}
 
     # Without a proposed home, selection retains every configured member.
-    inputs = {"extra_plugin_dirs": [plugin_dir]} if member else {}
+    inputs = {"plugins": Candidates([plugin_dir])} if member else {}
     return meta, {"extras": extras, **inputs}
 
 

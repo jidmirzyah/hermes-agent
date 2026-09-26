@@ -107,8 +107,10 @@ def store_root(project_root: Path) -> Path:
             if not store.is_relative_to(root.parent):
                 raise RuntimeError("payload store escapes its root")
             return store
+    from pm.paths import install_stamp_path
+
     for directory in (root, *root.parents):
-        stamp = directory / "install-stamp.json"
+        stamp = install_stamp_path(directory)
         if stamp.is_file():
             try:
                 data = json.loads(stamp.read_text(encoding="utf-8-sig"))
@@ -119,11 +121,36 @@ def store_root(project_root: Path) -> Path:
     return get_default_hermes_root() / "tools"
 
 
+def flush_before_selecting() -> None:
+    """Make a finished generation tree durable before a selection record names it.
+
+    The selection record (the install's facts.json, a side environment's
+    active.json) is written last, atomically and fsynced, so it doubles as the
+    generation's completion marker -- but only if every file it vouches for
+    reached the disk first. Otherwise a power loss can persist the record while
+    the tree's data is still in the page cache, selecting a half-written venv.
+    One filesystem-wide sync instead of an fsync per file: a venv holds tens of
+    thousands of files, and per-file flushes cost minutes on slow disks.
+
+    Windows has no whole-filesystem flush reachable from Python (os.sync does
+    not exist there), and FlushFileBuffers per file is the slow path rejected
+    above. There the record's atomic write is the only guarantee: it is never
+    torn, but NTFS journals metadata, not file contents, so power loss right
+    after a publish can still leave the selected tree with incomplete files.
+    """
+    sync = getattr(os, "sync", None)
+    if sync is not None:
+        sync()
+
+
 def selected_venv(project_root: Path) -> Path:
     """Use the committed environment, or the original install before first sync.
 
     A broken committed selection is an error, not permission to load an older
     dependency set silently. Reading this function never creates user state.
+    The record itself is the completion marker: it is only written after
+    ``flush_before_selecting``, so the ``pyvenv.cfg`` probe below is a sanity
+    check against a vanished tree, not the durability guarantee.
     """
     path = runtime_facts_path(project_root)
     try:

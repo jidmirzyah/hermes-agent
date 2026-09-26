@@ -68,7 +68,7 @@ def _fake_project_root(monkeypatch, tmp_path: Path, *, git: bool, distribution: 
     if git:
         (root / ".git").mkdir()
     if distribution is not None:
-        # The code-scoped stamp (see hermes_cli.steward.BUILD_INFO_NAME).
+        # The code-scoped stamp (see pm.paths.install_stamp_path).
         (root / "install-stamp.json").write_text(
             json.dumps({"distribution": distribution, "updateMechanism": "external"})
         , encoding="utf-8")

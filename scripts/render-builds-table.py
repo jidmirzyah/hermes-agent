@@ -53,7 +53,7 @@ from urllib.parse import quote
 # Direct-script invocation starts with scripts/, not the repository root.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from scripts.releases import handoff, r2, semver, stable  # noqa: E402
+from scripts.releases import handoff, r2, semver, stable, versioning  # noqa: E402
 
 MARKER = "<!-- HERMES_BUILDS_TABLE -->"
 END_MARKER = "<!-- /HERMES_BUILDS_TABLE -->"
@@ -198,8 +198,8 @@ _COMMIT_DISABLED = ["Linux x64 (AppImage)", "Linux ARM64 (AppImage)"]
 
 COMMIT_RECEIPT_NAMES = sorted({leg for _label, leg, _pattern in _COMMIT_EXPECTED})
 _COMMIT_JOBS = {
-    "win32-x64": "build-win32", "win32-arm64": "build-win32",
-    "darwin-x64": "build-darwin", "darwin-arm64": "build-darwin",
+    "win32-x64": "build-win32-x64", "win32-arm64": "build-win32-arm64",
+    "darwin-x64": "build-darwin-x64", "darwin-arm64": "build-darwin-arm64",
     "windows-universal": "assemble-win32-bundle", "termux": "termux-deb",
 }
 
@@ -409,6 +409,13 @@ def render_page(tag: str, assets_by_app: dict, base_url: str,
         f"<p>Release {_link(tag_url)}<code>{html.escape(tag)}</code></a>. Only objects this release "
         "actually staged in the bucket are listed.</p>",
     ]
+    attempt = versioning.parse_attempt_ref(tag)
+    if attempt is not None:
+        version = attempt[0]
+        body.append("<p><strong>"
+                    + html.escape(f"Attempt builds are not upgrade-safe: every attempt of {version} has the same "
+                                  f"package version, so an installed attempt is not replaced by the published {version}.")
+                    + "</strong></p>")
     if incomplete_jobs:
         body.append("<p><strong>Build incomplete.</strong> Jobs not successful: "
                     + html.escape(", ".join(incomplete_jobs))
@@ -546,10 +553,14 @@ def r2_object_names_under(prefix: str) -> list[str]:
 def r2_object_names(tag: str) -> list[str]:
     """Object keys in the R2 staging dir for `tag`, under releases/tag/<tag>/.
 
-    A tag prefix and exact version match exclude neighboring releases.
+    A tag prefix and exact version match exclude neighboring releases. An
+    attempt ref filters by its plain version, which is what file names carry.
     """
+    from scripts.releases.versioning import parse_attempt_ref
+
     keys = r2_object_names_under(f"releases/tag/{tag}/")
-    return filter_names_for_version(keys, tag.lstrip("v"))
+    parsed = parse_attempt_ref(tag)
+    return filter_names_for_version(keys, parsed[0] if parsed else tag.lstrip("v"))
 
 
 def splice(body: str, block: str) -> str:
@@ -584,6 +595,8 @@ def main() -> int:
     parser.add_argument("--channel-build")
     parser.add_argument("--channel-request-sha256")
     parser.add_argument("--tag", required=False, help="Release tag to render the release-body table for")
+    parser.add_argument("--archive", default=None,
+                        help="Attempt ref of the release archive when --tag is the plain payload tag")
     parser.add_argument("--candidate-manifest-sha256", default=None,
                         help="Stable promotion: render smoke admission from this pinned candidate, not RELEASE_NEEDS")
     parser.add_argument("--candidate-commit", default=None,
@@ -621,6 +634,9 @@ def main() -> int:
 
     if args.summary_commit and (args.tag or args.pending_run_url):
         parser.error("--summary-commit cannot be combined with release-body arguments")
+    # The archive ref (attempt ref for stable attempts) keys every object the
+    # page lists and writes; the payload tag names the GitHub release body.
+    archive = args.archive or args.tag
 
     if args.channel_build:
         from hermes_cli.release_channels import ChannelReader
@@ -641,7 +657,7 @@ def main() -> int:
                 or not args.tag or not args.r2_base_url or args.summary_commit or args.pending_run_url):
             parser.error("Candidate rendering requires tag, base URL, manifest SHA256 and commit; no summary or pending mode")
         candidate = stable.read_admitted_candidate(args.tag, args.candidate_commit, args.r2_base_url,
-                                                   args.candidate_manifest_sha256)
+                                                   args.candidate_manifest_sha256, archive=archive)
         smoke_results = candidate["smoke_results"]
 
     if args.summary_commit:
@@ -689,9 +705,9 @@ def main() -> int:
         if not args.r2_base_url:
             print("::error::--r2-base-url (or CLOUDFLARE_R2_PUBLIC_URL) is required to render the tables")
             return 1
-        names = r2_object_names(args.tag)
+        names = r2_object_names(archive)
         if candidate is not None:
-            admitted = {r2.staging_key_for(args.tag, item["path"]) for item in candidate["files"]}
+            admitted = {r2.staging_key_for(archive, item["path"]) for item in candidate["files"]}
             names = [name for name in names if name in admitted]
         assets = parse_assets(names)
         incomplete = [] if candidate is not None else incomplete_release_jobs(os.environ.get("RELEASE_NEEDS"))
@@ -699,8 +715,8 @@ def main() -> int:
         # A failed run still owns its tag page, never the channel pointer
         # consumed by source updates. Missing artifacts never become downloads.
         if not args.dry_run:
-            write_page(r2.staging_key_for(args.tag, "index.html"),
-                       render_page(args.tag, assets, args.r2_base_url, incomplete, args.run_url,
+            write_page(r2.staging_key_for(archive, "index.html"),
+                       render_page(archive, assets, args.r2_base_url, incomplete, args.run_url,
                                    repo=args.repo, smoke_results=smoke_results), args.r2_base_url)
 
     # Keep the per-tag diagnostic page even when GitHub cannot supply a draft.

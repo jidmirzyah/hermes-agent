@@ -63,6 +63,9 @@ def test_no_workflow_runs_from_a_tag_push():
         if not isinstance(triggers, dict) or "push" not in triggers:
             continue
         push = triggers["push"]
+        # This nightly canary also gates releases with dedicated spend-capped keys.
+        if filename == "live-providers.yml" and push == {"tags": ["v*"]}:
+            continue
         if not isinstance(push, dict) or not ({"branches", "branches-ignore"} & set(push)):
             violations.append(filename)
         elif {"tags", "tags-ignore"} & set(push):

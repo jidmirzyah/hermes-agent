@@ -9,19 +9,11 @@ import sys
 import threading
 import uuid
 
-from pm import paths
+from pm import paths, plugin_inputs
 from pm.package import InstallError, Runner, StatePackage
+from pm.plugin_inputs import Candidates, Members, PluginInput, Selection
 from pm.runtime import is_runtime, runtime_command, runtime_environment
 from pm.worker_operations import OPERATIONS
-
-
-def _members(value):
-    if value is None:
-        return None
-    if isinstance(value, Mapping):
-        return {"sources": [[str(Path(key).absolute()), str(Path(source).absolute())]
-                            for key, source in value.items()]}
-    return {"paths": [str(Path(path).absolute()) for path in value]}
 
 
 def _missing_or_refuse(name):
@@ -34,10 +26,71 @@ def _missing_or_refuse(name):
     return missing
 
 
+def _refuse_cold_runtime(cold: InstallError, arguments) -> InstallError:
+    """Record a lazy sync refused because PM's own runtime is missing; return the error to raise."""
+    from pm import receipt
+
+    exc = cold
+    if arguments.get("extras"):
+        # The user asked for an extra, not for PM's own runtime: name
+        # the command that provisions both.
+        from pm.extras import install_hint
+
+        exc = InstallError(cold.package, f"{cold.cause} while enabling {list(arguments['extras'])}",
+                           "run `" + "`, `".join(install_hint(extra) for extra in arguments["extras"]) + "`")
+    token = receipt.begin("sync")
+    try:
+        receipt.record_refusal("lazy-install", str(exc))
+        receipt.record_step("dependency-sync", False, f"{type(exc).__name__}: {exc}")
+    finally:
+        receipt.finalize("failed", 1, token=token)
+    return exc
+
+
+def _worker_command(spec, arguments, worker: Path, environment: dict) -> list[str]:
+    """How to start the worker; may disable lazy installs in *environment*."""
+    from pm.install import lazy_installs_allowed
+    from pm.registry import get_package
+
+    # Bootstrap precedes dispatch and must share the operation's selected cache.
+    cache = Path(arguments["cache"]) if arguments.get("cache") is not None else None
+    state_sync = spec.bootstrap == "policy" or (
+        spec.bootstrap == "state" and isinstance(get_package(arguments["name"]), StatePackage))
+    if (state_sync and not arguments.get("explicit") and not arguments.get("repair")
+            and not lazy_installs_allowed()):
+        # A ready PM still decides no-op/refusal under its install lock. A cold
+        # PM is itself a missing prerequisite, not permission to bootstrap tools.
+        try:
+            command = runtime_command(worker, bootstrap=False, cache=cache)
+        except InstallError as cold:
+            raise _refuse_cold_runtime(cold, arguments) from None
+        environment["HERMES_DISABLE_LAZY_INSTALLS"] = "1"
+        return command
+    if spec.bootstrap == "never":
+        return runtime_command(worker, bootstrap=False, cache=cache)
+    return runtime_command(worker, cache=cache)
+
+
+_WORKER_ERRORS = {"ValueError": ValueError, "TypeError": TypeError, "KeyError": KeyError,
+                  "OSError": OSError, "FileExistsError": FileExistsError,
+                  "FileNotFoundError": FileNotFoundError, "PermissionError": PermissionError}
+
+
+def _raise_worker_error(error: dict):
+    """Re-raise a worker failure as the caller-side exception it names."""
+    if "package" in error:
+        from pm.workspace import ResolutionConflict
+        kind = ResolutionConflict if error["type"] == "ResolutionConflict" else InstallError
+        raise kind(error["package"], error["cause"], error["remedy"])
+    if error["type"] == "DownloadPaused":
+        from pm.downloader import DownloadPaused
+        raise DownloadPaused(error["message"])
+    raise _WORKER_ERRORS.get(error["type"], RuntimeError)(error["message"])
+
+
 def _request(operation, arguments, *, callbacks=None, pause_event=None, project_root=None):
     from pm import receipt
-    from pm.install import lazy_installs_allowed
-    from pm.registry import get_package, package_definitions
+    from pm.registry import package_definitions
 
     request_id = uuid.uuid4().hex
     update_id = receipt._ambient_update_id()
@@ -54,38 +107,8 @@ def _request(operation, arguments, *, callbacks=None, pause_event=None, project_
                     "lockfile": str(paths.lockfile_path())},
     }
     worker = Path(__file__).with_name("worker.py").resolve()
-    # Bootstrap precedes dispatch and must share the operation's selected cache.
-    cache = Path(arguments["cache"]) if arguments.get("cache") is not None else None
     environment = runtime_environment()
-    state_sync = spec.bootstrap == "policy" or (
-        spec.bootstrap == "state" and isinstance(get_package(arguments["name"]), StatePackage))
-    if (state_sync and not arguments.get("explicit") and not arguments.get("repair")
-            and not lazy_installs_allowed()):
-        # A ready PM still decides no-op/refusal under its install lock. A cold
-        # PM is itself a missing prerequisite, not permission to bootstrap tools.
-        try:
-            command = runtime_command(worker, bootstrap=False, cache=cache)
-        except InstallError as cold:
-            exc = cold
-            if arguments.get("extras"):
-                # The user asked for an extra, not for PM's own runtime: name
-                # the command that provisions both.
-                from pm.extras import install_hint
-
-                exc = InstallError(cold.package, f"{cold.cause} while enabling {list(arguments['extras'])}",
-                                   "run `" + "`, `".join(install_hint(extra) for extra in arguments["extras"]) + "`")
-            token = receipt.begin("sync")
-            try:
-                receipt.record_refusal("lazy-install", str(exc))
-                receipt.record_step("dependency-sync", False, f"{type(exc).__name__}: {exc}")
-            finally:
-                receipt.finalize("failed", 1, token=token)
-            raise exc from None
-        environment["HERMES_DISABLE_LAZY_INSTALLS"] = "1"
-    elif spec.bootstrap == "never":
-        command = runtime_command(worker, bootstrap=False, cache=cache)
-    else:
-        command = runtime_command(worker, cache=cache)
+    command = _worker_command(spec, arguments, worker, environment)
     callback_error = None
     stopped = threading.Event()
     write_lock = threading.Lock()
@@ -144,18 +167,7 @@ def _request(operation, arguments, *, callbacks=None, pause_event=None, project_
             if callback_error is not None:
                 raise callback_error
             if "error" in response:
-                error = response["error"]
-                if "package" in error:
-                    from pm.workspace import ResolutionConflict
-                    kind = ResolutionConflict if error["type"] == "ResolutionConflict" else InstallError
-                    raise kind(error["package"], error["cause"], error["remedy"])
-                if error["type"] == "DownloadPaused":
-                    from pm.downloader import DownloadPaused
-                    raise DownloadPaused(error["message"])
-                kind = {"ValueError": ValueError, "TypeError": TypeError, "KeyError": KeyError,
-                        "OSError": OSError, "FileExistsError": FileExistsError,
-                        "FileNotFoundError": FileNotFoundError, "PermissionError": PermissionError}.get(error["type"], RuntimeError)
-                raise kind(error["message"])
+                _raise_worker_error(response["error"])
             return response["result"]
         finally:
             stopped.set()
@@ -190,7 +202,7 @@ def ensure(name, *, base_env=None, explicit=False, progress=None, pause_event=No
     return Runner(name, env_for(name, base_env=base_env))
 
 
-def sync_venv(extras=None, *, explicit=False, plugin_dirs=None, extra_plugin_dirs=(), selection=None, staged_plugin=None, repair=False,
+def sync_venv(extras=None, *, explicit=False, plugins: PluginInput | None = None, repair=False,
               project_root: Path | None = None) -> None:
     from pm.environments import running_from_selected_environment
 
@@ -206,17 +218,16 @@ def sync_venv(extras=None, *, explicit=False, plugin_dirs=None, extra_plugin_dir
             f"{list(extras)}: this process is not running from the install's dependency environment "
             f"({sys.prefix}); only an explicit install may change what later processes boot into",
         )
-    if selection is not None and "expected_config" not in selection:
-        from hermes_cli.runtime_state import _digest
-        selection = {**selection, "expected_config": _digest(Path(selection["home"]) / "config.yaml") or "missing"}
+    if isinstance(plugins, Selection) and "expected_config" not in plugins.data:
+        from pm.filesystem import file_digest
+        plugins = Selection({**plugins.data,
+                             "expected_config": file_digest(Path(plugins.data["home"]) / "config.yaml") or "missing"})
     foreign = project_root is not None and Path(project_root).resolve() != paths.repo_root().resolve()
     if is_runtime() and not foreign:
         from pm.install import sync_venv as direct
-        return direct(extras, explicit=explicit, plugin_dirs=plugin_dirs,
-                      selection=selection, staged_plugin=staged_plugin, extra_plugin_dirs=extra_plugin_dirs, repair=repair)
+        return direct(extras, explicit=explicit, plugins=plugins, repair=repair)
     _request("sync_venv", {"extras": extras, "explicit": explicit, "repair": repair,
-                          "plugin_dirs": _members(plugin_dirs), "selection": selection, "staged_plugin": staged_plugin,
-                          "extra_plugin_dirs": [str(Path(p).absolute()) for p in extra_plugin_dirs]}, project_root=project_root)
+                          "plugins": plugin_inputs.encode(plugins)}, project_root=project_root)
 
 
 def stage_only(name, target, *, progress=None) -> Path:
@@ -238,7 +249,7 @@ def _python_operation(operation: str, arguments: dict):
 def build_environment(
     *, source: Path, out: Path, python: Path | None = None,
     cache: Path | None = None, env: Mapping[str, str] | None = None,
-    extras: Sequence[str] = (), groups: Sequence[str] = (), only_groups: bool = False,
+    extras: Sequence[str] = (), groups: Sequence[str] = (),
     all_extras: bool = False, no_install_project: bool = False,
     frozen: bool = True, sealed: bool = False, offline: bool = False,
     explicit: bool = False, timeout: int = 1800,
@@ -246,7 +257,7 @@ def build_environment(
     """Build a validated Python environment without exposing install machinery."""
     return Path(_python_operation("build_environment", {
         "source": Path(source), "out": Path(out), "python": python, "cache": cache,
-        "env": dict(env) if env is not None else None, "extras": list(extras), "groups": list(groups), "only_groups": only_groups,
+        "env": dict(env) if env is not None else None, "extras": list(extras), "groups": list(groups),
         "all_extras": all_extras, "no_install_project": no_install_project,
         "frozen": frozen, "sealed": sealed, "offline": offline,
         "explicit": explicit, "timeout": timeout,
@@ -314,16 +325,14 @@ def ensure_python_tool(
     }))
 
 
-def venv_is_current(*, extras: list[str] | None = None, plugin_dirs=None, extra_plugin_dirs=(),
+def venv_is_current(*, extras: list[str] | None = None, plugins: Members | Candidates | None = None,
                     project_root: Path | None = None) -> bool:
     """Check through a ready PM, never bootstrap dependencies for a probe."""
     if is_runtime() and (project_root is None or Path(project_root).resolve() == paths.repo_root().resolve()):
         from pm.install import venv_is_current as direct
-        return direct(extras=extras, plugin_dirs=plugin_dirs, extra_plugin_dirs=extra_plugin_dirs, project_root=project_root)
-    members = plugin_dirs
+        return direct(extras=extras, plugins=plugins, project_root=project_root)
     try:
-        return bool(_request("venv_is_current", {"extras": extras, "plugin_dirs": _members(members),
-                            "extra_plugin_dirs": [str(Path(p).absolute()) for p in extra_plugin_dirs]},
+        return bool(_request("venv_is_current", {"extras": extras, "plugins": plugin_inputs.encode(plugins)},
                              project_root=project_root))
     except InstallError as exc:
         if exc.package == "pm-runtime":
@@ -333,10 +342,11 @@ def venv_is_current(*, extras: list[str] | None = None, plugin_dirs=None, extra_
 
 def check_project_lock(source: Path, *, python: Path | None = None, cache: Path | None = None,
                        env: Mapping[str, str] | None = None, offline: bool = False,
-                       explicit: bool = False) -> None:
+                       explicit: bool = False, quiet: bool = False) -> None:
     _python_operation("check_project_lock", {
         "source": Path(source), "python": python, "cache": cache,
         "env": dict(env) if env is not None else None, "offline": offline, "explicit": explicit,
+        "quiet": quiet,
     })
 
 

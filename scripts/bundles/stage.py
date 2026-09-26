@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -37,7 +38,11 @@ def main(argv=None) -> int:
         products = Path(temp)
         source = products / "source"
         from scripts.bundles.payload import snapshot
+        from scripts.build.icon_environment import prepare_icon_environment
         snapshot(ROOT, args.ref, source)
+        # The staging interpreter need not be a Hermes runtime; render icons on one.
+        icon_python = prepare_icon_environment(source, products / "icon-environment", args.cache)
+        env = {**os.environ, "HERMES_PYTHON": str(icon_python)}
         commands = [
             ["scripts/build/node-deps.mjs", "--source", str(source), "--workspace", "ui-tui", "--workspace", "web"],
             ["scripts/generate-icons.mjs", "--source", str(source), "--out", str(products / "icons")],
@@ -45,7 +50,7 @@ def main(argv=None) -> int:
             ["scripts/build/web.mjs", "--source", str(source), "--icons", str(products / "icons"), "--out", str(products / "web")],
         ]
         for command in commands:
-            subprocess.run([node, *command], cwd=ROOT, check=True)
+            subprocess.run([node, *command], cwd=ROOT, env=env, check=True)
         args.frontends = {"tui": products / "tui", "web": products / "web"}
         return stage_native(args)
 

@@ -103,6 +103,61 @@ def test_all_uv_commands_keep_the_pm_interpreter(installed_uv, monkeypatch):
     assert dict(os.environ) == before
 
 
+def test_project_environment_replaces_generation_when_pinned_python_moves(installed_uv, tmp_path, monkeypatch):
+    """An unchanged dependency pin cannot reuse a venv made by another tools store."""
+    from pm import operations
+    import pm.registry as registry
+    from tests.pm._fixtures import _run, _wheel, stage_host_python
+
+    root, uv, facts, target, digest = installed_uv
+    store = root / "store"
+    from pm.store import tree_digest
+    facts.record("uv", "test", uv.parent.name, {}, store, target=target,
+                 artifacts=[digest], digest=tree_digest(uv.parent))
+
+    class FixturePython(Python):
+        binary_rel = {"win32": "Scripts/python.exe", "posix": "bin/python"}
+
+    monkeypatch.setitem(registry._packages, "python", FixturePython())
+    interpreters = [stage_host_python(store / name / "bin" / "python")
+                    for name in ("python-a", "python-b")]
+    project = tmp_path / "project"
+    project.mkdir()
+    wheel = _wheel(tmp_path, "side_dep")
+    (project / "pyproject.toml").write_text(
+        '[project]\nname="pm-generation-proof"\nversion="1"\nrequires-python=">=3.11"\n'
+        'dependencies=["side-dep==1.0"]\n[tool.uv]\npackage=false\nno-index=true\n'
+        f'find-links=["{wheel.parent.as_posix()}"]\n', encoding="utf-8",
+    )
+    env = {key: value for key, value in os.environ.items()
+           if not key.startswith(("UV_", "PYTHON")) and key != "VIRTUAL_ENV"}
+    env.update(UV_CACHE_DIR=str(tmp_path / "cache"), UV_PYTHON_DOWNLOADS="never")
+    _run([str(uv), "lock", "--python", str(interpreters[0])], cwd=project, env=env)
+    locked = (project / "uv.lock").read_bytes()
+    selection_root = tmp_path / "selection"
+    chosen = []
+    for interpreter in (*interpreters, interpreters[0]):
+        facts.record("python", "test", interpreter.parent.parent.name, {}, store,
+                     target=target, artifacts=[digest], digest=tree_digest(interpreter.parent.parent))
+        selected = operations.ensure_project_environment(
+            "test-environment", project, root=selection_root, explicit=True)
+        chosen.append(selected)
+        assert Path(_run([str(selected), "-I", "-c",
+                          "import sys, side_dep; print(sys.base_prefix)"], cwd=project, env=env)) == interpreter.parent.parent
+        assert (project / "uv.lock").read_bytes() == locked
+    assert chosen[0] != chosen[1] != chosen[2]
+
+    # A failed replacement must leave the previously selected environment intact.
+    facts.record("python", "test", interpreters[1].parent.parent.name, {}, store,
+                 target=target, artifacts=[digest], digest=tree_digest(interpreters[1].parent.parent))
+    active = (selection_root / "active.json").read_bytes()
+    monkeypatch.setattr(operations, "build_environment", lambda **kwargs: (_ for _ in ()).throw(RuntimeError("build failed")))
+    with pytest.raises(RuntimeError, match="build failed"):
+        operations.ensure_project_environment("test-environment", project, root=selection_root, explicit=True)
+    assert (selection_root / "active.json").read_bytes() == active
+    assert operations.environment_python("test-environment", root=selection_root) == chosen[-1]
+
+
 def test_uv_refuses_discovery_when_pm_python_is_missing(installed_uv, monkeypatch):
     root, _, facts, target, digest = installed_uv
     ensure = importlib.import_module("pm.install")

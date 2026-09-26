@@ -64,7 +64,7 @@ def test_only_live_profiles_join_the_dependency_union(homes):
     assert set(by_root) == {default_home / "plugins", profile_home / "plugins"}
 
 
-@pytest.mark.parametrize("boundary", ["profile-listing", "profile-stat", "config-read", "plugin-stat", "manifest-read", "manifest-stat", "provider-stat"])
+@pytest.mark.parametrize("boundary", ["profile-listing", "profile-stat", "plugin-stat", "manifest-read", "manifest-stat", "provider-stat"])
 def test_unreadable_profile_state_is_not_an_empty_selection(homes, monkeypatch, boundary):
     from pm.workspace import enabled_member_dirs
 
@@ -79,7 +79,6 @@ def test_unreadable_profile_state_is_not_an_empty_selection(homes, monkeypatch, 
     method, target = {
         "profile-listing": ("iterdir", profile_home.parent),
         "profile-stat": ("stat", profile_home),
-        "config-read": ("read_text", profile_home / "config.yaml"),
         "plugin-stat": ("stat", plugin),
         "manifest-read": ("read_text", manifest),
         "manifest-stat": ("stat", manifest),
@@ -119,6 +118,24 @@ def test_enabled_read_refuses_invalid_existing_config(homes, content):
     with pytest.raises(ValueError, match=re.escape(str(config))):
         pstate.enabled_plugins_ordered()
     assert config.read_bytes() == before
+
+def test_verify_skips_bad_secondary_but_admission_refuses_it(homes, caplog):
+    from pm.workspace import enabled_member_dirs, enabled_plugin_dirs
+
+    default_home, profile_home = homes
+    plugin = default_home / "plugins" / "working"
+    plugin.mkdir(parents=True)
+    (plugin / "plugin.yaml").write_text("name: working\npython_dependencies: [requests]\n", encoding="utf-8")
+    _write_config(default_home, ["working"])
+    bad = profile_home / "config.yaml"
+    bad.write_text("plugins: [invalid]\n", encoding="utf-8")
+
+    assert enabled_member_dirs() == [plugin]
+    assert str(bad) in caplog.text
+    with pytest.raises(ValueError, match=re.escape(str(bad))):
+        enabled_plugin_dirs(proposed_home=default_home, enabled=["working"])
+    bad.write_text("plugins: {enabled: []}\n", encoding="utf-8")
+    assert enabled_member_dirs() == [plugin]
 
 
 @pytest.mark.parametrize("content", ["", "# empty config\n", "null", "{}", "plugins: {}", "plugins:\n  enabled: []"])

@@ -12,6 +12,9 @@ from urllib.parse import quote, unquote
 
 import pytest
 
+from tests.ci.desktop_release_roles import (
+    commit_summary, native_builds, needs_of, selection_gates, stage_step, termux_builder, universal_assembler,
+)
 from tests.ci.test_desktop_release_tag_admission import _BASH, _child_env, _workflow
 from tests.scripts.test_release_r2 import r2_server  # noqa: F401
 
@@ -66,7 +69,9 @@ def test_failed_commit_summary_publishes_downloads_or_run_links(tmp_path, r2_ser
     base = f'http://127.0.0.1:{r2_server.server_port}/hermes-releases'
     summary = tmp_path / 'summary.md'
     jobs = _workflow()['jobs']
-    bundle_env = {'HERMES_HOME': None, 'EMPTY': '', 'LABEL': '<script>\n"café" & value</script>'}
+    summary_job = commit_summary(jobs)
+    bundle_env = {'HERMES_HOME': None, 'HERMES_SKIP_INTRO': '',
+                  'HERMES_SHARED_AUTH_DIR': '<script>\n"café" & value</script>'}
     env = dict(HERMES_BUILD_COMMIT=sha, HERMES_PAYLOAD_TAG='', RELEASE_COMMIT=sha,
                GITHUB_REPOSITORY='fixture-owner/fixture-repo',
                HERMES_BUNDLE_ENV_JSON=json.dumps(bundle_env), CI_SECRET='must-not-appear',
@@ -75,14 +80,15 @@ def test_failed_commit_summary_publishes_downloads_or_run_links(tmp_path, r2_ser
                CLOUDFLARE_R2_ACCOUNT_ID='loopback', CLOUDFLARE_R2_ACCESS_KEY_ID='test-inert',
                CLOUDFLARE_R2_SECRET_ACCESS_KEY='test-inert', CLOUDFLARE_R2_BUCKET='hermes-releases',
                RELEASE_NEEDS=json.dumps({name: {'result': 'success' if name == 'validate' else 'failure'}
-                                         for name in jobs['commit-builds-summary']['needs']}))
+                                         for name in needs_of(jobs[summary_job])}))
     if has_download:
         artifact = tmp_path / 'apps/desktop/release/HermesBundled-0.33.0-win-x64.msix'
         artifact.parent.mkdir(parents=True)
         artifact.write_bytes(b'inert downloadable fixture')
-        staged = shell_step(tmp_path, r2_server, 'build-win32-commit', 'Stage Windows packages to R2', env)
+        producer = jobs[native_builds(jobs)[('win32-x64', 'commit')]]
+        staged = shell_step(tmp_path, r2_server, '', '', env, script=stage_step(producer)['run'])
         assert staged.returncode == 0, staged.stdout + staged.stderr
-    result = shell_step(tmp_path, r2_server, 'commit-builds-summary',
+    result = shell_step(tmp_path, r2_server, summary_job,
                         'Render the full expected-binary matrix', env)
     assert result.returncode == 0, result.stdout + result.stderr
     text = summary.read_text(encoding='utf-8-sig')
@@ -91,8 +97,8 @@ def test_failed_commit_summary_publishes_downloads_or_run_links(tmp_path, r2_ser
         page = response.read().decode()
     assert f'href="https://github.com/fixture-owner/fixture-repo/commit/{sha}"' in page
     assert 'Bundle environment' in page and 'HERMES_HOME' in page and 'Unset' in page
-    assert '<code>EMPTY</code></td><td><code>&quot;&quot;</code>' in page
-    assert html.escape(json.dumps(bundle_env['LABEL'], ensure_ascii=False)) in page
+    assert '<code>HERMES_SKIP_INTRO</code></td><td><code>&quot;&quot;</code>' in page
+    assert html.escape(json.dumps(bundle_env['HERMES_SHARED_AUTH_DIR'], ensure_ascii=False)) in page
     assert '<script>' not in page and 'must-not-appear' not in page and 'CI_SECRET' not in page
     links = re.findall(r'\]\((https?://[^)]+)\)', text)
     download_links = [url for url in links if url.endswith('.msix')]
@@ -108,13 +114,11 @@ def test_failed_commit_summary_publishes_downloads_or_run_links(tmp_path, r2_ser
         elif line.startswith('| Linux'):
             assert 'Disabled' in line and '](' not in line
     assert all(key.startswith(f'releases/commit/{sha}/') for key in r2_server.store)
-    for name in ('build-win32', 'build-darwin'):
-        # The commit/release split collapsed into one leg per platform; the
-        # result job's env still encodes exactly-which-trust-branch-succeeded.
-        result_job = jobs[name]
-        assert f"needs.{name}-commit.result" in result_job['env']['SELECTED_BUILD_SUCCEEDED']
-        assert jobs[f'{name}-commit']['strategy']['fail-fast'] is False
-    step = next(step for step in jobs['commit-builds-summary']['steps'] if 'run' in step)
+    # One failed arch must not cancel its siblings: the summary above only
+    # has downloads to offer for the legs that were allowed to finish.
+    for name in native_builds(jobs).values():
+        assert jobs[name]['strategy']['fail-fast'] is False, name
+    step = next(step for step in jobs[summary_job]['steps'] if 'run' in step)
     assert step['env']['RUN_URL'] == '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
     assert step['env']['HERMES_BUNDLE_ENV_JSON'] == '${{ inputs.bundle_env }}'
 
@@ -129,27 +133,29 @@ def test_commit_staging_and_summary_bind_every_produced_file_without_channels(tm
                CLOUDFLARE_R2_SECRET_ACCESS_KEY='test-inert', CLOUDFLARE_R2_BUCKET='hermes-releases')
     release = tmp_path / 'apps/desktop/release'
     release.mkdir(parents=True)
+    jobs = _workflow()['jobs']
+    legs = native_builds(jobs)
+    gates = selection_gates(jobs)
+    summary_job = commit_summary(jobs)
     producers = [
-        ('build-win32-commit', 'Stage Windows packages to R2', 'win32-x64', [
-            'HermesBundled-0.33.0-win-x64.msix']),
-        ('build-win32-commit', 'Stage Windows packages to R2', 'win32-arm64', [
-            'HermesBundled-0.33.0-win-arm64.msix']),
-        ('build-darwin-commit', 'Stage macOS packages and feed inputs to R2', 'darwin-arm64', [
+        (legs[('win32-x64', 'commit')], 'win32-x64', ['HermesBundled-0.33.0-win-x64.msix']),
+        (legs[('win32-arm64', 'commit')], 'win32-arm64', ['HermesBundled-0.33.0-win-arm64.msix']),
+        (legs[('darwin-arm64', 'commit')], 'darwin-arm64', [
             'HermesBundled-0.33.0-mac-arm64.dmg', 'HermesBundled-0.33.0-mac-arm64.zip',
             'HermesBundled-0.33.0-mac-arm64.zip.blockmap']),
-        ('build-darwin-commit', 'Stage macOS packages and feed inputs to R2', 'darwin-x64', [
+        (legs[('darwin-x64', 'commit')], 'darwin-x64', [
             'HermesBundled-0.33.0-mac-x64.dmg', 'HermesBundled-0.33.0-mac-x64.zip',
             'HermesBundled-0.33.0-mac-x64.zip.blockmap']),
-        ('assemble-win32-bundle', 'Stage universal bundles to R2', 'windows-universal', [
-            'HermesBundled-0.33.0.0-win.msixbundle']),
+        (universal_assembler(jobs), 'windows-universal', ['HermesBundled-0.33.0.0-win.msixbundle']),
     ]
     artifact_keys = set()
-    for job, name, target, names in producers:
+    for job, target, names in producers:
         for file in release.iterdir():
             file.unlink()
         for filename in names:
             (release / filename).write_bytes(f'transport fixture: {filename}'.encode())
-        result = shell_step(tmp_path, r2_server, job, name, {**env, 'TARGET': target})
+        result = shell_step(tmp_path, r2_server, '', '', {**env, 'TARGET': target},
+                            script=stage_step(jobs[job])['run'])
         assert result.returncode == 0, result.stdout + result.stderr
         receipt_key = f'releases/commit/{sha}/handoff-{target}.json'
         receipt = json.loads(r2_server.store[receipt_key][0])
@@ -159,15 +165,15 @@ def test_commit_staging_and_summary_bind_every_produced_file_without_channels(tm
         puts = [path for method, path, _ in r2_server.requests if method == 'PUT']
         assert puts[-1].endswith(receipt_key)
 
-    termux_name = 'Stage the commit-build deb to R2'
+    termux_stage = stage_step(jobs[termux_builder(jobs)])['run']
     before = dict(r2_server.store)
-    missing = shell_step(tmp_path, r2_server, 'termux-deb', termux_name, env)
+    missing = shell_step(tmp_path, r2_server, '', '', env, script=termux_stage)
     assert missing.returncode != 0
     assert r2_server.store == before
     deb = tmp_path / 'termux-build/deb/hermes agent_0.33.0~commit.aaaaaaaaaaaa_aarch64.deb'
     deb.parent.mkdir(parents=True)
     deb.write_bytes(b'transport fixture, not a native Debian package')
-    staged = shell_step(tmp_path, r2_server, 'termux-deb', termux_name, env)
+    staged = shell_step(tmp_path, r2_server, '', '', env, script=termux_stage)
     assert staged.returncode == 0, staged.stdout + staged.stderr
     artifact_keys.add(f'releases/commit/{sha}/deb/{deb.name}')
     receipt = json.loads(r2_server.store[f'releases/commit/{sha}/handoff-termux.json'][0])
@@ -175,11 +181,8 @@ def test_commit_staging_and_summary_bind_every_produced_file_without_channels(tm
 
     summary = tmp_path / 'summary.md'
     summary_env = {**env, 'GITHUB_STEP_SUMMARY': str(summary), 'RELEASE_NEEDS': json.dumps({
-        'validate': {'result': 'success'}, 'build-win32': {'result': 'success'},
-        'build-darwin': {'result': 'success'}, 'assemble-win32-bundle': {'result': 'success'},
-        'termux-deb': {'result': 'success'}, 'build-linux': {'result': 'success'},
-    })}
-    result = shell_step(tmp_path, r2_server, 'commit-builds-summary',
+        name: {'result': 'success'} for name in needs_of(jobs[summary_job])})}
+    result = shell_step(tmp_path, r2_server, summary_job,
                         'Render the full expected-binary matrix', summary_env)
     assert result.returncode == 0, result.stdout + result.stderr
     text = summary.read_text(encoding='utf-8-sig')
@@ -203,7 +206,7 @@ def test_commit_staging_and_summary_bind_every_produced_file_without_channels(tm
     receipt_key = f'releases/commit/{sha}/handoff-win32-x64.json'
     original = r2_server.store[receipt_key]
     r2_server.store[receipt_key] = (b'not-json', '"invalid"')
-    failed = shell_step(tmp_path, r2_server, 'commit-builds-summary',
+    failed = shell_step(tmp_path, r2_server, summary_job,
                         'Render the full expected-binary matrix', summary_env)
     assert failed.returncode != 0
     assert summary.read_text(encoding='utf-8-sig') == text
@@ -214,8 +217,8 @@ def test_commit_staging_and_summary_bind_every_produced_file_without_channels(tm
     r2_server.store.pop(f'releases/commit/{sha}/handoff-darwin-x64.json')
     summary.unlink()
     summary_env['RELEASE_NEEDS'] = json.dumps({'validate': {'result': 'success'},
-                                             'build-darwin': {'result': 'failure'}})
-    incomplete = shell_step(tmp_path, r2_server, 'commit-builds-summary',
+                                             gates['darwin-x64']: {'result': 'failure'}})
+    incomplete = shell_step(tmp_path, r2_server, summary_job,
                             'Render the full expected-binary matrix', summary_env)
     assert incomplete.returncode == 0, incomplete.stdout + incomplete.stderr
-    assert 'failed: build-darwin' in summary.read_text(encoding='utf-8-sig')
+    assert f"failed: {gates['darwin-x64']}" in summary.read_text(encoding='utf-8-sig')

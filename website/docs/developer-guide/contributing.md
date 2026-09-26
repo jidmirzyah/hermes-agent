@@ -34,7 +34,7 @@ We value contributions in this order:
 | Requirement          | Notes                                                                                         |
 | -------------------- | --------------------------------------------------------------------------------------------- |
 | **Git**              | With the `git-lfs` extension installed                                                        |
-| **Python 3.14** | The project requires `>=3.14,<3.15`. PM provides the pinned interpreter. |
+| **Python 3.14** | Current development uses PM's pinned interpreter. The broader `>=3.11,<3.15` package metadata keeps old updaters working, not the current runtime on older Python. |
 | **Node.js** | Use the PM pin or a version accepted by root `package.json` engines |
 
 ### PM developer environment
@@ -67,7 +67,7 @@ not install JS workspaces or rewrite launchers and shell configuration. `deactiv
 
 ### Manual development and test environment {#manual-development-and-test-environment}
 
-Use the [PM developer workflow](../reference/package-management.md#developer-workflow) to prepare Python 3.14 (`>=3.14,<3.15`) first.
+Use the [PM developer workflow](../reference/package-management.md#developer-workflow) to prepare Python 3.14 first.
 Run these commands from that checkout with its prepared Python. Keep the same
 development `HERMES_HOME`. PM must be able to start before it can build another
 environment. On Windows, initialize the native C++ build environment for your
@@ -118,9 +118,9 @@ Use a Node/npm version accepted by the corresponding `package.json` engines.
 Native desktop dependencies can also require the platform build toolchain.
 
 Logos and icons are generated from `assets/nous-girl-*.svg` and
-`assets/backgrounds/`. `node scripts/generate-icons.mjs` uses the locked,
-isolated `icon-build` dependency group. Do not commit generated PNG/ICO/ICNS
-outputs or add icon renderers to production dependencies.
+`assets/backgrounds/`. `node scripts/generate-icons.mjs` renders them with the
+Hermes runtime Python (`HERMES_PYTHON`, else `python` on PATH): Pillow and
+resvg-py are core dependencies. Do not commit generated PNG/ICO/ICNS outputs.
 
 ### Run tests
 
@@ -135,6 +135,11 @@ On Windows, run the script through Bash. When no local `.venv` or `venv`
 contains pytest, the runner accepts the explicit `HERMES_PYTHON` above. It
 clears credentials, isolates `HERMES_HOME`, and runs each test file in a separate
 subprocess through `scripts/run_tests_parallel.py`. It does not use xdist.
+When `tests/conftest.py` redirects a production `HERMES_HOME` to a temporary
+session home, it sets the internal `HERMES_TEST_SANDBOX_HOME` marker. This lets
+re-imported test fixtures recognize their own sandbox instead of flagging it as
+real-home I/O. Do not set this marker yourself; set `HERMES_HOME` for a
+disposable development home and let the test runner isolate it.
 
 Run the relevant JS workspace checks for JS changes. Native install/update
 E2E runs on disposable CI hosts, never against the developer's live app.

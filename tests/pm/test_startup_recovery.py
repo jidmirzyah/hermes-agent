@@ -17,6 +17,7 @@ import sys
 import pytest
 
 from pm.lock import Facts, Lockfile
+from pm.plugin_inputs import Members
 from pm.runtime import runtime_environment
 from pm.store import current_target, tree_digest
 from tests.pm._fixtures import _wheel
@@ -74,7 +75,7 @@ def test_bootstrap_repairs_before_dependency_activation(tmp_path, monkeypatch, m
     clean.pop("UV_NO_CONFIG", None)
     subprocess.run([uv, "lock"], cwd=core, env=clean, capture_output=True, check=True, timeout=60)
     extras = ["startup-extra"]
-    engine.sync_venv(extras, explicit=True, plugin_dirs=[])
+    engine.sync_venv(extras, explicit=True, plugins=Members([]))
     old = selected_venv(core)
     recorded = Facts(paths.runtime_facts_path(), strict=True).get("venv")
     assert recorded is not None

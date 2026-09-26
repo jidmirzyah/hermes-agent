@@ -119,7 +119,8 @@ export class AppInstallerStrategy {
 
   async apply(): Promise<UpdaterApplyResultWire> {
     const feedBaseUrl = this.deps.feedBaseUrl
-    let sourceUri: string | undefined = this.deps.feed?.url
+    const feed = this.deps.feed
+    let sourceUri: string | undefined = feed?.url
 
     if (sourceUri) {
       channelPublicBase(sourceUri)
@@ -129,7 +130,7 @@ export class AppInstallerStrategy {
         throw new Error('Native feed authority mismatch')
       }
 
-      if (!newerWindowsVersion(this.deps.feed!.version, this.deps.appVersion)) {
+      if (feed && !newerWindowsVersion(feed.version, this.deps.appVersion)) {
         return { ok: true, mechanism: this.mechanism }
       }
     }
@@ -137,6 +138,10 @@ export class AppInstallerStrategy {
     if (!feedBaseUrl && !sourceUri) {
       const { code, stdout } = await this.deps.run(this.deps.python, this.deps.script)
       sourceUri = parseCheckOutput(code, stdout).sourceUri
+
+      if (sourceUri) {
+        channelPublicBase(sourceUri)
+      }
     }
 
     if (!feedBaseUrl && !sourceUri) {

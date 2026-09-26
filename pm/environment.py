@@ -20,6 +20,16 @@ import time
 from typing import TextIO
 
 from pm.package import InstallError
+from pm.progress import LiveTail, TextSink, verbose_output
+
+# Slow steps get a status line; unlisted quick ones (venv, export, pip check)
+# stay silent unless they fail.
+_UV_LABELS: dict[object, str] = {
+    "sync": "Installing Python dependencies",
+    "lock": "Resolving Python dependencies",
+    ("pip", "install"): "Installing Python packages",
+    "cache": "Pruning the uv cache",
+}
 
 # Deliberately narrow: a fetch timeout or index outage must not be misread as a
 # conflict — and regardless of classification, nothing here ever disables a
@@ -118,7 +128,7 @@ def _read_pipe(fd: int) -> bytes:
 
 
 def _run_streaming(command: list[str], *, cwd: Path, env: dict[str, str],
-                   timeout: int, output: TextIO) -> subprocess.CompletedProcess:
+                   timeout: int, output: TextSink) -> subprocess.CompletedProcess:
     """Keep CI progress live, a bounded diagnostic tail, and a wall-clock timeout."""
     deadline = time.monotonic() + timeout
     proc = subprocess.Popen(command, cwd=str(cwd), env=env, stdout=subprocess.PIPE,
@@ -261,7 +271,7 @@ class PythonEnvironment:
             if self.offline:
                 command.append("--offline")
             try:
-                if self.output is not None:
+                if self.output is not None and verbose_output():
                     # uv hides build-backend output until failure without verbose mode,
                     # but --verbose alone is uv's DEBUG level: ~200 lines of interpreter
                     # and cache internals on every streamed run. RUST_LOG scopes it to the
@@ -269,6 +279,18 @@ class PythonEnvironment:
                     command.append("--verbose")
                     env.setdefault("RUST_LOG", "uv_build_frontend=debug")
                     return _run_streaming(command, cwd=cwd, env=env, timeout=timeout, output=self.output)
+                if self.output is not None:
+                    # uv prints backend output on failure anyway; interactive users see
+                    # one live status line and the captured tail only if it fails.
+                    tail = LiveTail(_UV_LABELS.get(tuple(args[:2]), _UV_LABELS.get(args[0])),
+                                    self.output, indent="  ")
+                    try:
+                        result = _run_streaming(command, cwd=cwd, env=env, timeout=timeout, output=tail)
+                    except BaseException:
+                        tail.close(False)
+                        raise
+                    tail.close(result.returncode == 0)
+                    return result
                 return subprocess.run(command, cwd=str(cwd), env=env, capture_output=True,
                                       text=True, encoding="utf-8", errors="replace", timeout=timeout)
             except subprocess.TimeoutExpired as exc:
@@ -306,14 +328,12 @@ class PythonEnvironment:
     def sync(self, source: Path, *, extras: Sequence[str] = (), groups: Sequence[str] = (),
              timeout: int = 1800, frozen: bool = True, all_extras: bool = False,
              no_install_project: bool = False, locked: bool = False,
-             no_default_groups: bool = False, only_groups: bool = False) -> None:
+             no_default_groups: bool = False) -> None:
         """Install the root and every member; resolve only in a writable workspace.
 
         ``frozen=False`` is reserved for the caller-owned generated workspace,
         never the original project's lock. Seed/replay policy belongs to PM.
         """
-        if only_groups and (not groups or extras or all_extras):
-            raise ValueError("group-only builds require groups and cannot select extras")
         if not frozen:
             self.lock(source, timeout=timeout)
         # Locking members alone is insufficient: plain sync only installs root deps.
@@ -324,7 +344,11 @@ class PythonEnvironment:
         if no_default_groups:
             command.append("--no-default-groups")
         if all_extras:
+            from pm.features import opt_in_extras
+
             command.append("--all-extras")
+            for extra in opt_in_extras(source):
+                command += ["--no-extra", extra]
         if no_install_project:
             # --all-packages has no single selected project in uv, so
             # --no-install-project alone does not exclude the root. Name it
@@ -333,7 +357,7 @@ class PythonEnvironment:
         for extra in sorted(set(extras)):
             command += ["--extra", extra]
         for group in sorted(set(groups)):
-            command += ["--only-group" if only_groups else "--group", group]
+            command += ["--group", group]
         result = self._run(command, cwd=source, timeout=timeout)
         if result.returncode:
             raise classify_uv_failure("sync", result.returncode, result.stderr or result.stdout)

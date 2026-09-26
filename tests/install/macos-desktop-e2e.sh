@@ -32,7 +32,8 @@
 #     [--install-ref REF] [--dmg-url URL]
 #     [--update-ref REF]   update target, default HEAD; pass the next
 #                          release tag for a stable-to-stable leg (label the
-#                          leg stable-to-stable only when both refs are tags)
+#                          leg stable-to-stable only when both refs are tags);
+#                          NEXT mints a synthetic child of --install-ref
 #
 # Requires a clean full-history checkout with release tags fetched, on a
 # macOS host with a window server (the GitHub macos runners qualify).
@@ -95,6 +96,8 @@ source "$(dirname "$0")/e2e-assets/ts-prefix.sh" 2>/dev/null || ts_prefix() { ca
 source "$(dirname "$0")/e2e-assets/preserve-plugins.sh"
 # shellcheck source=e2e-assets/source-driver.sh
 source "$(dirname "$0")/e2e-assets/source-driver.sh"
+# shellcheck source=e2e-assets/source-update-command.sh
+source "$ASSETS/source-update-command.sh"
 # shellcheck source=e2e-assets/installer-common.sh
 source "$(dirname "$0")/e2e-assets/installer-common.sh"
 # shellcheck source=e2e-assets/source-build-env.sh
@@ -142,15 +145,15 @@ phase_stage() {
   # The update target defaults to HEAD; --update-ref selects any other ref
   # so a stable-to-stable leg can target the next release tag instead of
   # the tip. Only call this leg stable-to-stable when BOTH refs are tags.
-  target_label="HEAD"
-  target_sha="$head_sha"
-  if [ -n "${UPDATE_REF:-}" ]; then
-    target_sha="$(git -C "$REPO_ROOT" rev-parse "${UPDATE_REF}^{commit}")"
-    target_label="$UPDATE_REF"
-  fi
+  # NEXT (the HEAD -> NEXT leg) is minted before the clone so it rides along.
+  target_label="${UPDATE_REF:-HEAD}"
+  target_sha="$(resolve_update_ref "$REPO_ROOT" "$old_sha" "$target_label")" \
+    || fail "cannot resolve update ref '$target_label'"
   [ "$old_sha" != "$target_sha" ] || fail "OLD ($old_ref) IS the update target ($target_label); no update would be available"
 
   git clone --bare --quiet "$REPO_ROOT" "$SERVE_REPO"
+  git -C "$SERVE_REPO" cat-file -e "$target_sha^{commit}" \
+    || fail "update target $target_sha ($target_label) did not reach serve.git"
   git -C "$SERVE_REPO" update-ref refs/heads/main "$old_sha"
   git -C "$SERVE_REPO" symbolic-ref HEAD refs/heads/main
   git -C "$SERVE_REPO" config uploadpack.allowAnySHA1InWant true
@@ -255,7 +258,10 @@ phase_install() {
       const app = apps.objectAtIndex(i);
       if (app.executableURL && ObjC.unwrap(app.executableURL.path) === args[0]) {
         if (!app.terminate) throw new Error("normal Quit refused");
-        const deadline = Date.now() + 30000;
+        // A historical app (v2026.7.1) that the bootstrap launched moments ago
+        // was seen not to finish quitting within 30s while its backend was
+        // still starting. Allow longer, but the quit must stay the normal one.
+        const deadline = Date.now() + 120000;
         while (!app.terminated && Date.now() < deadline) delay(0.2);
         if (!app.terminated) throw new Error("installed app did not quit normally");
       }
@@ -268,6 +274,8 @@ run_playwright_update() {
   # $1: spec file to launch from.
   local spec="$1"
   local rc=0
+  accept_installer_marker "$INSTALL_DIR" \
+    || fail "installed source has changes other than the generated install marker"
   (cd "$WORK_ROOT" && "$HERMES_E2E_NODE" "$ASSETS/launch-from-spec.mjs" \
     --spec "$spec" \
     --old-sha "$OLD_SHA" --chat-out "$LOG_DIR/update-window" --mock-url "$HERMES_E2E_MOCK_URL" \
@@ -300,15 +308,16 @@ phase_update() {
   trap mock_stop EXIT
   case "$UPDATE_METHOD" in
     hermes-update)
-      # The CLI route a dmg user takes from a terminal. `--yes` reaches the
-      # update subcommand only in later releases; ask the installed hermes.
+      # The CLI route a dmg user takes from a terminal. Probe the installed
+      # help for both flags: this fixture stages unpublished main in serve.git,
+      # so newer updaters need explicit --branch main (not the channel object).
       local hermes help
       hermes="$(source_hermes "$INSTALL_DIR")" || fail "no installed update command"
-      local update_cmd=("$hermes" update)
       help="$(source_build_env "$hermes" update --help 2>&1)" || fail "installed update --help failed: $help"
-      if grep -qF -- --yes <<< "$help"; then
-        update_cmd=("$hermes" update --yes)
-      fi
+      build_source_update_command "$hermes" "$help"
+      printf '  CLI update invocation:'
+      printf ' %q' "${update_cmd[@]}"
+      printf '\n'
       local rc=0
       (cd "$INSTALL_DIR" && source_build_env "${update_cmd[@]}" < /dev/null 2>&1 | ts_prefix > "$LOG_DIR/update.log") || rc=$?
       log_group "hermes update transcript" "$LOG_DIR/update.log"
@@ -356,10 +365,17 @@ PYEOF
       hermes="$(source_hermes "$INSTALL_DIR")" || fail "no installed desktop command"
       local spec="$WORK_ROOT/launch-spec.json"
       local rc=0
-      (cd "$INSTALL_DIR" && \
-        PYTHONPATH="$ASSETS/launch-capture${PYTHONPATH:+:$PYTHONPATH}" \
-        HERMES_E2E_CAPTURE_LAUNCH="$spec" \
-        source_build_env "$hermes" desktop < /dev/null 2>&1 | ts_prefix > "$LOG_DIR/desktop-launch-capture.log") || rc=$?
+      if [ "$hermes" = "$INSTALL_DIR/.hermes/bin/hermes" ]; then
+        # PM launchers use -I, which ignores PYTHONPATH/sitecustomize. Inject
+        # the capture hook into the installed launcher's isolated command.
+        (cd "$INSTALL_DIR" && source_build_env python3 -I "$ASSETS/launch-capture/pm-launch.py" \
+          "$hermes" "$spec" < /dev/null 2>&1 | ts_prefix > "$LOG_DIR/desktop-launch-capture.log") || rc=$?
+      else
+        (cd "$INSTALL_DIR" && \
+          PYTHONPATH="$ASSETS/launch-capture${PYTHONPATH:+:$PYTHONPATH}" \
+          HERMES_E2E_CAPTURE_LAUNCH="$spec" \
+          source_build_env "$hermes" desktop < /dev/null 2>&1 | ts_prefix > "$LOG_DIR/desktop-launch-capture.log") || rc=$?
+      fi
       log_group "hermes desktop (launch capture) transcript" "$LOG_DIR/desktop-launch-capture.log"
       [ "$rc" -eq 0 ] || fail "hermes desktop exited $rc during launch capture"
       [ -f "$spec.captured" ] || fail "hermes desktop exited 0 but no launch was captured"

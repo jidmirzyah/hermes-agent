@@ -12,8 +12,10 @@ from hermes_cli.release_channels import ChannelReader, build_prefix, canonical_j
 from scripts.releases import commit_build, handoff, r2
 
 NATIVE_LEGS = ("darwin-arm64", "darwin-x64", "win32-arm64", "win32-x64", "windows-universal")
-REQUIRED_JOBS = ("validate", "build-darwin", "build-win32", "assemble-win32-bundle",
-                 "smoke-darwin", "smoke-win32", "smoke-win32-universal")
+REQUIRED_JOBS = ("validate", "build-darwin-arm64", "build-darwin-x64",
+                 "build-win32-arm64", "build-win32-x64", "assemble-win32-bundle",
+                 "smoke-darwin-arm64", "smoke-darwin-x64",
+                 "smoke-win32-arm64", "smoke-win32-x64")
 
 
 def read_request(build_id: str, digest: str, public_base: str, repository: str) -> dict:
@@ -54,10 +56,13 @@ def receiver_request(request: dict) -> bool:
 
 
 def admit(request: dict, env: dict[str, str]) -> dict[str, str]:
+    from scripts.releases.job_groups import selects_all
+
     if (env.get("TAG") or env.get("RELEASE_PHASE")
-            or env.get("TERMUX_UPGRADE_FROM_TAG") or env.get("TERMUX_ONLY") == "true"
-            or env.get("UPLOAD_RELEASE", "false") != "false"):
-        raise ValueError("Channel requests cannot select one-off, release, Termux or bundle overrides")
+            or env.get("TERMUX_UPGRADE_FROM_TAG")
+            or env.get("UPLOAD_RELEASE", "false") != "false"
+            or not selects_all(env.get("JOBS"))):
+        raise ValueError("Channel requests cannot select one-off, release or partial job overrides")
     # A one-dispatch disposable run inherits the allocation dispatch's own
     # BUILD_COMMIT/BUNDLE_ENV_JSON inputs. They are not overrides when they are
     # exactly what the digest-pinned request already says; anything else is.

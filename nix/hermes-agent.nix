@@ -92,8 +92,9 @@ let
     inherit uv2nix pyproject-nix pyproject-build-systems;
   };
 
+  # Icons render on the runtime venv: Pillow and resvg-py are core dependencies.
   generatedIcons = callPackage ./icons.nix {
-    inherit (mkHermesVenv [ ]) iconBuildVenv;
+    inherit (mkHermesVenv [ ]) venv;
   };
 
   hermesNpmLib = callPackage ./lib.nix {

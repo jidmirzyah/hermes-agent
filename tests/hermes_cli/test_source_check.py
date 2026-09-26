@@ -242,8 +242,11 @@ def test_dynamic_source_channel_preserves_branch_precedence(installation, select
     assert requests == ([] if selection == "explicit" else [channel_path]) + [branch_path]
 
 
+# An unpublished ``main`` record is not a channel failure: main IS the source
+# branch, so the check keeps following a branch via git, with the usual branch
+# precedence (test_unpublished_main_record_follows_the_branch below).
 @pytest.mark.parametrize("name,failure", [
-    ("main", "missing"), ("stable", "missing"), ("canary", "missing"),
+    ("stable", "missing"), ("canary", "missing"),
     (None, "missing"), (None, "malformed"), (None, "foreign"), (None, "unpublished"),
 ])
 def test_channel_failure_never_probes_or_heals_a_branch(installation, name, failure):
@@ -280,6 +283,28 @@ def test_channel_failure_never_probes_or_heals_a_branch(installation, name, fail
     assert status["behind"] is None
     assert requests == [channel_path]
     assert json.loads(branch_file.read_text())["branch"] == "deleted"
+
+
+def test_unpublished_main_record_follows_the_branch(installation):
+    """A 404 for main.json keeps a checkout updating via git: the configured
+    branch is probed exactly as for a published source-branch channel, and the
+    Desktop branch setting is left alone."""
+    from hermes_cli.source_check import check_for_updates
+
+    root, linked, home, base, head, responses, requests, git = installation
+    responses[MAIN_CHANNEL] = (404, source_channel("main", "fixture/fork"))
+    branch_path = "/repos/fixture/fork/commits/desktop-choice"
+    responses[branch_path] = (200, head)
+    branch_file = home / "desktop-update.json"
+    branch_file.write_text(json.dumps({"branch": "desktop-choice"}))
+    status = check_for_updates(install_root=linked, home=home, channel="main",
+                               branch_config_path=branch_file)
+    assert "error" not in status, status
+    assert status.get("branch") == "desktop-choice", status
+    assert status.get("targetSha") == head, status
+    assert status["behind"] == 0
+    assert requests == [MAIN_CHANNEL, branch_path]
+    assert json.loads(branch_file.read_text())["branch"] == "desktop-choice"
 
 
 def test_running_revision_is_not_applied_to_an_explicit_target(installation, monkeypatch):

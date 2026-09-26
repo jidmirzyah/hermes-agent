@@ -57,7 +57,9 @@ def parse_mac_feed(text: str) -> dict[str, Any]:
 
 
 _MAC_URL_PATTERN = re.compile(
-    r"^/releases/tag/v[0-9A-Za-z.+-]+/[0-9A-Za-z._+-]+\.(zip|dmg)$"
+    # Attempt refs (rc.N-vX.Y.Z) key the stable archive; plain and canary
+    # vX.Y.Z[+canary...] tags key the rest.
+    r"^/releases/tag/(?:v|rc\.[1-9]\d*-v)[0-9A-Za-z.+-]+/[0-9A-Za-z._+-]+\.(zip|dmg)$"
 )
 
 
@@ -75,9 +77,11 @@ def mac_feed_references(text: str) -> list[str]:
     return references
 
 
-def merge_mac_feeds(legs: dict[str, str], tag: str, light: bool = False) -> dict[str, Any]:
+def merge_mac_feeds(legs: dict[str, str], tag: str, light: bool = False,
+                    archive: str | None = None) -> dict[str, Any]:
     """Validate both native legs, merge them, and rewrite artifact URLs into
-    the immutable per-release tag namespace."""
+    the immutable per-release tag namespace. `archive` keys that namespace
+    (the attempt ref for stable attempts); `tag` stays the version identity."""
     import hermes_yaml as yaml  # lazy
 
     version = tag[1:] if isinstance(tag, str) and tag.startswith("v") else ""
@@ -99,7 +103,7 @@ def merge_mac_feeds(legs: dict[str, str], tag: str, light: bool = False) -> dict
         for file_entry in leg["files"]:
             if file_entry.get("url") not in (f"{prefix}.zip", f"{prefix}.dmg"):
                 raise ValueError(f"Wrong variant or architecture: {file_entry.get('url')}")
-            rewritten = {**file_entry, "url": f"/releases/tag/{tag}/{file_entry['url']}"}
+            rewritten = {**file_entry, "url": f"/releases/tag/{archive or tag}/{file_entry['url']}"}
             prior = files.get(file_entry["url"])
             if prior is not None and prior != rewritten:
                 raise ValueError(f"Conflicting artifact: {file_entry['url']}")
@@ -109,7 +113,7 @@ def merge_mac_feeds(legs: dict[str, str], tag: str, light: bool = False) -> dict
     assert first is not None
     merged = {**first, "files": list(files.values())}
     if merged.get("path"):
-        merged["path"] = f"/releases/tag/{tag}/{merged['path']}"
+        merged["path"] = f"/releases/tag/{archive or tag}/{merged['path']}"
     text = yaml.safe_dump(merged, width=100000, default_flow_style=False, sort_keys=False)
     mac_feed_references(text)  # publish only a feed that parses back clean
     return {
@@ -165,7 +169,7 @@ def publish_mac_feed(
 # finalize (real signed transport)
 # ---------------------------------------------------------------------------
 
-def finalize(tag: str, dir: str, variant: str | None = None) -> None:
+def finalize(tag: str, dir: str, variant: str | None = None, archive: str | None = None) -> None:
     """Validate both native legs, verify their streamed bytes, then replace
     the feed pointer (conditional write, then readback)."""
     if variant and variant != "light":
@@ -179,7 +183,7 @@ def finalize(tag: str, dir: str, variant: str | None = None) -> None:
         for name in sorted(os.listdir(dir))
         if name.endswith("-mac.yml")
     }
-    plan = merge_mac_feeds(legs, tag, variant == "light")
+    plan = merge_mac_feeds(legs, tag, variant == "light", archive=archive)
 
     def read(key: str) -> dict[str, str] | None:
         try:

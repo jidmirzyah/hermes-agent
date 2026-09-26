@@ -15,8 +15,14 @@ from pm.package import InstallError
 def check_project_lock(
     source: Path, *, python: Path | None = None, cache: Path | None = None,
     env: Mapping[str, str] | None = None, offline: bool = False, explicit: bool = False,
+    quiet: bool = False,
 ) -> None:
-    """Reject a missing or stale lock without rewriting source or creating a venv."""
+    """Reject a missing or stale lock without rewriting source or creating a venv.
+
+    ``quiet`` captures uv's output instead of reporting it: for a caller that
+    expects a stale lock and says so itself, the red failure tail is noise.
+    The error still carries uv's message.
+    """
     from pm.environment import managed_environment
     from pm.operations import _require_install_allowed
 
@@ -28,7 +34,7 @@ def check_project_lock(
     environment = managed_environment(
         source / ".venv", python=Path(python) if python is not None else None,
         cache=Path(cache) if cache is not None else None, env=env,
-        offline=offline, explicit=explicit, output=sys.stderr,
+        offline=offline, explicit=explicit, output=None if quiet else sys.stderr,
     )
     environment.check_lock(source)
 

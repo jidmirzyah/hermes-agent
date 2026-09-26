@@ -15,6 +15,7 @@ def recover_plugin_publication(project: Path, row: dict, journal: Path) -> None:
 def publish_plugin(staged: Path, target: Path, old_metadata: dict, new_metadata: dict,
                    *, target_digest: str | None = None, require_consent: bool = False) -> None:
     from pm.client import sync_venv
+    from pm.plugin_inputs import StagedUpdate
     from pm.store import tree_digest
 
     if require_consent:
@@ -28,11 +29,11 @@ def publish_plugin(staged: Path, target: Path, old_metadata: dict, new_metadata:
                 raise plugins_cmd.PluginOperationError(
                     f"Reinstall declined: {reason}. The installed plugin and active environment are unchanged.")
 
-    sync_venv(explicit=True, staged_plugin={
+    sync_venv(explicit=True, plugins=StagedUpdate({
         "staged": str(staged.resolve()), "target": str(target.absolute()),
         "old_metadata": old_metadata, "new_metadata": new_metadata,
         "target_digest": target_digest if target_digest is not None else (tree_digest(target) if target.exists() else None),
-    })
+    }))
 
 
 def _refresh_declared_dependencies(target: Path, staged: Path, manifest: dict, *, interactive: bool) -> None:

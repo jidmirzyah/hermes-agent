@@ -2496,6 +2496,8 @@ export const ar = defineLocale({
     }
   },
   updates: {
+    discontinuedTitle: 'لم يعد إصدار Hermes هذا مدعومًا',
+    discontinuedBody: 'لم يعد إصدار Hermes هذا مدعومًا وقد يتوقف عن العمل — ألغِ تثبيته. ستبقى بياناتك على القرص.',
     channels: { stable: 'مستقر', canary: 'تجريبي' },
     bundleSwapPending: 'أعد التشغيل لإكمال التحديث',
     bundleSwapPendingDesc:
@@ -2554,7 +2556,9 @@ export const ar = defineLocale({
     versionDetailsDistributionDesktopMsix: 'تطبيق سطح المكتب (MSIX)',
     versionDetailsDistributionDesktopInstaller: 'تطبيق سطح المكتب (المُثبِّت)',
     versionDetailsDistributionSourceInstaller: 'المصدر (سكربت التثبيت)',
+    versionDetailsDistributionSourceInstallerDesktop: 'المصدر (سكربت التثبيت) + hermes desktop',
     versionDetailsDistributionSource: 'المصدر',
+    versionDetailsDistributionSourceDesktop: 'المصدر + hermes desktop',
     versionDetailsDistributionStore: 'Microsoft Store',
     versionDetailsRuntimeEmbedded: 'وقت تشغيل مضمّن',
     versionDetailsRuntimeExternal: 'خارجي (يستخدم وقت تشغيل الجهاز)',

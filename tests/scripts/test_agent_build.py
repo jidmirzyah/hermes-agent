@@ -336,6 +336,8 @@ def test_automatic_frontends_use_requested_snapshot_not_current_checkout(tmp_pat
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
     project.write_text('[project]\nversion="dirty-current"\n', encoding="utf-8")
     monkeypatch.setattr(stage, "ROOT", repo)
+    monkeypatch.setattr("scripts.build.icon_environment.prepare_icon_environment",
+                        lambda source, out, cache: sys.executable)
     monkeypatch.setattr(stage.shutil, "which", lambda name: "/prepared/node")
     real_run = subprocess.run
     built_sources = []

@@ -164,8 +164,14 @@ fi
 echo -e "${CYAN}→${NC} Installing python + tools + dependencies via pm (hash-verified via uv.lock)..."
 echo -e "${CYAN}→${NC} (first run on a fresh checkout can take 1-5 minutes)"
 # PM can replace its uv entry only after the bootstrap uv has exited.
-"$uv" python install --no-bin --no-registry "$py_version"
-boot_py="$("$uv" python find --managed-python "$py_version")"
+# A bare version lets uv pick emulated x86_64 on Windows-on-ARM.
+py_request="$py_version"
+if [ "$os" = win32 ]; then
+  case "$arch" in arm64) py_request="cpython-$py_version-windows-aarch64-none" ;;
+                  *) py_request="cpython-$py_version-windows-x86_64-none" ;; esac
+fi
+"$uv" python install --no-bin --no-registry "$py_request"
+boot_py="$("$uv" python find --managed-python "$py_request")"
 boot_py="${boot_py%$'\r'}"
 # Activation trusts the recorded tool digest; a direct setup re-checks it
 # (setup-hermes.ps1 draws the same line).

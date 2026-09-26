@@ -78,6 +78,32 @@ async function openAbout(page, { prepare, log, shot, confirmSettings = false, hi
   }
 }
 
+async function assertStagedBranch(page, expectedSha, log) {
+  let status
+  for (let attempt = 0; attempt < 3; attempt++) {
+    status = await page.evaluate(() => window.hermesDesktop.updates.check({ force: true }))
+    log(`[source-branch-check] ${JSON.stringify(status)}`)
+    // The app's mount-time poller can fetch the same origin/main concurrently;
+    // Git rejects the losing ref update even though the winning fetch succeeded.
+    // Retry only that transient lock race, never a missing channel or other error.
+    if (status.error !== 'fetch-failed' || !/cannot lock ref 'refs\/remotes\/origin\/main'/.test(status.message || '')) break
+    await page.waitForTimeout(1_000)
+  }
+  // Historical Desktop status has no updateAvailable field: its About/overlay
+  // offers the button when behind > 0. A newer checker states updateAvailable
+  // and leaves behind null when it cannot count (GitHub compare does not know a
+  // staged commit). Never accept an explicit false, a dirty source tree, or
+  // merely a matching remote tip.
+  const offered = status.updateAvailable === undefined
+    ? Number.isInteger(status.behind) && status.behind > 0
+    : status.updateAvailable === true
+  if (status.supported !== true || status.error || status.dirty === true ||
+      status.branch !== 'main' || status.targetSha !== expectedSha ||
+      status.currentSha === expectedSha || !offered) {
+    throw new Error('Desktop source check did not offer staged Git main; refusing to click an unrelated update')
+  }
+}
+
 async function waitForUpdate(page, { log, shot }) {
   const update = page.getByRole('button', { name: /update now/i }).first()
   const details = page.getByRole('button', { name: /^see what['’]s new$/i }).first()
@@ -119,4 +145,4 @@ async function readManualUpdateCommand(page) {
   return command
 }
 
-module.exports = { pickAppWindow, openAbout, readManualUpdateCommand, waitForUpdate }
+module.exports = { assertStagedBranch, pickAppWindow, openAbout, readManualUpdateCommand, waitForUpdate }

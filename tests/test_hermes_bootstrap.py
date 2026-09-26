@@ -427,6 +427,49 @@ class TestHardenImportPath:
 
 
 
+class TestEnableWindowsVt:
+    """Hermes prints raw SGR codes; a conhost console renders them only with VT on."""
+
+    @pytest.mark.platforms("windows")
+    def test_turns_vt_on_for_a_console_that_has_it_off(self):
+        # A fresh console via CREATE_NEW_CONSOLE is the installer's situation:
+        # a real conhost whose output handle starts without VT processing.
+        script = textwrap.dedent("""
+            import ctypes, msvcrt, sys
+            from ctypes import wintypes
+            sys.path.insert(0, sys.argv[1])
+            import hermes_bootstrap
+            kernel32 = ctypes.WinDLL("kernel32")
+            handle = msvcrt.get_osfhandle(sys.stdout.fileno())
+            mode = wintypes.DWORD()
+            if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+                sys.exit(4)
+            kernel32.SetConsoleMode(handle, mode.value & ~0x0004)
+            ok = hermes_bootstrap.enable_windows_vt()
+            kernel32.GetConsoleMode(handle, ctypes.byref(mode))
+            sys.exit(0 if ok and mode.value & 0x0004 else 3)
+        """).strip()
+        root = str(Path(__file__).resolve().parents[1])
+        result = subprocess.run(
+            [sys.executable, "-c", script, root],
+            creationflags=subprocess.CREATE_NEW_CONSOLE,
+            timeout=120,
+        )
+        if result.returncode == 4:
+            pytest.skip("this session cannot create a console")
+        assert result.returncode == 0
+
+    @pytest.mark.platforms("windows")
+    def test_leaves_non_console_handles_and_colour_alone(self, tmp_path, monkeypatch):
+        # Redirected output must neither fail nor flip Hermes to NO_COLOR.
+        monkeypatch.delenv("NO_COLOR", raising=False)
+        import hermes_bootstrap
+
+        with open(tmp_path / "out.txt", "w", encoding="utf-8") as stream:
+            assert hermes_bootstrap.enable_windows_vt([stream]) is True
+        assert "NO_COLOR" not in os.environ
+
+
 class TestSuppressPlatformVerConsole:
     """suppress_platform_ver_console: stub applied on Windows, no-op on POSIX."""
 

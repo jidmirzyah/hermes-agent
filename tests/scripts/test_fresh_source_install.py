@@ -77,13 +77,17 @@ def test_current_installer_publishes_real_dependencies_and_warm_path(tmp_path, s
     (source / "pyproject.toml").write_text(
         '[project]\nname="installer-fixture"\nversion="1"\nrequires-python=">=3.14"\n'
         f'dependencies=["installer-probe==1.0",{json.dumps(yaml_dep)}]\n'
-        '[project.optional-dependencies]\nall=[]\n[tool.uv]\npackage=false\n'
+        '[project.optional-dependencies]\nall=[]\n[dependency-groups]\ndev=[]\ntest=[]\n'
+        '[tool.uv]\npackage=false\n'
         '[tool.uv.sources]\ninstaller-probe={path="wheels/installer_probe-1.0-py3-none-any.whl"}\n',
         encoding="utf-8")
     run([uv, "lock", "--python", str(python)], cwd=source)
     # Only the application is a fixture; the shell, PM, bootstrap and writer run unchanged.
+    # Completion still imports the CLI's checkout root during post-install maintenance.
     (source / "hermes_cli/main.py").write_text(
         "import installer_probe, json, sys\n"
+        "from pathlib import Path\n"
+        "PROJECT_ROOT = Path(__file__).resolve().parents[1]\n"
         "def main():\n print(json.dumps({'module':installer_probe.__file__, 'argv':sys.argv[1:]}))\n"
         "if __name__ == '__main__': main()\n", encoding="utf-8")
     docroot, url = served

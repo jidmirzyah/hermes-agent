@@ -2,7 +2,7 @@
 import sys
 
 import pytest
-from tests.conftest import _host_matches_platforms, _platform_machine
+from tests._fixtures.platform_gating import _host_matches_platforms, _platform_machine
 
 
 @pytest.mark.parametrize("specs,hosts", [

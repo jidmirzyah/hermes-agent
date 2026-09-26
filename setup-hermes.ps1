@@ -82,9 +82,11 @@ Write-Host '(first run on a fresh checkout can take 1-5 minutes)'
 Push-Location $repo
 try {
     # PM can replace its uv entry only after the bootstrap uv has exited.
-    & $uv python install --no-bin --no-registry $pyVersion
+    # A bare version lets uv pick emulated x86_64 on Windows-on-ARM.
+    $pyRequest = "cpython-$pyVersion-windows-$(if ($arch -eq 'arm64') { 'aarch64' } else { 'x86_64' })-none"
+    & $uv python install --no-bin --no-registry $pyRequest
     if ($LASTEXITCODE -ne 0) { throw 'bootstrap Python installation failed' }
-    $bootPy = (& $uv python find --managed-python $pyVersion) -join "`n"
+    $bootPy = (& $uv python find --managed-python $pyRequest) -join "`n"
     if ($LASTEXITCODE -ne 0 -or -not $bootPy) { throw 'bootstrap Python lookup failed' }
     & $bootPy.Trim() -m pm.cli install $(if ($RuntimeOnly) { '--trust-recorded' }) "--test-environment=$TestExtras"
     if ($LASTEXITCODE -ne 0) { throw 'pm install failed - see output above.' }

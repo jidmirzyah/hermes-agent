@@ -16,6 +16,8 @@ from pm.package import Runner
 from pm.registry import get_package
 from pm.store import current_target, tree_digest
 
+_REAL_HERMES_HOME = Path.home() / ".hermes"  # Captured before per-test HOME isolation.
+
 
 def _register_installed_tool(name, executable, companions=()):
     executable = Path(executable)
@@ -43,7 +45,10 @@ def node_store(tmp_path, monkeypatch):
     node = shutil.which("node")
     if node is None:
         pytest.skip("requires an already-installed Node executable")
-    assert node is not None
+    # The fixture hashes its input. Never read the developer's live PM store to
+    # fabricate a temporary one; CI's external Node still exercises this path.
+    if Path(node).absolute().is_relative_to(_REAL_HERMES_HOME):
+        pytest.skip("requires a Node binary outside the real Hermes home")
     monkeypatch.setenv("PATH", str(Path(node).parent))
     home = tmp_path / "home"
     home.mkdir()

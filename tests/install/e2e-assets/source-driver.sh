@@ -20,6 +20,21 @@ source_hermes() {
   printf '%s\n' "$command"
 }
 
+# v2026.6.19's install.sh (also run by its DMG bootstrap) writes .install_method
+# into the checkout without ignoring it, and that release's Desktop checker
+# reports git status --porcelain verbatim. Teach only this disposable clone that
+# the installer's own marker is not a source edit; keep the marker for
+# install-method detection and refuse any other dirty state.
+accept_installer_marker() {
+  local root="$1" status
+  status="$(git -C "$root" status --porcelain --untracked-files=all)" || return 1
+  if [ "$status" = '?? .install_method' ] && [ "$(cat "$root/.install_method")" = git ]; then
+    printf '\n/.install_method\n' >> "$(git -C "$root" rev-parse --absolute-git-dir)/info/exclude"
+    status="$(git -C "$root" status --porcelain --untracked-files=all)" || return 1
+  fi
+  [ -z "$status" ] || { printf 'installed source has changes other than the installer marker:\n%s\n' "$status" >&2; return 1; }
+}
+
 # Hand out a command to DRIVE the next ordinary startup, even when the
 # published launcher is not there yet.
 #
