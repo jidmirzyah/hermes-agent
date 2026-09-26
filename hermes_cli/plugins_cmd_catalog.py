@@ -469,7 +469,8 @@ def repin_catalog_plugin(
                 selection_changed = True
         if selection_changed:
             _admit_and_save_plugin_sets(
-                enabled, disabled, action=f"Rename plugin '{target.name}' to '{installed_name}'")
+                enabled, disabled, action=f"Rename plugin '{target.name}' to '{installed_name}'",
+                plugin=installed_name)
         _remove_plugin_core(target)
         warnings.append(f"Plugin renamed itself from '{target.name}' to '{installed_name}'; the old directory was removed.")
     return RepinResult(entry.sha, True, installed_name, warnings)
@@ -613,8 +614,9 @@ def cmd_validate(path: str, as_json: bool = False, install_deps: bool = False) -
     from hermes_cli.plugins_cmd import _console
     if install_deps:
         import pm
+        from pm.plugin_inputs import Candidates
         try:
-            pm.sync_venv(extra_plugin_dirs=[Path(path)])
+            pm.sync_venv(plugins=Candidates([Path(path)]))
         except Exception as exc:  # validation still runs; the probe reports what is missing
             print(f"dependency preparation failed: {exc}", file=sys.stderr)
     report = validate_plugin_dir(Path(path))

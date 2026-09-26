@@ -173,7 +173,7 @@ it guards. `plan → snapshot → apply → restart-per-kind → verify → repo
   this owner; never reload or purge modules to continue in the old interpreter. The parent keeps
   the lock, waits, and accepts only a correlated terminal result. `cmd_update` still finalizes
   early failures and missing/killed-child outcomes; PM refusal data survives the handoff.
-  See `docs/source-update-completion.md`. A begun-but-unwritten receipt is a bug.
+  See `website/docs/developer-guide/source-update-completion.md`. A begun-but-unwritten receipt is a bug.
 - **Nothing runs pulled code in the pre-pull interpreter.** This tree finishes updates through
   `update_completion.run_completion` / `_update_takeover.py`.
   `hermes_cli/update_handoff.py` and `hermes_cli/update_serve_obligations.py` are the

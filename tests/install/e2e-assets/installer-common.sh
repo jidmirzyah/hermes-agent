@@ -45,14 +45,39 @@ EOF
   ok "git transport redirected via $cfg; origin reported by $shim/git"
 }
 
+# Print the commit an update ref names. NEXT is not a git ref: it mints a
+# synthetic child of the install commit, so a leg that starts AT HEAD still
+# has an update to take -- the one HEAD's own updater must handle. The child
+# adds one marker file (a real tree diff, not an empty fast-forward) and
+# lives only in the object store: no ref, no worktree change. A local
+# `git clone --bare` copies objects/ wholesale, which is how it reaches
+# serve.git; the drivers assert it arrived.
+resolve_update_ref() {
+  local repo="$1" parent="$2" ref="$3" blob tree
+  if [ "$ref" != NEXT ]; then
+    git -C "$repo" rev-parse "${ref}^{commit}"
+    return
+  fi
+  blob="$(printf 'synthetic next commit for the HEAD -> NEXT install E2E leg\n' \
+    | git -C "$repo" hash-object -w --stdin)" || return
+  tree="$( { git -C "$repo" ls-tree -z "$parent"; printf '100644 blob %s\t.hermes-e2e-next\0' "$blob"; } \
+    | git -C "$repo" mktree -z)" || return
+  GIT_AUTHOR_NAME='Hermes E2E' GIT_AUTHOR_EMAIL='e2e@hermes.invalid' \
+    GIT_COMMITTER_NAME='Hermes E2E' GIT_COMMITTER_EMAIL='e2e@hermes.invalid' \
+    git -C "$repo" commit-tree "$tree" -p "$parent" -m 'e2e: synthetic next commit'
+}
+
 run_source_installer() {
   local repo="$1" work="$2" logs="$3" ref="$4" label="$5" desktop="${6:-}"
-  local script="$work/install-$label.sh" text rc=0
+  local script="$work/install-$label.sh" text help_text rc=0
   # Buffer before grep: git show | grep -q can lose to SIGPIPE under pipefail.
   text="$(git -C "$repo" show "$ref:scripts/install.sh")" || return
   git -C "$repo" show "$ref:scripts/install.sh" > "$script" || return
   local flags=(--skip-setup)
-  if grep -qF -- --skip-browser <<< "$text"; then flags+=(--skip-browser); fi
+  # Rejection messages also mention --skip-browser. Only pass it when this
+  # version's public help advertises the flag as supported.
+  help_text="$(bash "$script" --help < /dev/null 2>/dev/null)" || help_text=""
+  if grep -qF -- --skip-browser <<< "$help_text"; then flags+=(--skip-browser); fi
   if [ "$desktop" = desktop ]; then
     grep -qF -- --include-desktop <<< "$text" \
       || { fail "ref $ref does not support --include-desktop; this leg cannot mean what it claims"; return 1; }

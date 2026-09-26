@@ -69,7 +69,7 @@ If your skill is specialized, community-contributed, or niche, it's better suite
 
 ## Memory Providers: Ship as a Standalone Plugin
 
-**We are no longer accepting new memory providers into this repo.** The set of built-in providers under `plugins/memory/` (honcho, mem0, supermemory, byterover, hindsight, holographic, openviking, retaindb) is closed. If you want to add a new memory backend, publish it as a **standalone plugin repo** that users install into `~/.hermes/plugins/` (or via a pip entry point).
+**We are no longer accepting new memory providers into this repo.** The set of built-in providers under `plugins/memory/` (honcho, mem0, supermemory, byterover, holographic, openviking, retaindb) is closed. If you want to add a new memory backend, publish it as a **standalone plugin repo** that users install into `~/.hermes/plugins/` (or via a pip entry point).
 
 Standalone memory plugins:
 
@@ -195,9 +195,9 @@ Use a Node/npm version accepted by the corresponding `package.json` engines.
 Native desktop dependencies can also require the platform build toolchain.
 
 Logos and icons are generated from `assets/nous-girl-*.svg` and
-`assets/backgrounds/`. `node scripts/generate-icons.mjs` uses the locked,
-isolated `icon-build` dependency group. Do not commit generated PNG/ICO/ICNS
-outputs or add icon renderers to production dependencies.
+`assets/backgrounds/`. `node scripts/generate-icons.mjs` renders them with the
+Hermes runtime Python (`HERMES_PYTHON`, else `python` on PATH): Pillow and
+resvg-py are core dependencies. Do not commit generated PNG/ICO/ICNS outputs.
 
 ### Run tests
 

@@ -1,10 +1,14 @@
-import { useEffect, useRef, useState } from 'react'
+import { useRef, useState } from 'react'
 
 import type { DesktopConnectionConfigInput, DesktopConnectionProbeResult } from '@/global'
 import { useI18n } from '@/i18n'
 import { deriveRemoteAuthProviderShape } from '@/lib/desktop-remote-auth'
 import { coerceRemoteUrlScheme } from '@/lib/remote-url'
 import type { NotificationInput } from '@/store/notifications'
+
+import { type RemoteConnectionTest, useRemoteConnectionTest } from './use-remote-connection-test'
+import { type RemoteOAuth, useRemoteOAuth } from './use-remote-oauth'
+import { useRemoteProbe } from './use-remote-probe'
 
 export type RemoteSetupHost = 'first-run' | 'settings' | 'registry'
 type AuthMode = 'oauth' | 'token'
@@ -62,25 +66,38 @@ function credentialsFrom(saved: Partial<RemoteCredentials> = {}): RemoteCredenti
  */
 export function useRemoteSetup(options: RemoteSetupOptions): RemoteSetup {
   const { t } = useI18n()
-  const g = t.settings.gateway
   const { host, enabled = true } = options
   const callbacks = useRef<RemoteSetupOptions>(options)
   callbacks.current = options
   const [credentials, setCredentials] = useState<RemoteCredentials>(credentialsFrom)
   const [revision, setRevision] = useState<number>(0)
-  const [probe, setProbe] = useState<DesktopConnectionProbeResult | null>(null)
-  const [probeStatus, setProbeStatus] = useState<ProbeStatus>('idle')
-  const [signingIn, setSigningIn] = useState<boolean>(false)
-  const [testing, setTesting] = useState<boolean>(false)
-  const [error, setError] = useState<string | null>(null)
-  const [success, setSuccess] = useState<string | null>(null)
-  const [testedKey, setTestedKey] = useState<string | null>(null)
-  const targetSeq = useRef<number>(0)
-  const testSeq = useRef<number>(0)
-  const loginSeq = useRef<number>(0)
+
   const url = coerceRemoteUrlScheme(credentials.url)
   const manualAuth = host === 'registry'
   const probeEnabled = enabled && (!manualAuth || credentials.authMode === 'oauth')
+  const notify = (notice: NotificationInput): void => callbacks.current.onNotice?.(notice)
+
+  const { probe, probeStatus, targetSeq, invalidateProbe, acceptProbe } = useRemoteProbe({
+    enabled: probeEnabled,
+    url,
+    revision,
+    onReset: (): void => {
+      oauth.clearSigningIn()
+      connectionTest.clearTestOutcome()
+    },
+    onResult: (result: DesktopConnectionProbeResult): void => {
+      connectionTest.invalidateTest()
+
+      if (!manualAuth && result.reachable && result.authMode !== 'unknown') {
+        const authMode = result.authMode
+        setCredentials(current => ({
+          ...current,
+          authMode,
+          oauthConnected: authMode === 'oauth' && current.oauthConnected
+        }))
+      }
+    }
+  })
 
   const payload: DesktopConnectionConfigInput = {
     mode: 'remote',
@@ -89,9 +106,6 @@ export function useRemoteSetup(options: RemoteSetupOptions): RemoteSetup {
     remoteUrl: url
   }
 
-  const payloadKey = JSON.stringify(payload)
-  const currentKey = useRef<string>(payloadKey)
-  currentKey.current = payloadKey
   const { isPassword, providerLabel } = deriveRemoteAuthProviderShape(probe?.providers, t.boot.failure.identityProvider)
 
   const authResolved =
@@ -106,21 +120,34 @@ export function useRemoteSetup(options: RemoteSetupOptions): RemoteSetup {
 
   const canTest = enabled && Boolean(url) && ((authResolved && credentialReady) || probeStatus === 'error')
 
-  const invalidateTest = (): void => {
-    testSeq.current += 1
-    setTesting(false)
-    setTestedKey(null)
-    setError(null)
-    setSuccess(null)
-  }
+  const connectionTest: RemoteConnectionTest = useRemoteConnectionTest({
+    host,
+    url,
+    payload,
+    canTest,
+    authResolved,
+    targetSeq,
+    acceptProbe,
+    notify
+  })
+
+  const oauth: RemoteOAuth = useRemoteOAuth({
+    host,
+    url,
+    providerLabel,
+    targetSeq,
+    beforeOAuthLogin: (value: DesktopConnectionConfigInput): Promise<void> | undefined =>
+      callbacks.current.beforeOAuthLogin?.(value),
+    setOAuthConnected: (oauthConnected: boolean): void => setCredentials(value => ({ ...value, oauthConnected })),
+    invalidateTest: connectionTest.invalidateTest,
+    reportError: connectionTest.reportError,
+    notify
+  })
 
   const invalidateTarget = (): void => {
-    targetSeq.current += 1
-    loginSeq.current += 1
-    setSigningIn(false)
-    setProbe(null)
-    setProbeStatus('idle')
-    invalidateTest()
+    invalidateProbe()
+    oauth.invalidateLogin()
+    connectionTest.invalidateTest()
   }
 
   const reset = (saved?: Partial<RemoteCredentials>): void => {
@@ -136,7 +163,7 @@ export function useRemoteSetup(options: RemoteSetupOptions): RemoteSetup {
   }
 
   const setToken = (token: string): void => {
-    invalidateTest()
+    connectionTest.invalidateTest()
     setCredentials(current => ({ ...current, token }))
   }
 
@@ -144,206 +171,6 @@ export function useRemoteSetup(options: RemoteSetupOptions): RemoteSetup {
     invalidateTarget()
     setCredentials(current => ({ ...current, authMode, oauthConnected: false }))
     setRevision(value => value + 1)
-  }
-
-  const reportError = (err: unknown, title: string = g.testFailed, kind: 'error' | 'warning' = 'error'): void => {
-    const message = err instanceof Error ? err.message : String(err || g.testFailed)
-    setError(message)
-    callbacks.current.onNotice?.({ kind, title, message })
-  }
-
-  const reportSuccess = (message: string): void => {
-    setSuccess(message)
-    callbacks.current.onNotice?.({ kind: 'success', title: g.reachableTitle, message })
-  }
-
-  const acceptProbe = (result: DesktopConnectionProbeResult): void => {
-    invalidateTest()
-    setProbe(result)
-    setProbeStatus(result.reachable ? 'done' : 'error')
-
-    if (!manualAuth && result.reachable && result.authMode !== 'unknown') {
-      const authMode = result.authMode
-      setCredentials(current => ({
-        ...current,
-        authMode,
-        oauthConnected: authMode === 'oauth' && current.oauthConnected
-      }))
-    }
-  }
-
-  // The effect reads current callbacks without restarting its debounce on each host render.
-  const acceptProbeRef = useRef<(result: DesktopConnectionProbeResult) => void>(acceptProbe)
-  acceptProbeRef.current = acceptProbe
-  // eslint-disable-next-line no-restricted-syntax -- request generations, not a reactive value mirror
-  useEffect(() => {
-    const seq = ++targetSeq.current
-    let timer: number | undefined
-
-    const cancel = (): void => {
-      targetSeq.current += 1
-      window.clearTimeout(timer)
-    }
-
-    setProbe(null)
-    setProbeStatus('idle')
-    setSigningIn(false)
-    setTesting(false)
-    setTestedKey(null)
-    setSuccess(null)
-
-    if (!probeEnabled || !/^https?:\/\//i.test(url) || !window.hermesDesktop?.probeConnectionConfig) {
-      return cancel
-    }
-
-    setProbeStatus('probing')
-    timer = window.setTimeout(() => {
-      void window.hermesDesktop
-        .probeConnectionConfig(url)
-        .then(result => {
-          if (seq === targetSeq.current) {
-            acceptProbeRef.current(result)
-          }
-        })
-        .catch(() => {
-          if (seq === targetSeq.current) {
-            setProbeStatus('error')
-          }
-        })
-    }, 500)
-
-    return cancel
-  }, [probeEnabled, revision, url])
-
-  const signIn = async (): Promise<void> => {
-    if (!url || signingIn) {
-      return
-    }
-
-    const target = targetSeq.current
-    const seq = ++loginSeq.current
-    const current = (): boolean => target === targetSeq.current && seq === loginSeq.current
-    invalidateTest()
-    setSigningIn(true)
-
-    try {
-      await callbacks.current.beforeOAuthLogin?.({ mode: 'remote', remoteAuthMode: 'oauth', remoteUrl: url })
-
-      if (!current()) {
-        return
-      }
-
-      const result = await window.hermesDesktop.oauthLoginConnectionConfig(url)
-
-      if (!current()) {
-        return
-      }
-
-      setCredentials(value => ({ ...value, oauthConnected: Boolean(result.connected) }))
-
-      if (result.connected) {
-        callbacks.current.onNotice?.({ kind: 'success', title: g.signedIn, message: g.connectedTo(providerLabel) })
-      } else {
-        const message = host === 'first-run' ? t.install.signInIncomplete : t.boot.failure.signInIncompleteMessage
-        reportError(
-          result.error ? `${message}: ${result.error}` : message,
-          t.boot.failure.signInIncompleteTitle,
-          'warning'
-        )
-      }
-    } catch (err) {
-      if (current()) {
-        reportError(err, g.signInFailed)
-      }
-    } finally {
-      if (current()) {
-        setSigningIn(false)
-      }
-    }
-  }
-
-  const signOut = async (): Promise<void> => {
-    const target = targetSeq.current
-    const seq = ++loginSeq.current
-    const current = (): boolean => target === targetSeq.current && seq === loginSeq.current
-    invalidateTest()
-    setSigningIn(true)
-
-    try {
-      await window.hermesDesktop.oauthLogoutConnectionConfig(url)
-
-      if (current()) {
-        setCredentials(value => ({ ...value, oauthConnected: false }))
-        callbacks.current.onNotice?.({ kind: 'success', title: g.signedOutTitle, message: g.signedOutMessage })
-      }
-    } catch (err) {
-      if (current()) {
-        reportError(err, g.signOutFailed)
-      }
-    } finally {
-      if (current()) {
-        setSigningIn(false)
-      }
-    }
-  }
-
-  const test = async (): Promise<void> => {
-    if (!canTest) {
-      return
-    }
-
-    const target = targetSeq.current
-    const seq = ++testSeq.current
-
-    const current = (): boolean =>
-      target === targetSeq.current && seq === testSeq.current && payloadKey === currentKey.current
-
-    setTesting(true)
-    setError(null)
-    setSuccess(null)
-    setTestedKey(null)
-
-    try {
-      if (!authResolved) {
-        const result = await window.hermesDesktop.probeConnectionConfig(url)
-
-        if (current()) {
-          acceptProbeRef.current(result)
-
-          if (!result.reachable || result.authMode === 'unknown') {
-            reportError(result.error || g.probeError)
-          }
-        }
-
-        return
-      }
-
-      const result = await window.hermesDesktop.testConnectionConfig(payload)
-
-      if (!current()) {
-        return
-      }
-
-      if (result.ok === false || result.reachable === false) {
-        throw new Error(result.error || g.testFailed)
-      }
-
-      reportSuccess(
-        (host === 'first-run' ? t.install.testSucceeded : g.connectedTo)(
-          result.baseUrl || url,
-          result.version ?? undefined
-        )
-      )
-      setTestedKey(payloadKey)
-    } catch (err) {
-      if (current()) {
-        reportError(err)
-      }
-    } finally {
-      if (current()) {
-        setTesting(false)
-      }
-    }
   }
 
   return {
@@ -354,18 +181,18 @@ export function useRemoteSetup(options: RemoteSetupOptions): RemoteSetup {
     authResolved,
     providerLabel,
     isPassword,
-    signingIn,
-    testing,
-    error,
-    success,
+    signingIn: oauth.signingIn,
+    testing: connectionTest.testing,
+    error: connectionTest.error,
+    success: connectionTest.success,
     canTest,
-    canCommit: enabled && (host === 'first-run' ? testedKey === payloadKey : host === 'registry' || credentialReady),
+    canCommit: enabled && (host === 'first-run' ? connectionTest.passed : host === 'registry' || credentialReady),
     setUrl,
     setToken,
     setAuthMode,
     reset,
-    signIn,
-    signOut,
-    test
+    signIn: oauth.signIn,
+    signOut: oauth.signOut,
+    test: connectionTest.test
   }
 }

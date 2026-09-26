@@ -189,6 +189,7 @@ def dependencies(args) -> None:
 
     from pm.environments import selected_venv
     from pm import check_project_lock, sync_venv
+    from pm.plugin_inputs import Members
     from pm.paths import repo_root
 
     project = repo_root()
@@ -206,7 +207,7 @@ def dependencies(args) -> None:
         python = ensure_testenv(project, extras)
         venv = python.parent.parent
     else:
-        sync_venv(extras, explicit=True, plugin_dirs=[])
+        sync_venv(extras, explicit=True, plugins=Members([]))
         venv = selected_venv(project)
     bindir = venv / ("Scripts" if os.name == "nt" else "bin")
     python = bindir / ("python.exe" if os.name == "nt" else "python")

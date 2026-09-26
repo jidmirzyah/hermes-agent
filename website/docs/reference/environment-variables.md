@@ -853,7 +853,7 @@ Advanced per-platform knobs for throttling the outbound message batcher. Most us
 | `HERMES_ALLOW_PRIVATE_URLS` | `true`/`false` — allow tools to fetch localhost/private-network URLs. Off by default in gateway mode. |
 | `HERMES_REDACT_SECRETS` | `true`/`false` — control secret redaction in tool output, logs, and chat responses (default: `true`). |
 | `HERMES_WRITE_SAFE_ROOT` | Optional directory prefix that **hard-blocks** `write_file`/`patch` writes outside the listed roots (no approval prompt). Supports multiple directories separated by `os.pathsep` (`:` on Unix, `;` on Windows). See [HERMES_WRITE_SAFE_ROOT](#hermes_write_safe_root) below. |
-| `HERMES_DISABLE_LAZY_INSTALLS` | Internal PM policy used by the official Docker image and tests. Truthy values refuse on-demand installation rather than redirecting it to a lazy-packages overlay. It overrides the user-facing `security.allow_lazy_installs` setting. Do not put it in `.env`. |
+| `HERMES_DISABLE_LAZY_INSTALLS` | Internal PM policy used by tests and install probes. Truthy values refuse on-demand installation. It overrides the user-facing `security.allow_lazy_installs` setting. Do not put it in `.env`. |
 | `HERMES_DISABLE_FILE_STATE_GUARD` | Set to `1` to turn off the "file changed since you read it" guard on `patch`/`write_file`. |
 | `HERMES_BUNDLED_SKILLS` | Comma-separated override for the list of bundled skills loaded at startup. |
 | `HERMES_OPTIONAL_SKILLS` | Comma-separated list of optional-skill names to auto-install on first run. |
@@ -880,6 +880,17 @@ export HERMES_WRITE_SAFE_ROOT=/path/to/project:/home/you/.hermes
 ```
 
 Unset the variable or remove it from `.env` to restore normal writes (still subject to the credential-path denylist — see [File write safety](../user-guide/security.md#file-write-safety)).
+
+### Internal bridge variables
+
+Hermes sets these itself to carry state across a boundary where no `config.yaml` exists yet or where two processes need to agree. They are documented so you can recognise them in a process environment or a log; do not set them yourself, and never put them in `.env`.
+
+| Variable | Description |
+|----------|-------------|
+| `HERMES_DATA_DIR_SUFFIX` | Baked into a desktop bundle's environment (`--bundle-env`, `HERMES_BUNDLE_ENV_JSON`, or channel builds with channel-specific data dirs, which use `-channel-build-<channel>`) so a test or channel build keeps its own data. It is appended literally to the default Hermes home and the default Electron `userData` directory, with no separator: `-channel-build-canary` selects `~/.hermes-channel-build-canary` on POSIX. Explicit `HERMES_HOME` and `HERMES_DESKTOP_USER_DATA_DIR` win and are not suffixed. It must be in the launch environment before startup, because it chooses the home that holds `.env` and `config.yaml`. |
+| `HERMES_REPO_URL` | Git remote the installers (`scripts/install.sh`, `scripts/install.ps1`) clone from, and re-point `origin` to on a rerun. It is an environment variable because the installer runs before any Hermes config exists. Used by CI and rehearsal scripts to install from a fork or mirror; unset, the installers use the official repository. |
+| `HERMES_UPDATE_STATUS_FILE` | Exported by the desktop update shim (`scripts/desktop-update/posix.sh`) with the path of the status JSON its progress window renders. The `hermes update` takeover children publish their long-running stages into that file so the window keeps moving. Absent (an older shim), they fall back to the status file named by the shim's pid in the update marker, and publish nothing when no UI is watching. |
+| `HERMES_UPDATE_UI_ACTIVE` | Set to `1` by an update child after it opens the native macOS status panel for an old shim that has no window of its own. Children inherit it, so the panel is opened at most once per update chain. |
 
 ## Interface
 

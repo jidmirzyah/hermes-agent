@@ -30,7 +30,8 @@ import { execFileSync } from 'node:child_process';
 import { parseArgs } from 'node:util';
 import { _electron } from '@playwright/test';
 import { prepareWindowForInput } from './window-input.cjs';
-import { pickAppWindow, openAbout, readManualUpdateCommand, waitForUpdate } from './update-ui.cjs';
+import { assertStagedBranch, pickAppWindow, openAbout, readManualUpdateCommand, waitForUpdate } from './update-ui.cjs';
+import { installSourceBranchProbe, prepareSourceBranchEnvironment } from './source-branch-probe.cjs';
 import { observeSourceUpdate } from './source-update-observer.mjs';
 import { runUpdateWindowChat } from './update-window-chat.mjs';
 import { isolateUpdateWindowEnvironment, isolatedElectronArgs, updateWindowEnvironment } from './smoke-env.mjs';
@@ -143,6 +144,12 @@ async function main() {
   const capturedEnv = updateWindowEnvironment(launch.env, values['repo-dir'], 'source');
   settleSourceRuntime(values['repo-dir'], capturedEnv);
   const launchEnv = isolateUpdateWindowEnvironment(capturedEnv);
+  if (!values['no-update']) {
+    // This unpublished E2E target has no R2 channel record. Only the test
+    // probe selects the real checker's explicit branch path.
+    prepareSourceBranchEnvironment(values['repo-dir'], values['expect-sha'],
+      process.env.HERMES_E2E_REAL_GIT, capturedEnv, launchEnv);
+  }
   log(`launching ${launch.executablePath} (shape: ${spec.matchedShape}, isolated userData: ${launchEnv.HERMES_DESKTOP_USER_DATA_DIR})`);
 
   phase('launch');
@@ -152,6 +159,7 @@ async function main() {
     cwd: launch.cwd,
     env: launchEnv,
   });
+  if (!values['no-update']) await installSourceBranchProbe(app);
   const window = await pickAppWindow(app, log);
   await window.screenshot({ path: `${values.spec}.window.png` }).catch(() => {});
 
@@ -175,6 +183,7 @@ async function main() {
   if (!values.result && !(values['expect-sha'] && values['repo-dir'])) {
     throw new Error('need --result and/or --expect-sha + --repo-dir unless --no-update');
   }
+  await assertStagedBranch(window, values['expect-sha'], log);
   const deadline = Date.now() + Number(values['timeout-ms']);
 
 
@@ -239,7 +248,10 @@ async function main() {
   /** @returns {string} */
   const headSha = () => {
     try {
-      return execFileSync('git', ['-C', /** @type {string} */ (repoDir), 'rev-parse', 'HEAD'], {
+      // The driver's real git: a fresh-machine leg takes every git off PATH
+      // so the product must provision its own, and an observer that cannot
+      // spawn git would read '' forever instead of failing.
+      return execFileSync(process.env.HERMES_E2E_REAL_GIT || 'git', ['-C', /** @type {string} */ (repoDir), 'rev-parse', 'HEAD'], {
         encoding: 'utf8',
       }).trim();
     } catch {

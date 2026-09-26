@@ -105,6 +105,9 @@ for _hermes_k in $_hermes_keys; do
     eval "__HERMES_PRIOR_$_hermes_k=\${$_hermes_k-__HERMES_UNSET__}"
 done
 
+# Resolved before the export below replaces PATH.
+_hermes_cygpath="$(command -v cygpath 2>/dev/null || :)"
+
 eval "$(printf '%s' "$_hermes_json" | "$_hermes_py" -c '
 import json, sys, shlex, re
 for k, v in json.load(sys.stdin).items():
@@ -113,6 +116,18 @@ for k, v in json.load(sys.stdin).items():
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k):
         continue
     print("export %s=%s" % (k, shlex.quote(str(v))))')"
+
+# The MSYS/Cygwin runtime hands a native Windows Python these variables in
+# Windows form (`C:\a;C:\b`) and converts them back only for its own children.
+# Exported verbatim, bash splits PATH on ':' and finds no commands.
+if [ -n "$_hermes_cygpath" ]; then
+    PATH="$("$_hermes_cygpath" -u -p "$PATH")"
+    for _hermes_k in HOME TMPDIR TMP TEMP; do
+        if [ -n "${!_hermes_k-}" ]; then
+            printf -v "$_hermes_k" '%s' "$("$_hermes_cygpath" -u "${!_hermes_k}")"
+        fi
+    done
+fi
 
 # This checkout, not whichever `hermes` PATH finds. A function beats PATH, an
 # alias, and a hashed command, including the MSIX execution alias.
@@ -207,4 +222,4 @@ __HERMES_KEY_LIST="$_hermes_keys"
 
 unset _hermes_repo _hermes_os _hermes_arch _hermes_target _hermes_store \
       _hermes_py _hermes_json _hermes_keys _hermes_k _hermes_entry _hermes_venvpy \
-      _hermes_winarch _hermes_top
+      _hermes_winarch _hermes_top _hermes_cygpath

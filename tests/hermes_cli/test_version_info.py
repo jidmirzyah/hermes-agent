@@ -23,6 +23,14 @@ def test_derived_version_shows_plus_question_for_dirty_unknown_distance():
     assert _derived_version("0.19.0", 0, dirty=True) == "0.19.0"
 
 
+def test_display_version_names_the_distance_without_the_commit():
+    """Labels say how far past the release an install is; the commit is shown
+    beside them where there is room (`hermes --version` keeps `.g<sha>`)."""
+    ahead = VersionInfo("0.21.5", "0.21.5+1913.gf83a9e9", 1913, "f83a9e9" + "0" * 33, "main", "git")
+    assert ahead.display_version == "0.21.5+1913"
+    assert VersionInfo("0.21.5", "0.21.5", 0, None, None, "git").display_version == "0.21.5"
+
+
 def test_stamp_version_info_reads_nix_stamp(tmp_path, monkeypatch):
     stamp = {
         "schemaVersion": 2,

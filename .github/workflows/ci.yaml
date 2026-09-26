@@ -137,7 +137,7 @@ jobs:
     with:
       # The Windows lane spawns the real desktop-update hand-off script
       # (tests/test_desktop_update_windows_*.py) only when that surface
-      # changed; unit-level windows_only tests always run.
+      # changed; unit-level platforms("windows") tests always run.
       desktop_updater: ${{ needs.detect.outputs.desktop_updater == 'true' }}
 
   lint:
@@ -247,7 +247,7 @@ jobs:
     uses: ./.github/workflows/case-collision-check.yml
 
   lazy-deps-guard:
-    name: No imports of deleted tools.lazy_deps
+    name: No production imports of the tools.lazy_deps stub
     needs: detect
     uses: ./.github/workflows/lazy-deps-guard.yml
 

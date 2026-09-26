@@ -19,6 +19,12 @@ import type { DesktopVersionInfo } from '@/global'
  * `installedByScript` refines an external/git install into "installed by
  * install.sh / install.ps1" vs a manual clone — those checkouts carry the
  * bootstrap installers' `.hermes-bootstrap-complete` receipt.
+ *
+ * `hermes desktop` packs the app from a source checkout with the same
+ * `bootstrap` payload the installer shell carries. Released shells are
+ * stamped by CI and never rebuilt (the checkout under them updates), so a
+ * `local`/`fallback` build source is what separates "a source install that
+ * ran `hermes desktop`" from "the Desktop app installer".
  */
 
 /** Keys of the updates i18n section this resolver may return. */
@@ -28,7 +34,9 @@ export type DistributionLabelKey =
   | 'versionDetailsDistributionDesktop'
   | 'versionDetailsDistributionDesktopInstaller'
   | 'versionDetailsDistributionSourceInstaller'
+  | 'versionDetailsDistributionSourceInstallerDesktop'
   | 'versionDetailsDistributionSource'
+  | 'versionDetailsDistributionSourceDesktop'
 
 export interface DistributionLabelInput {
   distribution?: DesktopVersionInfo['distribution']
@@ -66,6 +74,12 @@ export function distributionLabelKey(version: DistributionLabelInput): Distribut
   }
 
   if (version.payload === 'bootstrap') {
+    if (version.source === 'local' || version.source === 'fallback') {
+      return version.installedByScript
+        ? 'versionDetailsDistributionSourceInstallerDesktop'
+        : 'versionDetailsDistributionSourceDesktop'
+    }
+
     return 'versionDetailsDistributionDesktopInstaller'
   }
 

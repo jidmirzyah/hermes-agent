@@ -12,6 +12,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+from typing import Callable
 import uuid
 
 from pm.package import InstallError
@@ -61,9 +62,9 @@ def _resident_runtime() -> tuple[Path, Path] | None:
     if payload is not None:
         runtime = payload / "pm-runtime"
     else:
-        from pm.paths import install_root
+        from pm.paths import install_stamp_path
 
-        stamp_path = install_root() / "install-stamp.json"
+        stamp_path = install_stamp_path(project)
         try:
             stamp = json.loads(stamp_path.read_text(encoding="utf-8-sig"))
         except FileNotFoundError:
@@ -102,6 +103,22 @@ def _validate(python: Path, env: dict[str, str]) -> str:
     return checked.stderr.strip() or f"exit {checked.returncode}" if checked.returncode else ""
 
 
+# Generations this process resolved for a child. The lease is taken under
+# .prepare.lock, which the collector also holds, so a publish + `pm gc` between
+# this return and the child's own lease cannot remove the child's generation.
+# It lives as long as this process (one lease per generation, not per call):
+# children may still be starting from an older generation after a newer one
+# is chosen.
+_HELD: dict[Path, Callable[[], None]] = {}
+
+
+def _hold_for_children(environment: Path) -> None:
+    from hermes_cli.runtime_state import lease_directory
+
+    if environment not in _HELD:
+        _HELD[environment] = lease_directory(environment)
+
+
 def prepare_runtime(uv: Path, python: Path, root: Path, *, offline: bool = False,
                     project: Path | None = None, bootstrap: bool = True,
                     cache: Path | None = None) -> Path:
@@ -110,7 +127,7 @@ def prepare_runtime(uv: Path, python: Path, root: Path, *, offline: bool = False
     Generations are immutable after publication. Failed preparation leaves the
     previous generation intact, including when an old worker is still running.
     """
-    from hermes_cli.runtime_state import _lock
+    from pm.filesystem import lock_fd
     from pm.lock import _write
     from pm.runtime_stage import stage_runtime
 
@@ -119,7 +136,7 @@ def prepare_runtime(uv: Path, python: Path, root: Path, *, offline: bool = False
     env = runtime_environment()
     root.mkdir(parents=True, exist_ok=True)
     with (root / ".prepare.lock").open("a+b") as lock:
-        _lock(lock.fileno(), wait=True)
+        lock_fd(lock.fileno(), wait=True)
         selected = root / "selected.json"
         try:
             fact = json.loads(selected.read_text(encoding="utf-8"))
@@ -128,6 +145,7 @@ def prepare_runtime(uv: Path, python: Path, root: Path, *, offline: bool = False
         if fact.get("inputs") == identity:
             environment = root / fact["generation"]
             if (environment / "pm-runtime.json").is_file() and not _validate(_python(environment), env):
+                _hold_for_children(environment)
                 return _python(environment)
         if not bootstrap:
             raise InstallError("pm-runtime", "not installed or outdated and lazy installs are disabled",
@@ -135,15 +153,16 @@ def prepare_runtime(uv: Path, python: Path, root: Path, *, offline: bool = False
         generation = Path("generations") / uuid.uuid4().hex
         environment = root / generation
         try:
-            print("Preparing the isolated PM runtime…", file=sys.stderr, flush=True)
+            print("Preparing the isolated Hermes runtime…", file=sys.stderr, flush=True)
             executable = stage_runtime(uv, python, environment, project=project, offline=offline, cache=cache)
             (environment / ".lease-managed").touch()
             _write(environment / "pm-runtime.json", {"inputs": identity})
             _write(selected, {"inputs": identity, "generation": generation.as_posix()})
-            return executable
         except BaseException:
             shutil.rmtree(environment, ignore_errors=True)
             raise
+        _hold_for_children(environment)
+        return executable
 
 
 def lease_current_runtime() -> None:
@@ -162,14 +181,15 @@ def collect_runtime_generations(root: Path) -> list[Path]:
     once every worker launched from it has exited; generations published before leases
     existed stay, as the application collector keeps its own.
     """
-    from hermes_cli.runtime_state import _lock, leases_held
+    from pm.filesystem import lock_fd
+    from hermes_cli.runtime_state import leases_held
 
     generations = root / "generations"
     removed: list[Path] = []
     if not generations.is_dir():
         return removed
     with (root / ".prepare.lock").open("a+b") as lock:
-        if not _lock(lock.fileno(), wait=False):
+        if not lock_fd(lock.fileno(), wait=False):
             return removed  # a stage is in flight; maintenance skips rather than queues
         try:
             selected = json.loads((root / "selected.json").read_text(encoding="utf-8-sig")).get("generation", "")

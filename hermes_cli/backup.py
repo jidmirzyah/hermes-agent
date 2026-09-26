@@ -795,8 +795,56 @@ def copy_db_and_verify(src: Path, dst: Path) -> bool:
 # Import
 # ---------------------------------------------------------------------------
 
-def run_import(args) -> None:
-    """Restore a Hermes backup from a zip file."""
+def _find_corrupt_members(zf: zipfile.ZipFile, members: List[str]) -> List[str]:
+    """Return ``"<member>: <error>"`` for every member whose data does not decompress or
+    fails its CRC, streaming each one in 1 MiB chunks so a multi-GB ``state.db`` is never
+    held in memory.
+
+    ``is_zipfile()``/``namelist()`` only read the central directory, so an archive with a
+    rotten member passes them and the damage surfaces as ``zlib.error``/``BadZipFile`` in
+    the middle of the restore, after earlier members already replaced the user's files
+    (#121258). Not ``zf.testzip()``: it lets ``zlib.error`` escape and names at most the
+    first bad member.
+    """
+    bad: list[str] = []
+    for member in members:
+        try:
+            with zf.open(member) as src:
+                while src.read(1 << 20):  # CRC is checked when the stream hits EOF
+                    pass
+        except (OSError, *_ZIP_MEMBER_READ_ERRORS) as exc:
+            bad.append(f"{member}: {exc}")
+    return bad
+
+
+def _import_skipped(rel: str) -> bool:
+    """True for a HERMES_HOME-relative member the import deliberately does not restore: runtime
+    state (``_IMPORT_SKIP_NAMES``), PM-local interpreter/dependency roots, or an archived SQLite
+    WAL/SHM/journal. A ``.db`` member is page-restored into the live file, and a sidecar from a
+    different image would replay a foreign WAL on next open (older archives may ship these)."""
+    try:
+        parts = tuple(normalize_archive_parts(rel))
+    except ValueError:
+        return False  # A rejected traversal is still reported by the import itself.
+    return (parts[-1] in _IMPORT_SKIP_NAMES or
+            profile_root_entry(parts) in PM_RUNTIME_ROOT_DIRS or
+            rel.endswith(_SQLITE_SIDECAR_SUFFIXES))
+
+
+def _import_member_rel(member: str, prefix: str) -> tuple[str, bool]:
+    """Classify an archive member exactly as the restore does: return ``(rel, skipped)``.
+
+    ``_external/`` members are home-relative and never skipped; every other member is
+    HERMES_HOME-relative after stripping the archive ``prefix``. Shared by the integrity
+    pre-flight and ``_import_members`` so the two cannot disagree on what gets restored."""
+    if member.startswith(_EXTERNAL_PREFIX):
+        return member[len(_EXTERNAL_PREFIX):], False
+    rel = member[len(prefix):] if prefix and member.startswith(prefix) else member
+    return rel, _import_skipped(rel)
+
+
+def run_import(args) -> Optional[int]:
+    """Restore a Hermes backup; return 1 on damaged archives or incomplete restores."""
     zip_path = Path(args.zipfile).expanduser().resolve()
 
     if not zip_path.is_file():
@@ -849,6 +897,15 @@ def run_import(args) -> None:
                 print("Aborted.")
                 return
 
+        # Refuse damaged archives before writing any user files. Runtime and PM-local
+        # members skipped below cannot block restoration of the portable data.
+        print("\nChecking archive integrity ...")
+        corrupt = _find_corrupt_members(zf, [m for m in members if not _import_member_rel(m, prefix)[1]])
+        if corrupt:
+            _print_capped(f"Error: backup archive is damaged ({len(corrupt)} member(s) fail to "
+                          f"decompress or fail their CRC); nothing was restored:", corrupt, "  ")
+            return 1
+
         # Extract
         print(f"\nImporting {file_count} files ...")
         hermes_root.mkdir(parents=True, exist_ok=True)
@@ -893,7 +950,7 @@ def run_import(args) -> None:
                             pass
                     restored += 1
                     restored_external += 1
-                except (PermissionError, OSError) as exc:
+                except (OSError, *_ZIP_MEMBER_READ_ERRORS) as exc:
                     errors.append(f"  {member}: {exc}")
                 if restored % 500 == 0:
                     print(f"  {restored}/{file_count} files ...")
@@ -964,7 +1021,7 @@ def run_import(args) -> None:
                 if target.name in _SECRET_FILE_NAMES:
                     os.chmod(target, 0o600)
                 restored += 1
-            except (PermissionError, OSError) as exc:
+            except (OSError, *_ZIP_MEMBER_READ_ERRORS) as exc:
                 errors.append(f"  {rel}: {exc}")
 
             if restored % 500 == 0:
@@ -974,7 +1031,7 @@ def run_import(args) -> None:
 
         # Summary
         print()
-        print(f"Import complete: {restored} files restored in {elapsed:.1f}s")
+        print(f"Import {'incomplete' if errors else 'complete'}: {restored} files restored in {elapsed:.1f}s")
         print(f"  Target: {display_hermes_home()}")
 
         if restored_external:
@@ -1102,7 +1159,163 @@ def run_import(args) -> None:
                 print("\nStart the gateway to activate cron jobs and messaging:")
                 print("  hermes gateway install")
 
+        if errors:
+            print(f"Import incomplete: {len(errors)} file(s) were not restored (see Warnings above). "
+                  "Fix the cause and re-run the import.")
+            return 1
         print("Done. Your Hermes configuration has been restored.")
+
+
+
+# --- Quick state snapshots (used by /snapshot slash command and hermes backup --quick) ---
+
+# Critical state files (relative to HERMES_HOME) for quick snapshots; everything else is
+# regeneratable or managed separately (skills, repo, sessions/). Entries may be files OR
+# directories (recursive); missing entries are skipped. Pairing data lives in platform JSON blobs
+# outside state.db, so it is listed explicitly — ``hermes update`` snapshots this set (#15733).
+_QUICK_STATE_FILES = (
+    "state.db", "config.yaml", ".env", "auth.json", "cron/jobs.json", "cron/executions.db",
+    "gateway_state.json", "channel_directory.json", "channel_aliases.json", "processes.json",
+    "gateway/discord_message_recovery.db",  # Discord reconnect replay ledger
+    # Per-profile user stores, destroyed if the update flow replaces the file and the post-update
+    # schema-init re-creates an empty one (#52889). Skipped when outside HERMES_HOME.
+    "projects.db",                      # per-profile project store
+    "response_store.db",                # gateway conversation history / tool payloads
+    "memory_store.db",                  # holographic memory facts/entities
+    "verification_evidence.db",         # agent verification audit trail
+    "kanban.db",                        # default board (back-compat <root>/kanban.db)
+    "kanban/boards",                    # non-default boards (workspaces/ + attachments/ skipped as regenerable)
+    # Pairing stores (generic + per-platform JSONs outside state.db)
+    "pairing",                          # legacy location (gateway/pairing.py)
+    "platforms/pairing",                # new location (gateway/pairing.py)
+    "feishu_comment_pairing.json",      # Feishu comment subscription pairings
+)
+
+_QUICK_DEFAULT_KEEP = 20
+
+
+def _quick_snapshot_root(hermes_home: Optional[Path] = None) -> Path:
+    home = hermes_home or get_hermes_home()
+    return home / _QUICK_SNAPSHOTS_DIR
+
+
+def _newest_first(root: Path, keep_entry) -> List[Path]:
+    """Entries of *root* passing ``keep_entry``, newest (by name) first; ``[]`` if *root* is missing."""
+    if not root.exists():
+        return []
+    return sorted(filter(keep_entry, root.iterdir()), key=lambda p: p.name, reverse=True)
+
+
+# Kept in sync with ``_QUICK_STATE_FILES`` and ``cron/jobs.py``'s ``JOBS_FILE``.
+_CRON_JOBS_REL = "cron/jobs.json"
+
+
+# Config paths the update flow must never change (#64160): model routing and the MoA section are
+# consumed machine-wide, so an update/repair cycle that rewrites them silently redirects paid
+# inference. Dotted paths into raw config.yaml; a single-element tuple protects a whole section.
+_PROTECTED_CONFIG_PATHS: Tuple[Tuple[str, ...], ...] = (
+    ("model", "provider"), ("model", "default"), ("model", "base_url"), ("model", "api_key"),
+    ("moa",))
+
+
+def _prune_oldest(newest_first: List[Path], keep: int, remove, what: str) -> int:
+    """``remove(path)`` every entry past the first *keep*; return how many succeeded."""
+    deleted = 0
+    for p in newest_first[keep:]:
+        try:
+            remove(p)
+            deleted += 1
+        except OSError as exc:
+            logger.warning("Failed to prune %s %s: %s", what, p.name, exc)
+    return deleted
+
+
+# --- Shared full-zip backup helper ---
+
+
+# --- Pre-update / pre-migration auto-backups ---
+
+_PRE_UPDATE_BACKUPS_DIR = "backups"
+_PRE_UPDATE_PREFIX = "pre-update-"
+_PRE_UPDATE_DEFAULT_KEEP = 5
+_PRE_MIGRATION_PREFIX = "pre-migration-"
+_PRE_MIGRATION_DEFAULT_KEEP = 5
+
+
+def _prune_prefixed_zips(backup_dir: Path, prefix: str, keep: int, what: str) -> int:
+    """Remove oldest ``<prefix>*.zip`` in *backup_dir* beyond *keep*; return count deleted.
+
+    Only prefix-matched files are touched, so hand-made zips or other backup kinds survive.
+    """
+    backups = _newest_first(backup_dir, lambda p: p.is_file() and p.name.startswith(prefix)
+                            and p.suffix.lower() == ".zip")
+    return _prune_oldest(backups, keep, Path.unlink, what)
+
+
+def _create_prefixed_full_backup(
+    hermes_home: Optional[Path], prefix: str, keep: int, what: str, prune_what: str) -> Optional[Path]:
+    """Write ``<HERMES_HOME>/backups/<prefix><timestamp>.zip`` and prune older same-prefix zips.
+    Returns the path, or ``None`` if nothing to back up or the write failed. Never raises."""
+    hermes_root = hermes_home or get_default_hermes_root()
+    if not hermes_root.is_dir():
+        return None
+    backup_dir = hermes_root / _PRE_UPDATE_BACKUPS_DIR
+    try:
+        backup_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        logger.warning("Could not create %s backup dir %s: %s", what, backup_dir, exc)
+        return None
+    out_path = backup_dir / f"{prefix}{datetime.now().strftime('%Y-%m-%d-%H%M%S')}.zip"
+    if _write_full_zip_backup(out_path, hermes_root) is None:
+        return None
+    _prune_prefixed_zips(backup_dir, prefix, keep, prune_what)
+    return out_path
+
+
+def create_pre_update_backup(
+    hermes_home: Optional[Path] = None, keep: int = _PRE_UPDATE_DEFAULT_KEEP) -> Optional[Path]:
+    """Full zip backup to ``backups/pre-update-<timestamp>.zip``, auto-pruned; ``None`` if nothing
+    was found or the backup failed. Never raises — ``hermes update`` continues anyway."""
+    return _create_prefixed_full_backup(hermes_home, _PRE_UPDATE_PREFIX, max(keep, 1), "pre-update", "backup")
+
+
+def create_pre_migration_backup(
+    hermes_home: Optional[Path] = None, keep: int = _PRE_MIGRATION_DEFAULT_KEEP) -> Optional[Path]:
+    """Full zip backup to ``backups/pre-migration-<timestamp>.zip`` before ``hermes claw migrate``
+    (same dir as update backups so listings/``hermes import`` find it); ``None`` if nothing was
+    found or the write failed. Never raises."""
+    return _create_prefixed_full_backup(
+        hermes_home, _PRE_MIGRATION_PREFIX, max(keep, 0), "pre-migration", "pre-migration backup")
+
+
+# ---- BEGIN PLUGIN-COMPAT (revert-scheduled; see COMPAT_MANIFEST.md) ----
+# Names external plugins imported from this module before the Sep 2026 decomposition.
+# Internal code MUST NOT use these (scripts/check_compat_pointers.py fails CI if it does).
+# The whole block is removed by reverting the commit that added it.
+
+def copy_db_and_verify(src: Path, dst: Path) -> bool:
+    """Like :func:`_safe_copy_db` but verifies the destination after copy.
+
+    Returns True only when the copy succeeded AND the destination is valid
+    SQLite (header + integrity check). Verification honours the default
+    size ceiling — a multi-GB destination gets the header + schema probe
+    rather than a full ``PRAGMA integrity_check`` that would page through
+    the whole file.
+    """
+    if not _safe_copy_db(src, dst):
+        return False
+    integrity = verify_sqlite_integrity(dst, run_pragma=True)
+    if not integrity.get("valid"):
+        try:
+            dst.unlink(missing_ok=True)
+        except OSError:
+            pass
+        logger.warning("Backup of %s failed integrity verification: %s", src, integrity.get("message"))
+        return False
+    return True
+
+
+# ---- END PLUGIN-COMPAT ----
 
 
 # ---------------------------------------------------------------------------

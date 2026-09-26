@@ -438,6 +438,7 @@ async def _pty_fail(ws: WebSocket, exc: BaseException) -> None:
 @router.websocket("/api/pty")
 async def pty_ws(ws: WebSocket) -> None:
     from hermes_cli.web_server_chat import PTY_REGISTRY, PtyBridge, PtyUnavailableError, _PTY_BRIDGE_AVAILABLE, _RESIZE_RE
+    from pm.package import InstallError
     gate = await _ws_gate(ws, "pty")
     if gate is None:
         return
@@ -501,6 +502,9 @@ async def pty_ws(ws: WebSocket) -> None:
         await _pty_fail(ws, exc)
         return
     except SystemExit as exc:  # _make_tui_argv sys.exit(1)s when node/npm is missing
+        await _pty_fail(ws, exc)
+        return
+    except InstallError as exc:  # PM could not provide node; its remedy names the fix
         await _pty_fail(ws, exc)
         return
 

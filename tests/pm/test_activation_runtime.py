@@ -39,7 +39,8 @@ def _sync_checkout(tmp_path: Path):
         bootstrap = root / ".venv"
         if not bootstrap.exists():
             shutil.copytree(root / "prepared-bootstrap", bootstrap)
-        generation = (root / "input").read_text(encoding="utf-8").strip()
+        # Windows PowerShell's Set-Content writes a BOM.
+        generation = (root / "input").read_text(encoding="utf-8-sig").strip()
         facts = runtime_facts_path(root)
         selected = facts.parent / "environments" / generation / "venv"
         if not selected.exists():

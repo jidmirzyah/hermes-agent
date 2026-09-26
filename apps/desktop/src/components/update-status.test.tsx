@@ -59,11 +59,11 @@ describe('deriveUpdateStatus', () => {
     expect(view.supported).toBe(false)
   })
 
-  it('check error includes both the transport message and the underlying error', () => {
+  it('check error shows one plain line and keeps the transport message with the error', () => {
     const view = derive({ supported: true, error: 'check-failed', message: 'ECONNREFUSED' })
 
     expect(view.tone).toBe('error')
-    expect(view.line).toBe(`${en.updates.cantReach} ECONNREFUSED`)
+    expect(view.line).toBe(en.updates.cantReach)
     expect(view.error).toBe('ECONNREFUSED\ncheck-failed')
   })
 

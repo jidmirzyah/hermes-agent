@@ -1,17 +1,20 @@
 name: Canary Release
 
-# Every main push is eligible for a canary. GitHub's concurrency semantics keep
-# the in-progress build and only the newest pending push, so the pipeline itself
-# bounds the rate without a cron, debounce, path filter or manual trigger.
+# Automatic canaries are daily: the schedule caps new tags at one per 24h.
+# With no new commits, release.py resumes an existing unpublished canary until
+# its protected head is live; only a published canary makes a quiet day a no-op.
+# workflow_dispatch fires one on demand at any time.
 #
 # Source identity is the exact stable version plus build metadata:
 # v<stable>+canary.<YYYYMMDDTHHMMSSZ>. It compares equal to the stable; only
-# the protected R2 canary head moves subscribers. Superseded pending runs have
-# conclusion=cancelled; only conclusion=failure is a canary failure signal.
+# the protected R2 canary head moves subscribers. A dispatch queued behind a
+# running canary has conclusion=cancelled if a newer one supersedes it; only
+# conclusion=failure is a canary failure signal.
 
 on:
-  push:
-    branches: [main]
+  schedule:
+    - cron: "41 6 * * *" # daily, 06:41 UTC
+  workflow_dispatch:
 
 permissions:
   contents: write # tag push + release create/delete for prune
@@ -25,6 +28,8 @@ jobs:
   tag:
     name: Tag, draft, and start the canary build
     runs-on: ubuntu-24.04
+    # A dispatch from a feature branch would tag unmerged code as the canary.
+    if: github.ref_name == github.event.repository.default_branch
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -46,13 +51,13 @@ jobs:
     runs-on: ubuntu-24.04
     needs: tag
     environment: release-signing
-    # Prune even when there was nothing to tag today. The desktop build
-    # runs in its own workflow run now, so this no longer waits on it —
-    # the window is 14 days, far wider than any build.
-    if: always() && needs.tag.result != 'cancelled'
+    # Prune even when this run had nothing new to tag. The desktop build
+    # runs in its own workflow run, so this does not wait on it — the
+    # window is 14 days, far wider than any build.
+    if: always() && needs.tag.result != 'cancelled' && needs.tag.result != 'skipped'
     # Job-level so the R2 prune step can gate on `env` (a step `if` cannot
     # read `secrets`): an unprovisioned release-signing environment skips
-    # the R2 prune instead of failing the nightly.
+    # the R2 prune instead of failing the canary run.
     env:
       CLOUDFLARE_R2_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_R2_ACCOUNT_ID }}
       CLOUDFLARE_R2_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}

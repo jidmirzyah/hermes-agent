@@ -13,7 +13,7 @@ import threading
 from pathlib import Path
 
 from pm.environments import dependency_home_root, install_state_dir, runtime_facts_path
-from hermes_cli.runtime_state import _atomic_bytes, _bytes, _digest
+from pm.filesystem import durable_write_bytes, file_digest, read_bytes_or_none
 from pm.workspace import enabled_plugin_dirs, _is_member_candidate
 
 
@@ -46,7 +46,7 @@ def candidate_members(extra_dirs=(), **selection):
 
 def selection_snapshot() -> dict[Path, bytes | None]:
     from pm.plugins_state import dependency_homes
-    return {home / "config.yaml": _bytes(home / "config.yaml") for home in dependency_homes()}
+    return {home / "config.yaml": read_bytes_or_none(home / "config.yaml") for home in dependency_homes()}
 
 
 def validate_manifest(source: Path) -> dict:
@@ -68,7 +68,7 @@ class PluginSelection:
         if not self.home.is_relative_to(dependency_home_root().resolve()):
             raise ValueError("config path is outside Hermes state")
         self.path = self.home / "config.yaml"
-        self.previous = _bytes(self.path)
+        self.previous = read_bytes_or_none(self.path)
         expected = selection.get("expected_config")
         actual = hashlib.sha256(self.previous).hexdigest() if self.previous is not None else "missing"
         if expected is not None and expected != actual:
@@ -91,14 +91,14 @@ class PluginSelection:
                                          enabled=selection["enabled"], disabled=selection["disabled"])
 
     def publish(self, project: Path) -> None:
-        if selection_snapshot() != self.configs or _bytes(self.path) != self.previous:
+        if selection_snapshot() != self.configs or read_bytes_or_none(self.path) != self.previous:
             raise ValueError("plugin configuration changed while preparing publication; retry")
         row = {"config": str(self.path),
                "previous": base64.b64encode(self.previous).decode() if self.previous is not None else None,
-               "facts_before": _digest(runtime_facts_path(project)),
+               "facts_before": file_digest(runtime_facts_path(project)),
                "config_after": hashlib.sha256(self.proposed).hexdigest()}
-        _atomic_bytes(install_state_dir(project) / "publication.json", json.dumps(row).encode())
-        _atomic_bytes(self.path, self.proposed)
+        durable_write_bytes(install_state_dir(project) / "publication.json", json.dumps(row).encode())
+        durable_write_bytes(self.path, self.proposed)
 
 
 class StagedPlugin:
@@ -119,7 +119,7 @@ class StagedPlugin:
             raise ValueError("The updated plugin changed its installed name; reinstall it explicitly.")
         self.staged_digest = tree_digest(self.staged)
         self.metadata = self.target.parent / ".install-metadata.json"
-        previous = _bytes(self.metadata)
+        previous = read_bytes_or_none(self.metadata)
         current = _metadata_records(previous)
         self.old_record = plugin["old_metadata"].get(self.target.name)
         if current.get(self.target.name) != self.old_record:
@@ -152,7 +152,7 @@ class StagedPlugin:
         lock = self.metadata.with_name(f"{self.metadata.name}.lock")
         with _file_lock(lock, _METADATA_LOCK_HOLDER, 10.0,
                         "Timed out waiting for the plugin install metadata lock"):
-            previous = _bytes(self.metadata)
+            previous = read_bytes_or_none(self.metadata)
             metadata = _metadata_records(previous)
             if metadata.get(self.target.name) != self.old_record:
                 raise ValueError("Plugin install metadata changed while preparing the update; retry.")
@@ -164,12 +164,12 @@ class StagedPlugin:
             backup = self.target.parent / f".previous-{uuid.uuid4().hex}"
             row = {
                 "kind": "plugin", "target": str(self.target), "backup": str(backup), "metadata": str(self.metadata),
-                "target_existed": self.target.exists(), "facts_before": _digest(runtime_facts_path(project)),
+                "target_existed": self.target.exists(), "facts_before": file_digest(runtime_facts_path(project)),
                 "metadata_before": base64.b64encode(previous).decode() if previous is not None else None,
                 "metadata_after": base64.b64encode(proposed).decode(),
             }
-            _atomic_bytes(install_state_dir(project) / "publication.json", json.dumps(row).encode())
+            durable_write_bytes(install_state_dir(project) / "publication.json", json.dumps(row).encode())
             if self.target.exists():
                 os.replace(self.target, backup)
             os.replace(self.staged, self.target)
-            _atomic_bytes(self.metadata, proposed)
+            durable_write_bytes(self.metadata, proposed)

@@ -35,7 +35,7 @@ export interface LocalModelsOwner extends LocalModelsScope {
   legacyBaseUrl?: string
 }
 
-export function localModelsOwner(profile?: string, connectionId?: string): LocalModelsOwner {
+export function localModelsOwner(profile?: string, connectionId?: string | null): LocalModelsOwner {
   const pin: string | null = connectionId ?? getApiRequestConnection()
 
   return {
@@ -45,7 +45,7 @@ export function localModelsOwner(profile?: string, connectionId?: string): Local
   }
 }
 
-export function useLocalModelsOwner(profile?: string, connectionId?: string): LocalModelsOwner {
+export function useLocalModelsOwner(profile?: string, connectionId?: string | null): LocalModelsOwner {
   const identity: string = useStoresSelector([$apiRequestScope, $connection], (): string =>
     JSON.stringify(localModelsOwner(profile, connectionId))
   )
@@ -69,11 +69,15 @@ export function isLocalModelsOwnerLive(owner: LocalModelsOwner): boolean {
 }
 
 export function localModelsRequestScope(owner: LocalModelsOwner): LocalModelsScope {
-  if (!isLocalModelsOwnerLive(owner)) {
-    throw new Error('Local models connection changed')
-  }
+  assertLocalModelsOwnerLive(owner)
 
   return { connectionId: owner.connectionId, profile: owner.profile }
+}
+
+export function assertLocalModelsOwnerLive(owner: LocalModelsOwner): void {
+  if (!isLocalModelsOwnerLive(owner)) {
+    throw new Error(translateNow('settings.localModels.connectionChanged'))
+  }
 }
 
 export function isCurrentLocalModelsOwner(owner: LocalModelsOwner): boolean {
@@ -81,7 +85,7 @@ export function isCurrentLocalModelsOwner(owner: LocalModelsOwner): boolean {
 }
 
 export function localModelsNotificationTitle(owner: LocalModelsOwner): string {
-  localModelsRequestScope(owner)
+  assertLocalModelsOwnerLive(owner)
   const title: string = translateNow('settings.localModels.title')
 
   return isCurrentLocalModelsOwner(owner)
@@ -94,7 +98,7 @@ export function localModelsStatusOptions(owner: LocalModelsOwner): UseQueryOptio
     queryKey: localModelsKey(owner, 'status'),
     queryFn: async (): Promise<LocalModelsStatus> => {
       const status: LocalModelsStatus = await getLocalModelsStatus(localModelsRequestScope(owner))
-      localModelsRequestScope(owner)
+      assertLocalModelsOwnerLive(owner)
 
       return status
     },
@@ -161,7 +165,7 @@ export function localModelsCatalogOptions(owner: LocalModelsOwner): UseQueryOpti
     queryKey: localModelsKey(owner, 'catalog'),
     queryFn: async (): Promise<LocalCatalogModel[]> => {
       const { models } = await getLocalCatalog(localModelsRequestScope(owner))
-      localModelsRequestScope(owner)
+      assertLocalModelsOwnerLive(owner)
 
       return models
     },
@@ -174,7 +178,7 @@ export function localModelsHardwareOptions(owner: LocalModelsOwner): UseQueryOpt
     queryKey: localModelsKey(owner, 'hardware'),
     queryFn: async (): Promise<LocalHardware> => {
       const hardware: LocalHardware = await getLocalHardware(localModelsRequestScope(owner))
-      localModelsRequestScope(owner)
+      assertLocalModelsOwnerLive(owner)
 
       return hardware
     },
@@ -194,7 +198,7 @@ export function localModelsJobsOptions(owner: LocalModelsOwner): UseQueryOptions
     refetchOnMount: 'always',
     queryFn: async (): Promise<readonly LocalRuntimeJob[]> => {
       const { jobs } = await getLocalModelsJobs(localModelsRequestScope(owner))
-      localModelsRequestScope(owner)
+      assertLocalModelsOwnerLive(owner)
 
       // Normalize backend ordering; QueryClient does all structural sharing.
       return [...jobs].sort((a: LocalRuntimeJob, b: LocalRuntimeJob): number => a.job_id.localeCompare(b.job_id))
@@ -476,7 +480,7 @@ export async function checkLocalRuntimeUpdate(owner: LocalModelsOwner = localMod
 
   try {
     const status: LocalModelsStatus = await queryClient.fetchQuery(localModelsStatusOptions(owner))
-    localModelsRequestScope(owner)
+    assertLocalModelsOwnerLive(owner)
 
     if (status.enabled && status.update_available && !updateNotified.has(identity)) {
       updateNotified.add(identity)

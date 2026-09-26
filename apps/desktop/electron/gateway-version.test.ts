@@ -32,3 +32,9 @@ test('unavailable gateway version stays unknown instead of using another install
     ''
   )
 })
+
+test('the distance past the release tag wins over the bare release', async (): Promise<void> => {
+  const ahead: { version: string; displayVersion: string } = { version: '0.21.5', displayVersion: '0.21.5+1913' }
+  assert.equal(await resolveGatewayVersion(async () => ahead), '0.21.5+1913')
+  assert.equal(await resolveGatewayVersion(async () => ({ ...ahead, displayVersion: '' })), '0.21.5')
+})

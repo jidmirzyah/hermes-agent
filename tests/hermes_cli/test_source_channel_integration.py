@@ -153,6 +153,25 @@ def test_missing_channel_cannot_fall_back_to_main(source, monkeypatch, channel):
     assert git(source.root, "rev-parse", "HEAD") == before
 
 
+def test_unpublished_main_record_keeps_following_the_git_branch(source, monkeypatch):
+    """main IS the source branch: until R2 publishes its record, a checkout
+    still updates via git instead of failing on a missing channel object."""
+    from hermes_cli import source_check
+    from hermes_cli.release_channels import ChannelNotFound
+
+    set_install_channel("main", source.root)
+    def unpublished(name, repository):
+        raise ChannelNotFound(f"Channel object not found: releases/channels/{name}.json")
+    monkeypatch.setattr(source_releases, "_resolve_channel", unpublished)
+    target = source_releases.resolve_source_target("main", ["git"], source.root)
+    assert target.branch == "main" and target.commit is None
+    status = source_check.check_for_updates(install_root=source.root, home=source.home, force=True)
+    assert "error" not in status, status
+    assert status["targetSha"] == source.commits[2]
+    with pytest.raises(ChannelNotFound):
+        source_releases.resolve_source_target("stable", ["git"], source.root)
+
+
 def test_passive_check_reports_retirement_without_adopting_it(source, monkeypatch):
     from hermes_cli import source_check, banner
 

@@ -3,7 +3,7 @@ import os
 import threading
 import time
 
-from hermes_cli.runtime_state import _lock
+from pm.filesystem import lock_fd
 from pm.store import Store
 
 
@@ -11,7 +11,7 @@ def test_install_lock_reports_what_it_waits_on(tmp_path, capsys):
     store = Store(tmp_path / "store")
     store.root.mkdir()
     holder = os.open(store.root / ".install.lock", os.O_CREAT | os.O_RDWR, 0o600)
-    assert _lock(holder, wait=False)
+    assert lock_fd(holder, wait=False)
     entered = threading.Event()
 
     def contend():

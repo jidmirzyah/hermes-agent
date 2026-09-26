@@ -17,6 +17,7 @@ from pathlib import Path
 from hermes_cli.release_channels import canonical_json, channel_key, validate_name
 from scripts.releases import commit_build, r2
 from scripts.releases.channels import ChannelConflict, ChannelPublisher, R2ChannelStore
+from scripts.releases.job_groups import selects_all
 from scripts.releases.r2_scope import R2Scope, channel_public_base, require_run
 
 
@@ -95,8 +96,8 @@ def allocate(env: dict[str, str]) -> dict:
             raise ValueError("Use a non-protected disposable preview name")
         if env.get("CHANNEL_BUILD") or env.get("CHANNEL_REQUEST_SHA256"):
             raise ValueError("Allocation cannot reuse a build request or select a storage scope")
-        if env.get("TERMUX_ONLY") == "true":
-            raise ValueError("Disposable allocation cannot select Termux")
+        if not selects_all(env.get("JOBS")):
+            raise ValueError("Disposable allocation cannot select partial job groups")
         # One dispatch now allocates AND builds, so the namespace must survive a
         # "re-run failed jobs": lease by the run id alone (no attempt suffix), and
         # never accept a caller-supplied path, public URL, or allocation namespace.

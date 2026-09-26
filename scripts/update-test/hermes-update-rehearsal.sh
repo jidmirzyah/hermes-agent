@@ -4,7 +4,7 @@
 # Two steps:
 #   pre   take a `hermes backup` of your data, clone HERMES_HOME and the desktop
 #         app's Electron userData into the backup dir, then point the install's
-#         update source at a custom repo + ref so `hermes update` pulls it.
+#         update source at a fork so `hermes update` pulls that fork's main.
 #         Prints what to do next.
 #   post  swap the clones back in, so both trees are exactly as they were.
 #
@@ -15,29 +15,27 @@
 # copied. Elsewhere it is a plain copy. post swaps by rename, so it is instant
 # when the backup dir is on the same disk. HERMES_HOME/cache is left as it is.
 #
-#   ./hermes-update-rehearsal.sh pre  --source <git-url> --ref <branch-or-tag>
+#   ./hermes-update-rehearsal.sh pre  --source <git-url>
 #   # ... run `hermes update`, use Hermes, test whatever you need ...
 #   ./hermes-update-rehearsal.sh post
 #
 # Options:
-#   --source URL   repo to pull the update from (default: the rehearsal fork)
-#   --ref REV      branch or tag in that repo (default: main)
+#   --source URL   repo to pull the update from; updates follow its main
+#                  (default: the rehearsal fork)
 #   --backup-root DIR   where the backup lives (default ~/hermes-update-rehearsal)
 #   --yes          post: skip the confirmation
 #
-# Requires: git. `pre` needs network access to --source.
+# Requires: git. `pre` and `hermes update` need network access to --source.
 
 set -euo pipefail
 
 OFFICIAL_HTTPS="https://github.com/NousResearch/hermes-agent.git"
 OFFICIAL_SSH="git@github.com:NousResearch/hermes-agent.git"
 DEFAULT_SOURCE="https://github.com/ethernet8023/hermes-agent.git"
-DEFAULT_REF="main"
 
 SUBCMD=""
 BACKUP_ROOT="${HOME}/hermes-update-rehearsal"
 SOURCE="$DEFAULT_SOURCE"
-REF="$DEFAULT_REF"
 ASSUME_YES=0
 
 say()  { printf '%s\n' "$*"; }
@@ -51,13 +49,13 @@ usage() {
   cat <<'EOF'
 hermes-update-rehearsal.sh -- run against an EXISTING Hermes install.
 
-  pre     back up your data, clone both trees, point the update source at a custom repo+ref
+  pre     back up your data, clone both trees, point the update source at a fork
   post    swap the clones back in, exactly as they were
   status  print what is prepared (read-only; nothing is touched)
 
 Options:
-  --source URL        repo to pull the update from (default: the rehearsal fork)
-  --ref REV           branch or tag in that repo (default: main)
+  --source URL        repo to pull the update from; updates follow its main
+                      (default: the rehearsal fork)
   --backup-root DIR   where the backup lives (default ~/hermes-update-rehearsal)
   --yes               post: skip the confirmation
 
@@ -78,7 +76,6 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     pre|post|status) SUBCMD="$1"; shift ;;
     --source)      [ "$#" -ge 2 ] || die "--source needs a value"; SOURCE="$2"; shift 2 ;;
-    --ref)         [ "$#" -ge 2 ] || die "--ref needs a value";    REF="$2";    shift 2 ;;
     --backup-root) [ "$#" -ge 2 ] || die "--backup-root needs a value"; BACKUP_ROOT="$2"; shift 2 ;;
     --yes|-y)      ASSUME_YES=1; shift ;;
     -h|--help)     usage ;;
@@ -122,14 +119,6 @@ resolve_paths() {
   HERMES_HOME="$(native_path "$HERMES_HOME")"
   INSTALL_DIR="$(native_path "$INSTALL_DIR")"
   USERDATA_DIR="$(native_path "$USERDATA_DIR")"
-}
-
-# `file:///C:/x` on Windows, `file:///home/x` elsewhere.
-file_url() {
-  case "$1" in
-    [A-Za-z]:*) printf 'file:///%s' "$1" ;;
-    *)          printf 'file://%s' "$1" ;;
-  esac
 }
 
 latest_backup_root() {
@@ -276,6 +265,13 @@ cmd_pre() {
   if [ "$n" = 0 ]; then ok "global git config has no URL rewrites"
   else warn "$n existing url.* insteadOf entr(y/ies) in your git config; we add more and remove only ours"; fi
 
+  # Before anything is written: a bad --source or no network should abort with
+  # nothing done, not after the backup and clone.
+  local target_sha
+  target_sha="$(git ls-remote "$SOURCE" refs/heads/main 2>/dev/null | cut -f1)"
+  [ -n "$target_sha" ] || die "could not read main from $SOURCE (network? permissions? bad --source?) — nothing was done"
+  ok "$SOURCE main is at $target_sha"
+
   SNAP="$BACKUP_ROOT/$(date -u +%Y%m%dT%H%M%SZ)"
   [ ! -e "$SNAP" ] || die "backup dir already exists: $SNAP"
   mkdir -p "$SNAP"
@@ -329,55 +325,31 @@ cmd_pre() {
   "userdata_dir_source": "$USERDATA_SOURCE",
   "userdata_existed": $userdata_existed,
   "clone_mode": "$CLONE_MODE",
-  "rehearsal_source": "$SOURCE",
-  "rehearsal_ref": "$REF"
+  "rehearsal_source": "$SOURCE"
 }
 EOF
   ok "manifest.json (backup of $HERMES_HOME)"
 
-  # --- point the install at the rehearsal source ---------------------------
-  step "fetching the rehearsal source"
-  say "source        $SOURCE"
-  say "ref           $REF"
-  local serve="$SNAP/serve.git" target_sha=""
-  rm -rf "$serve"
-  # Prefer a single-branch clone (fast); fall back to a full bare clone so a
-  # raw commit in --ref still resolves.
-  if git clone --quiet --bare --branch "$REF" --single-branch "$SOURCE" "$serve" 2>/dev/null; then
-    ok "cloned $REF"
-  else
-    rm -rf "$serve"
-    git clone --quiet --bare "$SOURCE" "$serve" \
-      || die "could not clone $SOURCE (network? permissions? bad --source?)"
-    ok "cloned the whole repo (--ref '$REF' is not a branch/tag name)"
-  fi
-  target_sha="$(git -C "$serve" rev-parse --verify "${REF}^{commit}" 2>/dev/null || true)"
-  [ -n "$target_sha" ] || die "--ref '$REF' was not found in $SOURCE"
-  git -C "$serve" update-ref refs/heads/main "$target_sha"
-  git -C "$serve" symbolic-ref HEAD refs/heads/main
-  # The updater may ask for an exact SHA instead of a branch tip.
-  git -C "$serve" config uploadpack.allowAnySHA1InWant true
-  ok "the update will land on $target_sha"
-
-  step "pointing your install at it"
+  step "pointing your install at $SOURCE"
   # insteadOf is a TRANSPORT rewrite. Your checkout's origin keeps the official
   # URL, which matters: `hermes update` resolves its channel from the archive
   # and validates it against `git config --get remote.origin.url`. Repointing
   # origin at a fork would make the update fail before any git work.
-  local redirect url
-  redirect="$(file_url "$serve")"
+  # Straight at the fork: the updater follows main, so the fork's main is what
+  # lands (force-push it to the branch under test).
+  local url
   # The redirect belongs in the REPO-LOCAL config: it lives inside the checkout
   # this kit already cloned, so `post`'s swap removes it for free. A writable
   # GLOBAL git config is a dependency we do not need -- requiring it aborts on
   # any machine whose ~/.config/git/config is read-only or ACL-denied.
   for url in "$OFFICIAL_HTTPS" "$OFFICIAL_SSH"; do
     # --add: the key is multi-valued; a plain write would drop the first URL.
-    git -C "$INSTALL_DIR" config --local --add "url.$redirect.insteadOf" "$url" \
+    git -C "$INSTALL_DIR" config --local --add "url.$SOURCE.insteadOf" "$url" \
       || die "could not write the URL redirect into $INSTALL_DIR/.git/config"
   done
   touch "$HERMES_HOME/.skip_upstream_prompt"
   printf '%s\n' "$target_sha" > "$SNAP/target-sha"
-  ok "official repo URL now resolves to the rehearsal copy"
+  ok "official repo URL now resolves to $SOURCE"
   ok "created $HERMES_HOME/.skip_upstream_prompt (stops the 'add upstream remote?' prompt)"
 
   step "ready"
@@ -405,8 +377,8 @@ cmd_status() {
   fi
   say "latest        $SNAP"
   if [ -f "$SNAP/target-sha" ]; then
-    say "prepared for  $(tr -d '\r' < "$SNAP/target-sha")"
-    say "source        $(sed -n 's/.*"rehearsal_source": "\(.*\)",/\1/p' "$SNAP/manifest.json" 2>/dev/null | head -1) @ $(sed -n 's/.*"rehearsal_ref": "\(.*\)"/\1/p' "$SNAP/manifest.json" 2>/dev/null | head -1)"
+    say "prepared for  $(tr -d '\r' < "$SNAP/target-sha") (main at pre time)"
+    say "source        $(sed -n 's/.*"rehearsal_source": "\(.*\)"/\1/p' "$SNAP/manifest.json" 2>/dev/null | head -1)"
   else
     say "prepared      no"
   fi
@@ -443,22 +415,6 @@ confirm() {
   case "$reply" in y|Y|yes|YES) return 0 ;; *) die "aborted — nothing was changed (re-run with --yes to skip this prompt)" ;; esac
 }
 
-# An earlier version of this kit wrote the insteadOf redirect into the GLOBAL git
-# config. Those entries name THIS snapshot's serve.git, which post leaves behind,
-# so they would keep hijacking `hermes update` forever. Remove only the entries
-# that point at our own rehearsal copy.
-remove_stale_global_redirect() {
-  local prefix url removed=0
-  prefix="$(file_url "$SNAP/serve.git")"
-  for url in "$OFFICIAL_HTTPS" "$OFFICIAL_SSH"; do
-    if git config --global --get "url.$prefix.insteadOf" >/dev/null 2>&1; then
-      git config --global --unset-all "url.$prefix.insteadOf" 2>/dev/null || true
-      removed=$((removed + 1))
-    fi
-  done
-  [ "$removed" = 0 ] || ok "removed $removed stale global URL redirect(s) from an older run of this kit"
-}
-
 cmd_post() {
   resolve_paths
   load_snapshot
@@ -470,10 +426,12 @@ cmd_post() {
   say "  to how they were at $SNAP"
   confirm "Put everything back from $SNAP?"
 
-  step "stopping Hermes"
-  pkill -f "Hermes.app/Contents/MacOS" 2>/dev/null || true
-  pkill -f "hermes gateway" 2>/dev/null || true
-  ok "asked Hermes to stop (if anything was running)"
+  step "stopping this home's gateway"
+  local hermes_exe
+  hermes_exe="$(resolve_hermes_exe)" || die "no Hermes launcher for $INSTALL_DIR; stop this home's gateway before restoring"
+  HERMES_HOME="$HERMES_HOME" "$hermes_exe" gateway stop \
+    || die "could not stop this home's gateway; restore has not started"
+  ok "stopped this home's gateway (close the desktop app before restoring its data)"
 
   local aside="$SNAP/replaced"
   [ ! -e "$aside" ] || die "$aside already exists (an interrupted post?) — nothing was changed; move it away and run post again"
@@ -501,8 +459,6 @@ cmd_post() {
   # Only the whole trees the update left behind. hermes-backup.zip stays.
   rm -rf "$aside"
   ok "deleted the post-update trees ($aside)"
-
-  remove_stale_global_redirect
 
   step "done"
   say "Your HERMES_HOME and the desktop app's data are back exactly as they were."

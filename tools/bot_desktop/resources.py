@@ -57,7 +57,7 @@ def _meminfo() -> dict[str, int]:
 def _stat_value(path: Path, key: str) -> Optional[int]:
     """One ``<key> <bytes>`` line out of a cgroup ``memory.stat``."""
     try:
-        for line in path.read_text(encoding="utf-8").splitlines():
+        for line in path.read_text(encoding="utf-8-sig").splitlines():
             name, _, rest = line.partition(" ")
             if name == key:
                 return int(rest.strip())

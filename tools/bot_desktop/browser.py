@@ -55,7 +55,7 @@ def executable() -> Optional[str]:
 def _managed_executable() -> Optional[str]:
     from hermes_cli.browser_runtime import chromium_executable
 
-    exe = chromium_executable()
+    exe = chromium_executable(allow_override=False)
     return exe if exe and os.access(exe, os.X_OK) and not _is_headless_shell(exe) else None
 
 
@@ -148,7 +148,7 @@ def _launched_by_session(chromium_pid: int) -> Optional[str]:
     for a human-started (dock) instance. Chromium itself gets a scrubbed environment, so the daemon's
     ``/proc/<ppid>/environ`` is the marker (Linux-only, same user)."""
     try:
-        with open(f"/proc/{chromium_pid}/status", encoding="utf-8-sig") as fh:
+        with open(f"/proc/{chromium_pid}/status", encoding="utf-8") as fh:
             ppid = next((int(line.split()[1]) for line in fh if line.startswith("PPid:")), 0)
         with open(f"/proc/{ppid}/environ", "rb") as fh:
             raw = fh.read()

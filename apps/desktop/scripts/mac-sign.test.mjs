@@ -15,9 +15,16 @@ const config = require('../electron-builder.config.cjs')
 const repo = path.resolve(import.meta.dirname, '../../..')
 const desktop = path.resolve(import.meta.dirname, '..')
 const digestModule = pathToFileURL(path.join(import.meta.dirname, 'payload-digests.mjs')).href
-const python = process.env.HERMES_PYTHON || 'python'
+// The fixture imports pm and scripts.bundles, which only the prepared runtime
+// provides; a PATH python would fail later with an unrelated ImportError.
+function preparedPython() {
+  const configured = process.env.HERMES_PYTHON
+  if (!configured) throw new Error('mac-sign tests need HERMES_PYTHON set to the prepared Hermes runtime interpreter')
+  return configured
+}
 
 function fixture() {
+  const python = preparedPython()
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mac-digest-order-'))
   const app = path.join(root, 'Hermes.app')
   const payload = path.join(app, 'Contents', 'Resources', 'agent-payload')

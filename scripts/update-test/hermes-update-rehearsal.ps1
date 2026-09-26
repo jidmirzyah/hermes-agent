@@ -7,8 +7,8 @@
 
     pre   take a `hermes backup` of your data, snapshot the disk that holds
           HERMES_HOME and the desktop app's Electron userData (Volume Shadow Copy),
-          then point the install's update source at a custom repo + ref so
-          `hermes update` pulls it. Prints what to do next.
+          then point the install's update source at a fork so `hermes update`
+          pulls that fork's main. Prints what to do next.
     post  put both trees back exactly as they were at the snapshot.
 
   Plus `status`, which only prints. This script never judges your install: it
@@ -30,10 +30,8 @@
   pre | post | status
 
 .PARAMETER Source
-  Repo to pull the update from (default: the rehearsal fork).
-
-.PARAMETER Ref
-  Branch or tag in that repo (default: main).
+  Repo to pull the update from; updates follow its main (default: the
+  rehearsal fork).
 
 .PARAMETER BackupRoot
   Where the backup lives (default: $HOME\hermes-update-rehearsal).
@@ -42,12 +40,12 @@
   post: skip the confirmation.
 
 .EXAMPLE
-  ./hermes-update-rehearsal.ps1 pre -Source <git-url> -Ref <branch>
+  ./hermes-update-rehearsal.ps1 pre -Source <git-url>
   # ... run `hermes update`, use Hermes, test ...
   ./hermes-update-rehearsal.ps1 post
 
 .NOTES
-  `pre` needs network access to -Source and a usable git on PATH.
+  `pre` and `hermes update` need network access to -Source, and a usable git on PATH.
 #>
 [CmdletBinding()]
 param(
@@ -56,7 +54,6 @@ param(
   [string]$Command = 'help',
 
   [string]$Source = 'https://github.com/ethernet8023/hermes-agent.git',
-  [string]$Ref = 'main',
   [string]$BackupRoot,
   [switch]$Yes
 )
@@ -320,9 +317,15 @@ function Invoke-Pre {
     $procs | ForEach-Object { Write-Host "    $($_.ProcessName) (pid $($_.Id))" }
   }
   else { Ok 'no Hermes processes running' }
-  $n = @(Invoke-GitCmd @('config', '--global', '--get-regexp', '^url\.')).Count
+  $n = @(Invoke-GitCmd @('config', '--global', '--get-regexp', '^url\.')).Count + @(Invoke-GitCmd @('-C', $P.Install, 'config', '--local', '--get-regexp', '^url\.')).Count
   if ($n -eq 0) { Ok 'global git config has no URL rewrites' }
   else { Warn "$n existing url.* insteadOf entr(y/ies) in your git config; we add more and remove only ours" }
+
+  # Before anything is written: a bad -Source or no network should abort with
+  # nothing done, not after the backup and snapshot.
+  $targetSha = ((@(Invoke-GitCmd @('ls-remote', $Source, 'refs/heads/main')) | Out-String) -split '\s+')[0]
+  if ($targetSha -notmatch '^[0-9a-f]{40}$') { Fail "could not read main from $Source (network? permissions? bad -Source?) -- nothing was done" }
+  Ok "$Source main is at $targetSha"
 
   $stamp = (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ')
   $script:Snap = Join-Path $BackupRoot $stamp
@@ -352,28 +355,6 @@ function Invoke-Pre {
   }
   else { Ok "hermes-backup.zip ($([math]::Round((Get-Item $zip).Length / 1MB, 1)) MB, ${elapsed}s)" }
 
-  # --- fetch before the snapshot, so the snapshot is as late as possible -----
-  Step 'fetching the rehearsal source'
-  Say "source        $Source"
-  Say "ref           $Ref"
-  $serve = Join-Path $script:Snap 'serve.git'
-  $null = Invoke-GitCmd @('clone', '--quiet', '--bare', '--branch', $Ref, '--single-branch', $Source, $serve)
-  if ($LASTEXITCODE -ne 0) {
-    if (Test-Path -LiteralPath $serve) { Remove-Item -LiteralPath $serve -Recurse -Force }
-    $null = Invoke-GitCmd @('clone', '--quiet', '--bare', $Source, $serve)
-    if ($LASTEXITCODE -ne 0) { Fail "could not clone $Source (network? permissions? bad -Source?)" }
-    Ok "cloned the whole repo (-Ref '$Ref' is not a branch/tag name)"
-  }
-  else { Ok "cloned $Ref" }
-  $targetSha = (@(& git -C $serve rev-parse --verify "$Ref^{commit}" 2>$null | Out-String) -replace "`r", '').Trim()
-  # Shape-check: a warning or error line folded into the capture would otherwise
-  # be handed to update-ref as a bogus revision.
-  if ($targetSha -notmatch '^[0-9a-f]{40}$') { Fail "-Ref '$Ref' was not found in $Source" }
-  $null = Invoke-GitCmd @('-C', $serve, 'update-ref', 'refs/heads/main', $targetSha)
-  $null = Invoke-GitCmd @('-C', $serve, 'symbolic-ref', 'HEAD', 'refs/heads/main')
-  $null = Invoke-GitCmd @('-C', $serve, 'config', 'uploadpack.allowAnySHA1InWant', 'true')
-  Ok "the update will land on $targetSha"
-
   # --- snapshot: the rollback point. Everything after this is undone by post.
   Step 'snapshotting the disk'
   $shadowLines = @()
@@ -389,18 +370,21 @@ function Invoke-Pre {
   # disk; past the cap Windows deletes the snapshot. The cap is a ceiling, not
   # a reservation. Raised AFTER the snapshot: on client Windows the storage
   # association may only exist once a shadow does.
-  $storageLines = @()
+  # Each original cap is recorded BEFORE it is raised, so a pre that dies
+  # mid-way still leaves post and status the record to put it back from;
+  # restoring a cap that never got raised is a no-op.
+  $storageFile = Join-Path $script:Snap 'shadowstorage.txt'
+  Set-Content -LiteralPath $storageFile -Encoding utf8 -Value @()
   foreach ($v in $volumes) {
     $orig = Get-ShadowStorageMax $v
     if ($null -eq $orig) { Warn "could not read the snapshot room on $v; leaving it as it is"; continue }
     if ($orig -ge $ShadowStorageMax) { Ok "snapshot room on $v is $(Format-Bytes $orig)"; continue }
+    Add-Content -LiteralPath $storageFile -Encoding utf8 -Value "$v`t$orig"
     if (Set-ShadowStorageMax $v $ShadowStorageMax) {
-      $storageLines += "$v`t$orig"
       Ok "snapshot room on $v raised from $(Format-Bytes $orig) to $(Format-Bytes $ShadowStorageMax) (post puts it back)"
     }
     else { Warn "could not raise the snapshot room on $v; it stays $(Format-Bytes $orig) -- writing more than that to the disk before post drops the snapshot" }
   }
-  Set-Content -LiteralPath (Join-Path $script:Snap 'shadowstorage.txt') -Encoding utf8 -Value $storageLines
 
   # Plain text, not JSON: post compares this string byte-for-byte to decide
   # whether the backup belongs to the home it is about to restore.
@@ -414,26 +398,26 @@ function Invoke-Pre {
     userdata_dir_source = $P.UserDataOrigin
     userdata_existed    = [bool]$userDataExists
     rehearsal_source    = $Source
-    rehearsal_ref       = $Ref
   }
   $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $script:Snap 'manifest.json') -Encoding utf8
 
-  Step 'pointing your install at it'
+  Step "pointing your install at $Source"
   # insteadOf is a TRANSPORT rewrite. Your checkout's origin keeps the official
   # URL, which matters: `hermes update` resolves its channel from the archive and
   # validates it against `git config --get remote.origin.url`. Repointing origin
   # at a fork would make the update fail before any git work.
-  $fileUrl = 'file:///' + ($serve -replace '\\', '/')
+  # Straight at the fork: the updater follows main, so the fork's main is what
+  # lands (force-push it to the branch under test).
   # REPO-LOCAL: the checkout's config lives inside the snapshotted home, so
   # post's restore removes the redirect for free.
   foreach ($url in @($OfficialHttps, $OfficialSsh)) {
     # --add: the key is multi-valued; a plain set would drop the first URL.
-    $null = Invoke-GitCmd @('-C', $P.Install, 'config', '--local', '--add', "url.$fileUrl.insteadOf", $url)
+    $null = Invoke-GitCmd @('-C', $P.Install, 'config', '--local', '--add', "url.$Source.insteadOf", $url)
     if ($LASTEXITCODE -ne 0) { Fail "could not write the URL redirect into $($P.Install)\.git\config" }
   }
   Set-Content -LiteralPath (Join-Path $P.Home '.skip_upstream_prompt') -Encoding utf8 -Value @()
   Set-Content -LiteralPath (Join-Path $script:Snap 'target-sha') -Encoding utf8 -Value @($targetSha)
-  Ok 'official repo URL now resolves to the rehearsal copy'
+  Ok "official repo URL now resolves to $Source"
   Ok "created $($P.Home)\.skip_upstream_prompt (stops the 'add upstream remote?' prompt)"
 
   Step 'ready'
@@ -461,9 +445,9 @@ function Invoke-Status {
   Say "latest        $snap"
   $ts = Join-Path $snap 'target-sha'
   if (Test-Path -LiteralPath $ts) {
-    Say "prepared for  $((Get-Content -LiteralPath $ts -Raw).Trim())"
+    Say "prepared for  $((Get-Content -LiteralPath $ts -Raw).Trim()) (main at pre time)"
     $manifest = Get-Content -LiteralPath (Join-Path $snap 'manifest.json') -Raw | ConvertFrom-Json
-    Say "source        $($manifest.rehearsal_source) @ $($manifest.rehearsal_ref)"
+    Say "source        $($manifest.rehearsal_source)"
   }
   else { Say 'prepared      no' }
   if (Test-Path -LiteralPath (Join-Path $snap 'shadows.txt')) {
@@ -471,10 +455,19 @@ function Invoke-Status {
       Say "snapshot      $($s.Volume) $(if (Test-ShadowAlive $s) { 'present' } else { 'GONE -- post cannot roll back' })"
     }
   }
+  # The raised cap outlives this backup if post never runs; say how to undo it.
+  $storageFile = Join-Path $snap 'shadowstorage.txt'
+  if (Test-Path -LiteralPath $storageFile) {
+    foreach ($line in @(Get-Content -LiteralPath $storageFile | Where-Object { $_.Trim() })) {
+      $f = $line -split "`t"
+      $d = $f[0].TrimEnd('\')
+      Say "snapshot room $($f[0]) was $(Format-Bytes ([UInt64]$f[1])) before pre (post puts it back; without post: vssadmin resize shadowstorage /for=$d /on=$d /maxsize=$($f[1]))"
+    }
+  }
   Say "data backup   $(if (Test-Path -LiteralPath (Join-Path $snap 'hermes-backup.zip')) { 'hermes-backup.zip' } else { 'none' })"
   Say "marker        $(if (Test-Path -LiteralPath (Join-Path $P.Home '.skip_upstream_prompt')) { 'present' } else { 'absent' })"
-  $n = @(Invoke-GitCmd @('config', '--global', '--get-regexp', '^url\.')).Count
-  Say "git rewrites  $n global insteadOf entr(y/ies)"
+  $n = @(Invoke-GitCmd @('config', '--global', '--get-regexp', '^url\.')).Count + @(Invoke-GitCmd @('-C', $P.Install, 'config', '--local', '--get-regexp', '^url\.')).Count
+  Say "git rewrites  $n insteadOf entr(y/ies)"
   if (Test-Path -LiteralPath (Join-Path $P.Install '.git')) {
     Say "checkout now  $(Invoke-Git $P @('rev-parse', '--short', 'HEAD')) ($(Invoke-Git $P @('branch', '--show-current')))"
   }
@@ -489,29 +482,6 @@ function Confirm-Action {
   if ($Yes) { return }
   $reply = Read-Host "$Prompt [y/N]"
   if ($reply -notmatch '^(y|yes)$') { Fail 'aborted -- nothing was changed' }
-}
-
-function Remove-StaleGlobalRedirect {
-  # An earlier version of this kit wrote the insteadOf redirect into the GLOBAL
-  # git config. Those entries name THIS snapshot's serve.git, which post leaves
-  # behind, so they would keep hijacking `hermes update` forever. Remove only
-  # the entries that point at our own rehearsal copy.
-  $serve = Join-Path $script:Snap 'serve.git'
-  $prefix = 'file:///' + ($serve -replace '\\', '/')
-  $removed = 0
-  foreach ($url in @($OfficialHttps, $OfficialSsh)) {
-    $prev = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
-    try {
-      $out = & git config --global --get "url.$prefix.insteadOf" 2>$null
-      if ($LASTEXITCODE -eq 0 -and $out) {
-        $null = Invoke-GitCmd @('config', '--global', '--unset-all', "url.$prefix.insteadOf")
-        $removed++
-      }
-    }
-    finally { $ErrorActionPreference = $prev }
-  }
-  if ($removed) { Ok "removed $removed stale global URL redirect(s) from an older run of this kit" }
 }
 
 function Invoke-Post {
@@ -583,8 +553,6 @@ function Invoke-Post {
   foreach ($s in $shadows) { Remove-Shadow $s; Ok "deleted the snapshot of $($s.Volume)" }
   Restore-ShadowStorage
 
-  Remove-StaleGlobalRedirect
-
   Step 'done'
   Say "Your HERMES_HOME and the desktop app's data are back exactly as they were."
   Say "Open the desktop app once and run 'hermes doctor' to confirm."
@@ -609,15 +577,14 @@ switch ($Command) {
     else {
       Write-Host 'hermes-update-rehearsal.ps1 -- run against an EXISTING Hermes install.'
       Write-Host ''
-      Write-Host '  pre     back up your data, snapshot the disk, point the update source at a custom repo+ref'
+      Write-Host '  pre     back up your data, snapshot the disk, point the update source at a fork'
       Write-Host '  post    restore both trees exactly as they were at the snapshot'
       Write-Host '  status  print what is prepared (read-only; nothing is touched)'
       Write-Host ''
       Write-Host 'pre and post need an elevated (Run as Administrator) PowerShell.'
       Write-Host ''
       Write-Host 'Options:'
-      Write-Host '  -Source URL        repo to pull the update from'
-      Write-Host '  -Ref REV           branch or tag in that repo'
+      Write-Host '  -Source URL        repo to pull the update from; updates follow its main'
       Write-Host '  -BackupRoot DIR    where the backup lives'
       Write-Host '  -Yes               post: skip the confirmation'
       Write-Host ''

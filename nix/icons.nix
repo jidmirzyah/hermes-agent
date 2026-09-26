@@ -1,5 +1,5 @@
 # Run the shared generator offline; generated assets are not tracked in git.
-{ lib, runCommand, iconBuildVenv }:
+{ lib, runCommand, venv }:
 let
   src = lib.fileset.toSource {
     root = ./..;
@@ -9,7 +9,7 @@ let
     ];
   };
 in
-runCommand "hermes-icons" { nativeBuildInputs = [ iconBuildVenv ]; } ''
+runCommand "hermes-icons" { nativeBuildInputs = [ venv ]; } ''
   python ${src}/scripts/generate_icons.py --source ${src} --out $out
   python ${src}/scripts/generate_icons.py --source ${src} --out $out --check
 ''

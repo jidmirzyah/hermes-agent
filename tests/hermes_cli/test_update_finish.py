@@ -62,10 +62,13 @@ def completion(tmp_path, monkeypatch):
     python.parent.mkdir(parents=True)
     python.symlink_to(Path(sys._base_executable).resolve())
     _put(tmp_path / "store", "facts.json", json.dumps({"packages": {"python": {"entry": "python"}}}))
+    # A real venv: isolated build children (icon generation, npm lifecycle scripts) run on the
+    # selected generation's own interpreter, not on the store Python that hosts the completion.
     generation = install_state_dir(source) / "environments/prepared"
+    subprocess.run([str(python), "-m", "venv", "--without-pip", str(generation)],
+                   check=True, capture_output=True)
     site = site_packages(generation)
-    site.mkdir(parents=True)
-    _put(generation, "pyvenv.cfg", "include-system-site-packages = false\n")
+    assert site.is_dir()
     # Add the already prepared *real* test dependencies through a selected
     # generation .pth, as editable PM generations do. -I ignores PYTHONPATH.
     dependency_sites = [p for p in sys.path if Path(p).name in ("site-packages", "dist-packages")]
@@ -160,14 +163,16 @@ def completion(tmp_path, monkeypatch):
                     import os
                     import shutil
 
+                    from pm.environments import project_python
+
                     def provision(name, *, base_env, explicit):
                         assert name == 'npm' and explicit
                         assert shutil.which('node', path=base_env['PATH'])
                         assert shutil.which('npm', path=base_env['PATH'])
-                        assert base_env['HERMES_PYTHON'] == sys.executable
-                        assert base_env['PYTHON'] == sys.executable
+                        assert base_env['HERMES_PYTHON'] == str(project_python(root))
+                        assert base_env['PYTHON'] == base_env['HERMES_PYTHON']
                         (root / 'build-environment.json').write_text(json.dumps({
-                            'python': sys.executable, 'selected': selected_dependency.__file__,
+                            'python': base_env['HERMES_PYTHON'], 'selected': selected_dependency.__file__,
                             'argv': sys.argv, 'old_module': 'pre_pm_only' in sys.modules,
                             'pid': os.getpid(), 'parent': os.getppid(),
                         }))
@@ -333,7 +338,7 @@ def _npm_graph(source):
         }}
         // A real npm lifecycle child, not an assertion about a constructed env.
         writeFileSync('npm-python.json', execFileSync(process.env.HERMES_PYTHON,
-          ['-I', '-c', 'import json, os, sys; print(json.dumps(dict(python=sys.executable, configured=os.environ["PYTHON"])))']));
+          ['-I', '-c', 'import json, os, sys, selected_dependency; print(json.dumps(dict(python=sys.executable, configured=os.environ["PYTHON"])))']));
     '''))
     _put(source, "packages/value/index.js", "export const value = 'compiled local graph';\n")
     _put(source, "packages/value/index.d.ts", "export const value: string;\n")
@@ -404,7 +409,8 @@ def test_real_compiler_failure_retains_receipt_and_skips_completion(completion):
     context_before = context.read_bytes()
     child = run()
     assert child.returncode == 1, child.stdout + child.stderr
-    assert "TypeScript build failed" in child.stderr
+    # Contained output reports a failure through the step's tail on stdout.
+    assert "TypeScript build failed" in child.stdout + child.stderr
     assert (source / "npm-python.json").is_file()
     assert (source / "ui-tui/dist/entry.js").is_file()
     assert not (source / "hermes_cli/web_dist/index.html").exists()

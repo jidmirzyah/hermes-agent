@@ -210,7 +210,7 @@ def _verify_checksums_signature(tmp: Path, checksum_path: Path) -> bool:
         return True
 
 
-def _allowlisted_env() -> Dict[str, str]:
+def allowlisted_env() -> Dict[str, str]:
     """Infrastructure-only env (PATH, HOME, locale) — never the operator's secrets."""
     return {n: os.environ[n] for n in _PROXY_SUBPROCESS_ENV_ALLOWLIST if n in os.environ}
 
@@ -227,7 +227,7 @@ def iron_proxy_version(binary: Path) -> str:
         return _VERSION_CACHE[key]
     try:
         # Scrubbed env: a PATH-resolved binary must not see the host's API keys.
-        res = _run([str(binary), "--version"], timeout=_RUN_TIMEOUT, text=True, env=_allowlisted_env())
+        res = _run([str(binary), "--version"], timeout=_RUN_TIMEOUT, text=True, env=allowlisted_env())
     except (OSError, subprocess.TimeoutExpired):
         return ""
     if out := (res.stdout or res.stderr or "").strip():  # never cache empty output — it would poison status for the process lifetime
@@ -584,7 +584,7 @@ def _read_pid() -> Optional[int]:
 def _pid_proc_starttime(pid: int) -> Optional[str]:
     """/proc/<pid>/stat starttime (field 22) on Linux, else None — cheap PID-recycling detector."""
     try:
-        text = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8-sig")
+        text = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
     except OSError:
         return None
     # comm may contain spaces/parens, so split after the LAST ")"; field 22 -> tail index 19.
@@ -804,7 +804,7 @@ def _build_proxy_subprocess_env(
     """Allowlisted infra vars + the secrets named in mappings.  With ``refresh_from_bitwarden`` and a populated
     ``bitwarden_config`` secrets come from BWS (the rotation guarantee); without ``allow_env_fallback`` any BWS
     shortfall fails closed instead of keeping stale host-env values."""
-    env, parent = _allowlisted_env(), os.environ
+    env, parent = allowlisted_env(), os.environ
     # Forward ONLY mapped secrets; the rule is keyed on the canonical name, so mirror an alias value into it.
     mappings = load_mappings()
     needed = {m.real_env_name for m in mappings}
@@ -951,7 +951,7 @@ def _reset_for_tests() -> None:
 
 
 __all__ = [
-    "ProxyStatus", "TokenMapping", "build_proxy_config", "discover_provider_mappings",
+    "ProxyStatus", "TokenMapping", "allowlisted_env", "build_proxy_config", "discover_provider_mappings",
     "discover_uncovered_providers", "ensure_audit_log", "ensure_ca_cert", "ensure_management_token",
     "find_iron_proxy", "get_status", "install_iron_proxy", "iron_proxy_version", "load_mappings",
     "merge_mappings", "mint_proxy_token", "reload_proxy", "start_proxy", "stop_proxy",

@@ -36,6 +36,7 @@ import pytest
 import hermes_yaml as yaml
 
 import pm.workspace as ws
+from pm.plugin_inputs import Members
 
 
 def _write_enabled(home: Path, enabled: list, provider: str | None = None) -> None:
@@ -266,6 +267,69 @@ def test_conflicting_candidate_refused_unenabled_and_unimported(admission_env):
     assert selected_venv(tmp_path / "core") != selected
     assert marker.read_bytes() == before
     subprocess.run([str(sidecar_python), "-c", "import sys; assert sys.prefix != sys.base_prefix"], check=True, timeout=30)
+
+
+@pytest.mark.skipif(not _uv_available(), reason="uv not on PATH")
+def test_malformed_secondary_cannot_evict_recorded_member(admission_env, monkeypatch, caplog):
+    """A→B→A: passive inspection survives bad config; A's recorded graph does not shrink."""
+    from pm.environments import runtime_facts_path, selected_venv
+    from pm.install import sync_venv, venv_is_current
+    from pm.lock import Facts
+
+    tmp_path, home_a = admission_env
+    core = tmp_path / "core"
+    profile = home_a / "profiles" / "work"
+    profile.mkdir(parents=True)
+    _write_enabled(profile, ["profile-dep"])
+    member = profile / "plugins" / "profile-dep"
+    member.mkdir(parents=True)
+    (member / "pyproject.toml").write_text(
+        '[project]\nname="profile-dep"\nversion="1"\nrequires-python=">=3.11"\n'
+        'dependencies=[]\n[tool.uv]\npackage=false\n', encoding="utf-8",
+    )
+    sync_venv(explicit=True)
+    recorded = Facts(runtime_facts_path(core), strict=True).get("venv")
+    selected = selected_venv(core)
+    assert recorded["stamp"] and selected.is_dir()
+    assert "profile-dep" in (Path(recorded["resolved_lock"]).parent / "pyproject.toml").read_text()
+
+    bad = profile / "config.yaml"
+    bad.write_text("plugins: [broken]\n", encoding="utf-8")
+    candidate = home_a / "plugins" / "new-dep"
+    candidate.mkdir(parents=True)
+    (candidate / "pyproject.toml").write_text(
+        '[project]\nname="new-dep"\nversion="1"\nrequires-python=">=3.11"\n'
+        'dependencies=[]\n[tool.uv]\npackage=false\n', encoding="utf-8",
+    )
+    _write_enabled(home_a, ["new-dep"])
+    assert venv_is_current(project_root=core) is False
+    assert str(bad) in caplog.text
+    with pytest.raises(ValueError, match="config.yaml"):
+        sync_venv(explicit=True)
+    assert Facts(runtime_facts_path(core), strict=True).get("venv") == recorded
+    assert selected_venv(core) == selected
+    # Even a precomputed member list cannot bypass a newly broken profile.
+    with pytest.raises(ValueError, match="config.yaml"):
+        sync_venv(explicit=True, plugins=Members([]))
+    assert Facts(runtime_facts_path(core), strict=True).get("venv") == recorded
+
+    home_b = tmp_path / "home-b"
+    _write_enabled(home_b, [])
+    monkeypatch.setenv("HERMES_HOME", str(home_b))
+    sync_venv(explicit=True)
+    assert selected_venv(core).is_dir()
+    assert Facts(runtime_facts_path(core), strict=True).get("venv")["stamp"] != recorded["stamp"]
+
+    monkeypatch.setenv("HERMES_HOME", str(home_a))
+    with pytest.raises(ValueError, match="config.yaml"):
+        sync_venv(explicit=True)
+    assert selected_venv(core) == selected
+    _write_enabled(profile, ["profile-dep"])
+    sync_venv(explicit=True)
+    restored = Facts(runtime_facts_path(core), strict=True).get("venv")
+    assert selected_venv(core).is_dir()
+    assert restored["stamp"] != recorded["stamp"]
+    assert "profile-dep" in (Path(restored["resolved_lock"]).parent / "pyproject.toml").read_text()
 
 
 def test_active_context_home_exported_to_wrapper_subprocess(monkeypatch, tmp_path):

@@ -1,12 +1,9 @@
-"""Build native icons with PM's locked renderer. Measure pixels, not SVG text."""
+"""Build native icons on the runtime interpreter. Measure pixels, not SVG text."""
 import colorsys
 import io
 import itertools
 import os
-import json
 import shutil
-import tomllib
-import zipfile
 from pathlib import Path
 import struct
 import subprocess
@@ -28,53 +25,39 @@ def generate(tmp_path_factory):
     foreign.mkdir()
     (foreign / "sitecustomize.py").write_text("raise SystemExit('foreign interpreter path leaked')\n", encoding="utf-8")
     shutil.copytree(ROOT / "assets", source / "assets")
-    # A real app-only wheel makes --only-group load-bearing: startup dies if
-    # the driver accidentally includes application dependencies in the renderer.
-    from tests.pm._fixtures import _wheel
-    wheel = _wheel(source, "application_only")
-    with zipfile.ZipFile(wheel, "a") as archive:
-        archive.writestr("application_only.pth", "import sys; sys.exit('application dependency leaked into icon renderer')\n")
-    group = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8-sig"))["dependency-groups"]["icon-build"]
-    (source / "pyproject.toml").write_text(
-        '[project]\nname="icon-fixture"\nversion="1"\nrequires-python=">=3.11"\n'
-        'dependencies=["application-only==1.0"]\n[dependency-groups]\nicon-build=' + json.dumps(group) + '\n'
-        '[tool.uv]\npackage=false\n[tool.uv.sources]\napplication-only={path=' + json.dumps(wheel.as_posix()) + '}\n', encoding="utf-8")
-    uv, node = shutil.which("uv"), shutil.which("node")
-    assert uv and node, "icon acceptance requires prepared uv and Node"
-    subprocess.run([uv, "lock", "--python", sys.executable], cwd=source, check=True, capture_output=True, timeout=60)
+    from scripts.build.icon_environment import prepare_icon_environment
+    python = prepare_icon_environment(ROOT, root / "runtime", root / "cache")
+    node = shutil.which("node")
+    assert node, "icon acceptance requires prepared Node"
     outputs = {}
     sequence = itertools.count()
 
-    def build(tag="", commit="", *, rejected=False, on_demand=False):
-        key = (tag, commit, on_demand)
+    def build(tag="", commit="", *, rejected=False):
+        key = (tag, commit)
         if key not in outputs:
             out = root / str(next(sequence))
+            # The runtime interpreter renders with its own packages: foreign
+            # interpreter paths must not leak in, and nothing may be installed.
             env = {**os.environ, "HERMES_HOME": str(root / "home"),
                    "HERMES_RUNTIME_DIR": str(root / "tools"),
                    "HERMES_PAYLOAD_TAG": tag, "HERMES_BUILD_COMMIT": commit,
-                   "HERMES_PYTHON": sys.executable, "PYTHONPATH": str(root / "foreign-site"),
+                   "HERMES_PYTHON": str(python), "PYTHONPATH": str(root / "foreign-site"),
                    "PYTHONHOME": str(root / "foreign-python"), "HERMES_DISABLE_LAZY_INSTALLS": "1"}
             command = [node, str(ROOT / "scripts/generate-icons.mjs"),
-                       "--source", str(source), "--out", str(out), *(["--on-demand"] if on_demand else [])]
-            result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=180)
+                       "--source", str(source), "--out", str(out)]
+            result = subprocess.run(command, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180)
             if rejected:
                 assert result.returncode != 0, "invalid build identity generated icons"
                 assert not out.exists()
-                if on_demand:
-                    assert "disabled" in (result.stdout + result.stderr).lower()
                 return
             assert result.returncode == 0, result.stdout + result.stderr
             if not outputs:
-                checked = subprocess.run([*command, "--check"], env=env, capture_output=True, text=True, timeout=180)
+                checked = subprocess.run([*command, "--check"], env=env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180)
                 assert checked.returncode == 0, checked.stdout + checked.stderr
             outputs[key] = out
         return outputs[key]
 
     return build
-
-
-def test_on_demand_build_obeys_disabled_lazy_install_admission(generate):
-    generate(on_demand=True, rejected=True)
 
 
 def frames(path):

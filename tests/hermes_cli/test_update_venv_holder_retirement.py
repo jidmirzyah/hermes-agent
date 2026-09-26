@@ -95,7 +95,6 @@ def test_command_reaches_checkout_preparation_without_holder_gates(monkeypatch, 
     # Recreate the former call-site names as tripwires, not host-OS fakes.
     # The scan remains live for lifecycle ownership, but must not gate updates.
     monkeypatch.setattr(main, "_detect_concurrent_hermes_instances", forbidden, raising=False)
-    monkeypatch.setattr(update_cmd, "_clear_windows_venv_holders_or_exit", forbidden, raising=False)
     monkeypatch.setattr(update_cmd_windows, "_detect_venv_python_processes", forbidden)
     monkeypatch.setattr(update_cmd, "_refuse_gateway_ancestor_tree_kill", forbidden)
     monkeypatch.setattr(main, "_is_windows", forbidden)

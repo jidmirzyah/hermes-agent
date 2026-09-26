@@ -28,10 +28,17 @@ def source_product_current(project_root: Path, product: str, out: Path) -> bool:
 
 def source_build_env(base_env: dict | None = None, *, explicit: bool = False) -> dict[str, str]:
     from pm import ensure
+    from pm.environments import project_python, running_from_selected_environment
+    from pm.paths import repo_root
     from hermes_constants import get_hermes_home
 
-    env = {**os.environ, **(base_env or {}), "CI": "1", "HERMES_PYTHON": sys.executable,
-           "PYTHON": sys.executable}
+    # The historical update runs on store Python with the selected environment
+    # activated in-process. Icon generation starts an isolated child, which needs
+    # the selected venv executable rather than the store interpreter.
+    root = repo_root()
+    python = str(project_python(root)) if running_from_selected_environment(root) else sys.executable
+    env = {**os.environ, **(base_env or {}), "CI": "1", "HERMES_PYTHON": python,
+           "PYTHON": python}
     env.pop("ESBUILD_BINARY_PATH", None)
     npmrc = get_hermes_home() / "npmrc"
     if npmrc.is_file():
@@ -39,10 +46,15 @@ def source_build_env(base_env: dict | None = None, *, explicit: bool = False) ->
     return ensure("npm", base_env=env, explicit=explicit).env
 
 
-def run_source_script(project_root: Path, script: str, *args: str, env: dict) -> None:
-    subprocess.run(
+def run_source_script(project_root: Path, script: str, *args: str, env: dict, label: str) -> None:
+    from pm.progress import run_contained
+
+    # npm's deprecation warnings are the loudest lines and never actionable
+    # here; they still land in the failure tail.
+    run_contained(
         [shutil.which("node", path=env["PATH"]), str(project_root / script), *args],
-        cwd=project_root, env=env, check=True,
+        label, hide=lambda line: line.lower().startswith("npm warn"), indent="  ",
+        cwd=project_root, env=env,
     )
 
 
@@ -54,6 +66,7 @@ def prepare_source_dependencies(project_root: Path, workspaces: tuple[str, ...],
         project_root, "scripts/build/node-deps.mjs", "--source", str(project_root), "--reuse",
         *(() if explicit or lazy_installs_allowed() else ("--no-install",)),
         *(arg for workspace in workspaces for arg in ("--workspace", workspace)), env=env,
+        label="Preparing Node dependencies",
     )
 
 
@@ -68,16 +81,16 @@ def prepare_launch_dependencies(project_root: Path, *, env: dict) -> None:
 
 
 def build_source_tui(project_root: Path, *, env: dict) -> None:
-    run_source_script(project_root, "scripts/build/tui.mjs", env=env)
+    run_source_script(project_root, "scripts/build/tui.mjs", env=env, label="Building the TUI")
 
 
-def build_source_web(project_root: Path, *, env: dict, icons: Path | None = None,
-                     explicit: bool = False) -> None:
+def build_source_web(project_root: Path, *, env: dict, icons: Path | None = None) -> None:
     if icons is None:
         icons = project_root
-        run_source_script(project_root, "scripts/generate-icons.mjs", *(() if explicit else ("--on-demand",)), env=env)
+        run_source_script(project_root, "scripts/generate-icons.mjs", env=env, label="Generating icons")
     run_source_script(project_root, "scripts/build/web.mjs", "--source", str(project_root),
-                      "--icons", str(icons), "--out", str(project_root / "hermes_cli/web_dist"), env=env)
+                      "--icons", str(icons), "--out", str(project_root / "hermes_cli/web_dist"), env=env,
+                      label="Building the web UI")
 
 
 def source_frontends(project_root: Path) -> tuple[str, ...]:
@@ -107,14 +120,14 @@ def build_update_products(project_root: Path, *, desktop: bool) -> None:
         build_source_tui(project_root, env=env)
     if "web" in frontends:
         publish_stage("Building the web UI")
-        build_source_web(project_root, env=env, explicit=True)
+        build_source_web(project_root, env=env)
     if desktop:
         from hermes_cli.main_desktop import _install_rebuilt_desktop_app, build_prepared_desktop
 
         publish_stage("Building the desktop app")
         build_prepared_desktop(
             project_root / "apps/desktop", source_mode=False,
-            npm=shutil.which("npm", path=env["PATH"]), env=env, icons=project_root, explicit=True,
+            npm=shutil.which("npm", path=env["PATH"]), env=env, icons=project_root,
         )
         # A current release/ can still sit beside a stale installed copy (an earlier
         # update rebuilt but never installed); healing must not wait for the next build.

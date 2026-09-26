@@ -367,7 +367,16 @@ def default_fetch(url: str) -> str:
     """
     import urllib.request
 
-    with urllib.request.urlopen(https_update_url(url), timeout=_FETCH_TIMEOUT) as resp:
+    class HTTPSFeedRedirectHandler(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+            if redirected is not None and not redirected.full_url.lower().startswith("https://"):
+                fp.close()
+                raise ValueError("update_url redirect must use https://")
+            return redirected
+
+    opener = urllib.request.build_opener(HTTPSFeedRedirectHandler())
+    with opener.open(https_update_url(url), timeout=_FETCH_TIMEOUT) as resp:
         data = resp.read(_MAX_FEED_BYTES)
     return data.decode("utf-8", errors="replace")
 

@@ -20,6 +20,7 @@ import pytest
 
 from hermes_cli.release_channels import ChannelReader
 from scripts.releases import channel_releases, handoff
+from tests.ci.desktop_release_roles import canary_publisher, native_builds, stage_step
 from tests.ci.test_desktop_release_tag_admission import _git, _seed_repo
 from tests.scripts.test_release_r2 import r2_server  # noqa: F401
 
@@ -27,12 +28,23 @@ ROOT = Path(__file__).resolve().parents[2]
 pytestmark = pytest.mark.platforms("posix")
 
 
-def workflow_job(name):
-    return hermes_yaml.safe_load((ROOT / ".github/workflows/desktop-bundled-release.yml").read_text())["jobs"][name]
+def workflow_jobs():
+    return hermes_yaml.safe_load((ROOT / ".github/workflows/desktop-bundled-release.yml").read_text())["jobs"]
+
+
+def canary_job():
+    jobs = workflow_jobs()
+    return jobs[canary_publisher(jobs)]
+
+
+def stage_script(target, mode):
+    """The tag/commit receipt stage of the native build leg for *target*."""
+    jobs = workflow_jobs()
+    return stage_step(jobs[native_builds(jobs)[(target, mode)]])["run"]
 
 
 def step_script(job, name):
-    return next(step["run"] for step in workflow_job(job)["steps"] if step.get("name") == name)
+    return next(step["run"] for step in job["steps"] if step.get("name") == name)
 
 
 @pytest.fixture
@@ -95,7 +107,7 @@ def canary(tmp_path, r2_server, monkeypatch):
            "RELEASE_COMMIT": commit, "RELEASE_PHASE": "", "HERMES_DESKTOP_VARIANT": "bundled",
            "HERMES_BUILD_COMMIT": "", "CHANNEL_BUILD": "", "R2_DISPOSABLE_RUN": "",
            "CLOUDFLARE_R2_PUBLIC_URL": base,
-           "RELEASE_NEEDS": json.dumps({name: {"result": "success"} for name in workflow_job("publish-canary")["needs"]})}
+           "RELEASE_NEEDS": json.dumps({name: {"result": "success"} for name in canary_job()["needs"]})}
 
     def run(script, **overrides):
         return subprocess.run(["bash", "-e", "-o", "pipefail", "-c", script], cwd=clone,
@@ -146,8 +158,7 @@ def test_canary_metadata_is_recorded_and_receipt_bound(canary, r2_server, platfo
         env["HERMES_BUILD_COMMIT"] = env["RELEASE_COMMIT"]
     root = clone / "apps/desktop/release"
     native_leg(root, identity, env, platform, "x64")
-    name = "Stage Windows packages to R2" if platform == "win32" else "Stage macOS packages and feed inputs to R2"
-    script = step_script(f"build-{platform}-release", name)
+    script = stage_script(f"{platform}-x64", "commit" if commit_build else "release")
     result = run(script, **env, TARGET=f"{platform}-x64")
     assert result.returncode == 0, result.stdout + result.stderr
     prefix = f"releases/commit/{env['RELEASE_COMMIT']}/" if commit_build else f"releases/tag/{env['RELEASE_TAG']}/"
@@ -173,8 +184,7 @@ def stage_canary(clone, identity, env, run):
             if root.exists():
                 shutil.rmtree(root)
             native_leg(root, identity, env, platform, arch)
-            name = "Stage Windows packages to R2" if platform == "win32" else "Stage macOS packages and feed inputs to R2"
-            result = run(step_script(f"build-{platform}-release", name), **env, TARGET=f"{platform}-{arch}")
+            result = run(stage_script(f"{platform}-{arch}", "release"), **env, TARGET=f"{platform}-{arch}")
             assert result.returncode == 0, result.stdout + result.stderr
     bundle = root / f"{identity['artifactNamePascal']}-{env['FIXTURE_WINDOWS_VERSION']}-win.msixbundle"
     with zipfile.ZipFile(bundle, "w") as package:
@@ -187,9 +197,10 @@ def stage_canary(clone, identity, env, run):
 def test_published_canary_workflow_advances_only_after_every_gate(canary, r2_server, monkeypatch, tmp_path):
     clone, identity, env, run = canary
     bundle = stage_canary(clone, identity, env, run)
-    script = step_script("publish-canary", "Publish the admitted canary and advance its protected head")
+    publisher = canary_job()
+    script = step_script(publisher, "Publish the admitted canary and advance its protected head")
     before = dict(r2_server.store)
-    for job in workflow_job("publish-canary")["needs"]:
+    for job in publisher["needs"]:
         for outcome in ("failure", "skipped", "cancelled", None):
             needs = json.loads(env["RELEASE_NEEDS"])
             if outcome is None:
@@ -228,7 +239,7 @@ def test_published_canary_workflow_advances_only_after_every_gate(canary, r2_ser
     assert r2_server.store == before
     # The controller owns the draft flip and its independent custody read-back.
     release.write_text(json.dumps({**published, "isDraft": True}))
-    for step in workflow_job("publish-canary")["steps"]:
+    for step in publisher["steps"]:
         if "run" in step:
             result = run(step["run"])
             assert result.returncode == 0, result.stdout + result.stderr

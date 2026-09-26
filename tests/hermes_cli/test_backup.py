@@ -628,6 +628,25 @@ class TestImport:
         assert sorted(p.name for p in hermes_home.iterdir()) == ["config.yaml"]
         assert cmd_import(Namespace(zipfile=str(zip_path), force=True)) == 1
 
+    def test_import_ignores_damaged_pm_runtime_but_keeps_portable_data(
+        self, tmp_path, monkeypatch
+    ):
+        """Machine-local interpreter/dependency state is not a reason to refuse a backup."""
+        hermes_home = self._home_for_corrupt_import(tmp_path, monkeypatch)
+        zip_path = tmp_path / "backup.zip"
+        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("config.yaml", "model: restored\n")
+            zf.writestr("profiles/coder/installs/python.zip", "machine-specific\n" * 20)
+            zf.writestr("skills/demo/SKILL.md", "# portable\n")
+        self._corrupt_member(zip_path, "profiles/coder/installs/python.zip", "deflate")
+
+        from hermes_cli.backup import run_import
+
+        assert run_import(Namespace(zipfile=str(zip_path), force=True)) is None
+        assert (hermes_home / "config.yaml").read_text() == "model: restored\n"
+        assert (hermes_home / "skills/demo/SKILL.md").read_text() == "# portable\n"
+        assert not (hermes_home / "profiles/coder/installs").exists()
+
     def test_import_skips_member_that_rots_after_preflight_and_reports_incomplete(
         self, tmp_path, monkeypatch, capsys
     ):

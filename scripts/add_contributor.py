@@ -3,7 +3,7 @@
 
 Writes one file per email under contributors/emails/ (filename = email,
 content = login). File additions never merge-conflict, unlike the legacy
-AUTHOR_MAP dict in scripts/release.py, which is frozen — do not append to it.
+AUTHOR_MAP dict in scripts/releases/authors_legacy.py, which is frozen — do not append to it.
 
 Usage (from the repo root):
     python3 scripts/add_contributor.py <email> <github-login> [comment...]
@@ -45,10 +45,10 @@ def read_mapping_file(path: Path) -> str | None:
 
 
 def _legacy_login(email: str) -> str | None:
-    """Look the email up in the frozen legacy AUTHOR_MAP in release.py."""
+    """Look the email up in the frozen legacy AUTHOR_MAP in scripts/releases/authors_legacy.py."""
     try:
-        sys.path.insert(0, str(REPO_ROOT / "scripts"))
-        from release import LEGACY_AUTHOR_MAP  # noqa: PLC0415
+        sys.path.insert(0, str(REPO_ROOT))
+        from scripts.releases.authors_legacy import LEGACY_AUTHOR_MAP  # noqa: PLC0415
 
         return LEGACY_AUTHOR_MAP.get(email)
     except Exception:

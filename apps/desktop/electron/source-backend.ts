@@ -96,7 +96,10 @@ export function createSourcePythonBackend(
     label: `Hermes source at ${root}`,
     command,
     args: ['-m', 'hermes_cli.main', ...args],
-    env: buildDesktopBackendEnv({ currentEnv: options.env ?? process.env }),
+    // The backend runs in the user's workspace cwd, and the selected
+    // interpreter need not have this checkout installed: name it explicitly.
+    // (The scrubbed inherited value could point at another checkout.)
+    env: { ...buildDesktopBackendEnv({ currentEnv: options.env ?? process.env }), PYTHONPATH: root },
     root,
     bootstrap: false,
     shell: false,

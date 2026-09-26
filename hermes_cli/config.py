@@ -284,11 +284,12 @@ def detect_install_method(project_root: Optional[Path] = None) -> str:
     ``hermes update`` refuse to run. A legacy ``docker`` value is therefore ignored unless we are
     really inside a container, and being in a container alone never implies 'docker'.
 
-    The supported installs self-identify via the code-scoped stamp: - the curl installer
-    (scripts/install.sh, the README/website install command) git-clones the repo and stamps ``git`` next to
-    the code; - the published ``nousresearch/hermes-agent`` image bakes a ``docker`` stamp into
-    ``/opt/hermes`` at build time. An unsupported manual install dropped into a container (no stamp) falls
-    through to the ``.git`` checks and behaves like any off-path install. See issue #34397.
+    Source installers clone a git checkout and publish ``install-stamp.json``;
+    the ``.git`` fallback identifies it as a source install. Older installations
+    may carry ``.install_method``, which remains authoritative for compatibility.
+    The published image bakes a ``docker`` marker into ``/opt/hermes``. A manual
+    clone in a container still resolves via ``.git``, not container presence alone.
+    See issue #34397.
     """
     # The stamp is a property of the running code tree (parent of hermes_cli/), NOT of $HERMES_HOME,
     # so it survives two installs sharing a home.

@@ -159,7 +159,7 @@ def test_repair_restores_recorded_plugin_dependencies_without_config(tmp_path, m
     assert config.read_bytes() == config_before
 
 
-def test_uncertain_profile_selection_refuses_sync_but_not_recorded_repair(tmp_path, monkeypatch, recovery_graph):
+def test_uncertain_profile_selection_skips_sync_but_not_admission_or_recorded_repair(tmp_path, monkeypatch, recovery_graph, caplog):
     import pm.paths as paths
     from hermes_cli.plugins_admission import AdmissionRefused, admit_plugin_set_change
     from pm.environments import install_state_dir, selected_venv, site_packages
@@ -195,8 +195,6 @@ def test_uncertain_profile_selection_refuses_sync_but_not_recorded_repair(tmp_pa
     sibling_config.write_text("plugins:\n  enabled: [unclosed\n", encoding="utf-8")
     damaged_config = sibling_config.read_bytes()
 
-    with pytest.raises(ValueError, match="config.yaml"):
-        engine.sync_venv(explicit=True)
     with pytest.raises(AdmissionRefused, match="config.yaml"):
         admit_plugin_set_change(set(), set(), active_plugins_dir=home / "plugins")
     assert paths.runtime_facts_path().read_bytes() == before_facts
@@ -215,5 +213,15 @@ def test_uncertain_profile_selection_refuses_sync_but_not_recorded_repair(tmp_pa
     )
     assert result.stdout.strip() == "1.0"
     assert Path(Facts(paths.runtime_facts_path()).get("venv")["resolved_lock"]).read_bytes() == old_lock
+    with pytest.raises(ValueError, match="config.yaml"):
+        engine.sync_venv(explicit=True)
+    assert str(sibling_config) in caplog.text
+    assert selected_venv(core) == repaired
+    result = subprocess.run(
+        [str(repaired / ("Scripts/python.exe" if os.name == "nt" else "bin/python")),
+         "-I", "-c", "import core_dep; print(core_dep.__version__)"],
+        cwd=tmp_path, capture_output=True, text=True, check=True, timeout=30,
+    )
+    assert result.stdout.strip() == "1.0"
     assert active_config.read_bytes() == before_config
     assert sibling_config.read_bytes() == damaged_config

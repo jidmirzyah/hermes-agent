@@ -56,11 +56,14 @@ def _make_up_to_date_side_effect(sha="abc123"):
 
 def _make_head_moved_side_effect(pre_sha="abc123", post_sha="def456"):
     """Simulate git commands where HEAD advances from pre_sha to post_sha."""
-    calls = {"n": 0}
+    advanced = False
 
     def side_effect(cmd, **kwargs):
+        nonlocal advanced
         joined = " ".join(str(c) for c in cmd)
 
+        if "merge --ff-only" in joined:
+            advanced = True
         if "rev-parse" in joined and "--abbrev-ref" in joined:
             return SimpleNamespace(returncode=0, stdout="main\n", stderr="")
 
@@ -68,14 +71,7 @@ def _make_head_moved_side_effect(pre_sha="abc123", post_sha="def456"):
             return SimpleNamespace(returncode=0, stdout="3\n", stderr="")
 
         if joined.endswith("rev-parse HEAD"):
-            # The update flow's own captures: pre-pull (first call) sees
-            # pre_sha, post-pull (second call) sees post_sha. get_version_info
-            # is mocked in _patch_update_deps so the startup banner makes no
-            # rev-parse calls of its own.
-            if calls["n"] < 1:
-                calls["n"] += 1
-                return SimpleNamespace(returncode=0, stdout=f"{pre_sha}\n", stderr="")
-            return SimpleNamespace(returncode=0, stdout=f"{post_sha}\n", stderr="")
+            return SimpleNamespace(returncode=0, stdout=f"{post_sha if advanced else pre_sha}\n", stderr="")
 
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 

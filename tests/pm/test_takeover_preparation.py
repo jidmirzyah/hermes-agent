@@ -30,7 +30,8 @@ def test_fresh_takeover_prepares_generation_and_runs_selected_python(tmp_path):
     _wheel(wheels, "takeover_dep", "1.0")
     (root / "pyproject.toml").write_text(
         '[project]\nname="takeover-fixture"\nversion="1"\nrequires-python=">=3.14"\n'
-        'dependencies=["takeover-dep==1.0"]\n[project.optional-dependencies]\nall=[]\n'
+        'dependencies=["takeover-dep==1.0"]\n[project.optional-dependencies]\nall=[]\nmatrix=[]\n'
+        '[tool.hermes.extras-platforms]\nmatrix="sys_platform == \'no-such-platform\'"\n'
         '[tool.uv]\npackage=false\nno-index=true\n'
         f'find-links=[{json.dumps(wheels.as_posix())}]\n', encoding="utf-8")
     (root / ".git").mkdir()
@@ -41,6 +42,11 @@ def test_fresh_takeover_prepares_generation_and_runs_selected_python(tmp_path):
            if not key.startswith(("HERMES_", "PYTHON", "UV_"))}
     env.update(HOME=str(home), HERMES_HOME=str(home), HERMES_RUNTIME_DIR=str(store), UV_PYTHON_DOWNLOADS="never")
     subprocess.run([uv, "lock", "--offline", "--python", sys.executable], cwd=root, env=env, check=True, capture_output=True)
+    # A main-era venv that carried a gated extra: the takeover interpreter
+    # (-S, so no `packaging`) must still judge the gate and drop it.
+    legacy_site = root / ".venv" / "lib" / "python3.11" / "site-packages"
+    for anchor in ("mautrix", "asyncpg", "aiosqlite", "markdown", "aiohttp_socks"):
+        (legacy_site / anchor).mkdir(parents=True)
     # Only the interpreter and private manager tool are needed by this tiny
     # application. They are real host tools; PM's worker and resolver stay real.
     (root / "pm/lock.json").write_text('{"schema":1,"packages":{}}', encoding="utf-8")
@@ -82,6 +88,8 @@ def test_fresh_takeover_prepares_generation_and_runs_selected_python(tmp_path):
     assert (root / ".hermes/bin/hermes").is_file()
     assert not (root / "venv").exists()
     assert Facts(store / "facts.json").get("dmgbuild") is None
+    venv_fact = json.loads(next((home / "installs").glob("*/facts.json")).read_text())["packages"]["venv"]
+    assert "matrix" not in venv_fact["extras"]
 
     # Repair restores the recorded graph; a checkout update must also advance
     # that graph to the new source inputs before normal bootstrap checks it.

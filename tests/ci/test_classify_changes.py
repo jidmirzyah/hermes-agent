@@ -216,6 +216,10 @@ CASES = {
         ["tests/conftest.py"],
         _lanes(python=True, python_prod=False, scan=True, desktop_updater=True),
     ),
+    "conftest fixture module → python + desktop_updater": (
+        ["tests/_fixtures/platform_gating.py"],
+        _lanes(python=True, python_prod=False, scan=True, desktop_updater=True),
+    ),
     "tests + prod source → both lanes": (
         ["tests/agent/test_foo.py", "agent/x.py"],
         _lanes(python=True, scan=True),

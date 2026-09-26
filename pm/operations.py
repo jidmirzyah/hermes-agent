@@ -28,7 +28,7 @@ def _require_install_allowed(explicit: bool) -> None:
 def build_environment(
     *, source: Path, out: Path, python: Path | None = None,
     cache: Path | None = None, env: Mapping[str, str] | None = None,
-    extras: Sequence[str] = (), groups: Sequence[str] = (), only_groups: bool = False,
+    extras: Sequence[str] = (), groups: Sequence[str] = (),
     all_extras: bool = False, no_install_project: bool = False,
     frozen: bool = True, sealed: bool = False, offline: bool = False,
     explicit: bool = False, timeout: int = 1800,
@@ -60,7 +60,7 @@ def build_environment(
         offline=offline, explicit=explicit, output=sys.stderr,
     )
     with _fresh_build(environment, sealed=sealed):
-        environment.sync(source, extras=extras, groups=groups, only_groups=only_groups, all_extras=all_extras,
+        environment.sync(source, extras=extras, groups=groups, all_extras=all_extras,
                          no_install_project=no_install_project, frozen=frozen, timeout=timeout)
     return environment.executable
 
@@ -132,7 +132,7 @@ def _python(environment: Path) -> Path:
 
 def _selection(root: Path) -> dict:
     try:
-        record = json.loads((root / "active.json").read_text(encoding="utf-8"))
+        record = json.loads((root / "active.json").read_text(encoding="utf-8-sig"))
     except FileNotFoundError:
         return {}
     except (OSError, ValueError) as exc:
@@ -196,7 +196,7 @@ def ensure_environment(
     if executable is not None:
         _tool(Path("unused/python"), executable)  # Validate before any write.
 
-    def build(generation: Path) -> Path:
+    def build(generation: Path, base_python: Path) -> Path:
         (generation / "pyproject.toml").write_text(
             '[project]\nname = "hermes-side-environment"\nversion = "0"\n'
             'requires-python = ">=3.11"\ndependencies = '
@@ -207,8 +207,8 @@ def ensure_environment(
             seed = root / previous["generation"] / "uv.lock"
             if seed.is_file():
                 shutil.copyfile(seed, generation / "uv.lock")
-        return build_environment(source=generation, out=generation / "venv", frozen=False,
-                                 explicit=explicit, timeout=timeout)
+        return build_environment(source=generation, out=generation / "venv", python=base_python,
+                                 frozen=False, explicit=explicit, timeout=timeout)
 
     return _ensure_generation(name, root, {"requirements": requirements}, build,
                               record={"requirements": requirements}, explicit=explicit,
@@ -236,16 +236,17 @@ def ensure_project_environment(
         except FileNotFoundError as exc:
             raise InstallError("venv", f"locked project environment needs {project / manifest}") from exc
 
-    def build(generation: Path) -> Path:
-        return build_environment(source=project, out=generation / "venv", extras=extras, groups=groups,
-                                 no_install_project=True, frozen=True, explicit=explicit, timeout=timeout)
+    def build(generation: Path, base_python: Path) -> Path:
+        return build_environment(source=project, out=generation / "venv", python=base_python,
+                                 extras=extras, groups=groups, no_install_project=True,
+                                 frozen=True, explicit=explicit, timeout=timeout)
 
     return _ensure_generation(name, root, {"manifests": manifests, "extras": extras, "groups": groups},
                               build, record={"extras": extras, "groups": groups}, explicit=explicit)
 
 
 def _ensure_generation(
-    name: str, root: Path, inputs: dict, build: Callable[[Path], Path], *, record: dict, explicit: bool,
+    name: str, root: Path, inputs: dict, build: Callable[[Path, Path], Path], *, record: dict, explicit: bool,
     executable: str | None = None,
 ) -> Path:
     """Select the generation whose inputs match, building one only when none does.
@@ -253,7 +254,8 @@ def _ensure_generation(
     Build at the final path: Windows launchers and scripts embed that path.
     The prior generation survives both successful replacement and failed builds.
     """
-    from hermes_cli.runtime_state import _lock
+    from pm.filesystem import lock_fd
+    from pm._uv import _toolchain
     from pm.install import _refuse_lazy, lazy_installs_allowed
     from pm.lock import Lockfile, _write
     from pm import paths
@@ -263,34 +265,54 @@ def _ensure_generation(
     target = current_target()
     inputs = {**inputs, "python": lock.version("python"), "target": target,
               "artifacts": [item["sha256"] for item in lock.artifacts("python", target)]}
-    identity = hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
 
-    def current() -> Path | None:
+    def selected_python() -> Path | None:
+        tools = _toolchain(realize=False)
+        return tools[1].resolve() if tools is not None else None
+
+    def identity(base_python: Path) -> str:
+        # The same pinned artifact can live in different stores. A venv's
+        # pyvenv.cfg keeps the original interpreter path, not just its version.
+        return hashlib.sha256(json.dumps({**inputs, "interpreter": str(base_python)},
+                                         sort_keys=True).encode()).hexdigest()
+
+    def current(base_python: Path | None) -> Path | None:
+        if base_python is None:
+            return None
         selected = _selection(root)
         python = environment_python(name, root=root)
-        if (selected.get("inputs") == identity and python is not None
+        if (selected.get("inputs") == identity(base_python) and python is not None
                 and (executable is None or _tool(python, executable) is not None)):
             return python
         return None
 
-    existing = current()
+    existing = current(selected_python())
     if existing is not None:
         return existing
     if not explicit and not lazy_installs_allowed():
         raise _refuse_lazy(name, "isolated Python environment is missing or outdated")
     root.mkdir(parents=True, exist_ok=True)
     with (root / ".install.lock").open("a+b") as mutex:
-        _lock(mutex.fileno(), wait=True)
-        existing = current()
+        lock_fd(mutex.fileno(), wait=True)
+        base_python = selected_python()
+        existing = current(base_python)
         if existing is not None:
             return existing
+        if base_python is None:
+            tools = _toolchain(explicit=explicit)
+            if tools is None:
+                raise InstallError(name, "PM's pinned toolchain is unavailable")
+            base_python = tools[1].resolve()
         generation = root / f"gen-{uuid.uuid4().hex}"
         generation.mkdir()
         try:
-            python = build(generation)
+            python = build(generation, base_python)
             if executable is not None and _tool(python, executable) is None:
                 raise InstallError(name, f"installed requirements do not provide {executable!r}")
-            _write(root / "active.json", {"generation": generation.name, "inputs": identity, **record})
+            from pm.environments import flush_before_selecting
+            flush_before_selecting()
+            _write(root / "active.json", {"generation": generation.name,
+                                           "inputs": identity(base_python), **record})
         except BaseException:
             shutil.rmtree(generation, ignore_errors=True)
             raise

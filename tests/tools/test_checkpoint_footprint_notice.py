@@ -11,7 +11,8 @@ import os
 import hermes_yaml as yaml
 
 from hermes_constants import get_hermes_home
-from tools.checkpoint_manager import CheckpointManager, checkpoint_footprint_notice
+from tools.checkpoint_manager import CheckpointManager
+from tools.checkpoint_maintenance import checkpoint_footprint_notice
 
 def _write_config(enabled: bool, cap_mb: int) -> None:
     home = get_hermes_home()

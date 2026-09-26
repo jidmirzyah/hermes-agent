@@ -65,6 +65,24 @@ describe('VersionDetails', () => {
       visible: ['Desktop app (installer)'],
       absent: ['Desktop app (MSIX)', 'Microsoft Store']
     },
+    // `hermes desktop` packs the same bootstrap payload from a source checkout;
+    // a locally built stamp names the source install, never the installer.
+    {
+      version: {
+        distribution: 'desktop-app',
+        updateMechanism: 'self',
+        payload: 'bootstrap',
+        source: 'local',
+        installedByScript: true
+      },
+      visible: ['Source (install script) + hermes desktop'],
+      absent: ['Desktop app (installer)']
+    },
+    {
+      version: { distribution: 'desktop-app', updateMechanism: 'self', payload: 'bootstrap', source: 'local' },
+      visible: ['Source + hermes desktop'],
+      absent: ['Desktop app (installer)']
+    },
     // install.sh / install.ps1 checkout (receipt present) vs a manual git
     // clone (live provenance, no receipt): both honestly say Source.
     { version: { installedByScript: true }, visible: ['Source (install script)'] },

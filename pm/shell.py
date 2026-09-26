@@ -8,7 +8,8 @@ of hunting fixed locations.
 Resolution order:
   1. Windows: the git Package's staged bash (via facts.json) — the store
      structurally guarantees it in a bundle; no hunt.
-  2. Windows: conventional Git for Windows under Program Files, then PATH —
+  2. Windows: explicit override, Program Files, per-user and PortableGit,
+     then PATH —
      minus C:\Windows\System32\bash.exe (the WSL launcher stub, first on PATH
      on most machines; #116818) and WindowsApps\bash.exe (an MSIX alias that
      only spawns inside its package). See windows_bash_candidates().
@@ -25,6 +26,7 @@ from __future__ import annotations
 import ntpath
 import os
 import shutil
+import subprocess
 from collections.abc import Mapping
 
 from pm import paths
@@ -65,33 +67,52 @@ _WINDOWS_BASH_STUB_DIRS = ("system32", "windowsapps")
 
 def windows_bash_candidates(on_path: str | None, env: Mapping[str, str]) -> list[str]:
     """Ordered bash.exe candidates for a Windows host, as pure data: the
-    conventional Git for Windows dirs first, then ``on_path`` (the
-    ``shutil.which("bash")`` result) unless it is a stub. Program Files beats
-    PATH because System32 precedes Git on most PATHs (#116818)."""
+    explicit override and Git for Windows roots first, then ``on_path``
+    (the ``shutil.which("bash")`` result) unless it is a stub. System32
+    precedes Git on most PATHs (#116818)."""
     programfiles = env.get("ProgramFiles", r"C:\Program Files")
-    candidates = [
-        ntpath.join(programfiles, "Git", "bin", "bash.exe"),
-        ntpath.join(programfiles, "Git", "usr", "bin", "bash.exe"),
-    ]
+    candidates = []
+    if env.get("HERMES_GIT_BASH_PATH"):
+        candidates.append(env["HERMES_GIT_BASH_PATH"])
+    roots = [ntpath.join(programfiles, "Git")]
+    if env.get("ProgramFiles(x86)"):
+        roots.append(ntpath.join(env["ProgramFiles(x86)"], "Git"))
+    if env.get("LOCALAPPDATA"):
+        roots.extend((ntpath.join(env["LOCALAPPDATA"], "hermes", "git"),
+                      ntpath.join(env["LOCALAPPDATA"], "Programs", "Git")))
+    for root in roots:
+        candidates.extend((ntpath.join(root, "bin", "bash.exe"),
+                           ntpath.join(root, "usr", "bin", "bash.exe")))
     if on_path:
         norm = ntpath.normpath(on_path).lower()
         if not any(stub in norm for stub in _WINDOWS_BASH_STUB_DIRS):
             candidates.append(on_path)
-    return candidates
+    return list(dict.fromkeys(candidates))
+
+
+def _bash_starts(candidate: str) -> bool:
+    """An existing bash.exe can still be broken or be a launcher stub."""
+    try:
+        return subprocess.run(
+            [candidate, "-c", "exit 0"], stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=5, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            check=False,
+        ).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
 
 
 def bash() -> str | None:
     """Resolve the bash binary to use, or None if none is available."""
     staged = _staged_bash()
-    if staged:
+    if staged and _bash_starts(staged):
         return staged
 
     on_path = shutil.which("bash")
     if os.name == "nt":
-        return next(
-            (c for c in windows_bash_candidates(on_path, os.environ) if os.path.isfile(c)),
-            None,
-        )
+        return next((c for c in windows_bash_candidates(on_path, os.environ)
+                     if os.path.isfile(c) and _bash_starts(c)), None)
     if on_path:
         return on_path
 

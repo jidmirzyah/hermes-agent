@@ -15,11 +15,18 @@ if os.name == 'posix':
 
 ROOT = Path(__file__).resolve().parents[2]
 
-def _with_controlling_terminal(slave: int):
-    """preexec_fn: make ``slave`` this child's controlling terminal, so /dev/tty opens."""
+def _with_controlling_terminal(tty_path: str):
+    """preexec_fn: make this PTY the child's controlling terminal, so /dev/tty opens."""
     def attach() -> None:
         os.setsid()  # windows-footgun: ok (posix-only test)
-        fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
+        fd = os.open(tty_path, os.O_RDWR)
+        try:
+            # Opening a PTY slave does not always acquire it on Darwin.
+            fcntl.ioctl(fd, termios.TIOCSCTTY, 0)
+            probe = os.open('/dev/tty', os.O_RDONLY)
+            os.close(probe)
+        finally:
+            os.close(fd)
     return attach
 
 
@@ -38,15 +45,19 @@ def test_installer_post_pm_stages(tmp_path: Path, stage: str, expected: list[str
     assert not calls.exists()
     master, slave = pty.openpty()
     try:
+        tty_path = os.ttyname(slave)
+    finally:
+        os.close(slave)
+    try:
         for code in [0, 9]:
             result = subprocess.run(command, cwd=tmp_path, env={**env, 'STAGE_EXIT': str(code)}, capture_output=True,
-                                    text=True, encoding='utf-8', timeout=20, stdin=subprocess.DEVNULL, preexec_fn=_with_controlling_terminal(slave),
-                                    pass_fds=(slave,))
+                                    text=True, encoding='utf-8', timeout=20, stdin=subprocess.DEVNULL,
+                                    preexec_fn=_with_controlling_terminal(tty_path))
+            assert calls.exists(), (result.returncode, result.stdout, result.stderr)
             assert (result.returncode == 0) == (code == 0), result.stdout + result.stderr
             assert json.loads(calls.read_text()) == expected
     finally:
         os.close(master)
-        os.close(slave)
     assert not (install / 'venv').exists()
 
 

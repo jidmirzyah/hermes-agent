@@ -16,6 +16,8 @@ import shutil
 import subprocess
 import tempfile
 
+from pm.progress import run_contained
+
 _PROVIDER = Path("scripts/build/windows-deps.ps1")
 
 
@@ -27,11 +29,14 @@ def prepare_windows_environment(*, source: Path, state: Path, env: Mapping[str, 
     state.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="environment-", dir=state) as scratch:
         output = Path(scratch) / "environment.json"
-        subprocess.run(
+        # A cold vcpkg clone and OpenSSL build print thousands of lines; the
+        # user needs the step and its failure, not the patch log.
+        run_contained(
             [shell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File",
              str(source / _PROVIDER), "-StateRoot", str(state),
              "-EnvironmentFile", str(output)],
-            cwd=source, env=dict(env), check=True, stdin=subprocess.DEVNULL,
+            "Preparing Windows ARM64 build tools", indent="  ",
+            cwd=source, env=dict(env), stdin=subprocess.DEVNULL,
         )
         prepared = json.loads(output.read_text(encoding="utf-8-sig"))
     if not isinstance(prepared, dict) or any(not isinstance(k, str) or not isinstance(v, str) for k, v in prepared.items()):

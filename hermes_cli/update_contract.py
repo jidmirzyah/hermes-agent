@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
+from hermes_cli.steward import STEWARD_APT_TERMUX, STEWARD_DESKTOP, STEWARD_DOCKER, STEWARD_NIX
+
 logger = logging.getLogger(__name__)
 
 COMMIT_BUILD_UPDATE_MESSAGE = (
@@ -23,7 +25,6 @@ def is_commit_build(project_root: Path) -> bool:
     from hermes_cli.steward import read_install_stamp
 
     return read_install_stamp(project_root).get("source") == "commit-build"
-
 
 
 @dataclass(frozen=True)
@@ -45,6 +46,37 @@ def _refusal(code: str, method: str, message: Optional[Callable[[str], str]] = N
     else:
         text = format_docker_update_message() if method == "docker" else command
     return UpdateRefusal(code=code, message=text, update_command=command)
+
+
+# Sealed-tree steward -> install method whose CLI command remediates it. The
+# refusal code is the steward name itself. APT owns the Termux code tree:
+# ``pkg upgrade`` replaces it wholesale, so it must never update in place.
+_STEWARD_UPDATE_METHODS: dict[str, str] = {
+    STEWARD_DOCKER: "docker",
+    STEWARD_NIX: "nix",
+    STEWARD_APT_TERMUX: "apt",
+}
+
+
+def _steward_refusal(steward: str) -> UpdateRefusal:
+    """Refusal for a tree sealed by ``steward``."""
+    from hermes_cli.steward import steward_update_message
+
+    method = _STEWARD_UPDATE_METHODS.get(steward)
+    if method == "docker":
+        return _refusal(steward, method)
+    if method is not None:
+        return _refusal(steward, method, lambda _command: steward_update_message(steward))
+    # desktop-app and future package managers have no CLI remediation: the
+    # steward's own instructions are the remediation, and
+    # recommended_update_command_for_method would falsely answer "hermes
+    # update" for methods it doesn't know.
+    command = (
+        "Manage updates from within the desktop app"
+        if steward == STEWARD_DESKTOP
+        else f"update via {steward}"
+    )
+    return UpdateRefusal(code=steward, message=steward_update_message(steward), update_command=command)
 
 
 def evaluate_update_admission(project_root: Path) -> Optional[UpdateRefusal]:
@@ -81,14 +113,7 @@ def evaluate_update_admission(project_root: Path) -> Optional[UpdateRefusal]:
     # rung that covers ``desktop-app``, which the heuristics below never
     # detect (the payload has no .install_method stamp and no .git).
     try:
-        from hermes_cli.steward import (
-            STEWARD_APT_TERMUX,
-            STEWARD_DESKTOP,
-            STEWARD_DOCKER,
-            STEWARD_NIX,
-            sealed_steward,
-            steward_update_message,
-        )
+        from hermes_cli.steward import sealed_steward
 
         steward = sealed_steward(project_root)
         if steward is None:
@@ -102,45 +127,8 @@ def evaluate_update_admission(project_root: Path) -> Optional[UpdateRefusal]:
                     message=SOURCE_ON_TERMUX_UPDATE_MESSAGE,
                     update_command=SOURCE_ON_TERMUX_UPDATE_COMMAND,
                 )
-        if steward is not None and steward != "unknown":
-            from hermes_cli.config import recommended_update_command_for_method
-
-            if steward == STEWARD_DOCKER:
-                from hermes_cli.config import format_docker_update_message
-
-                return UpdateRefusal(
-                    code="docker",
-                    message=format_docker_update_message(),
-                    update_command=recommended_update_command_for_method("docker"),
-                )
-            if steward == STEWARD_NIX:
-                return UpdateRefusal(
-                    code="nix",
-                    message=steward_update_message(steward),
-                    update_command=recommended_update_command_for_method("nix"),
-                )
-            if steward == STEWARD_APT_TERMUX:
-                # The APT repo owns the code tree; `hermes update` must
-                # never run in place — `pkg upgrade` replaces it wholesale.
-                return UpdateRefusal(
-                    code=steward,
-                    message=steward_update_message(steward),
-                    update_command=recommended_update_command_for_method("apt"),
-                )
-            # desktop-app and future package managers: there is no CLI
-            # remediation command — the steward's own instructions ARE the
-            # remediation (recommended_update_command_for_method would
-            # falsely answer "hermes update" for methods it doesn't know).
-            command = (
-                "Manage updates from within the desktop app"
-                if steward == STEWARD_DESKTOP
-                else f"update via {steward}"
-            )
-            return UpdateRefusal(
-                code=steward,
-                message=steward_update_message(steward),
-                update_command=command,
-            )
+        elif steward != "unknown":
+            return _steward_refusal(steward)
     except Exception as exc:
         logger.debug("Steward admission check failed: %s", exc)
 

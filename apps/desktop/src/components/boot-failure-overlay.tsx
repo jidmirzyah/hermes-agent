@@ -7,8 +7,9 @@ import { DialogPortalContainerContext } from '@/components/ui/dialog-portal-cont
 import { ErrorIcon } from '@/components/ui/error-state'
 import { Loader } from '@/components/ui/loader'
 import { LogView } from '@/components/ui/log-view'
-import type { DesktopConnectionConfig } from '@/global'
+import type { DesktopConnectionConfig, DesktopOauthLoginResult } from '@/global'
 import { useI18n } from '@/i18n'
+import { reestablishCloudAgentSession } from '@/lib/cloud-agent-session'
 import { DESKTOP_DOCS_URL } from '@/lib/docs'
 import { openExternalLink } from '@/lib/external-link'
 import { ChevronLeft, ExternalLink, FileText, Loader2, LogIn, RefreshCw, SlidersHorizontal, Wrench } from '@/lib/icons'
@@ -245,6 +246,8 @@ export function BootFailureOverlay() {
   // connection's owning login flow. Hermes Cloud must reuse its portal session
   // and per-agent cascade; generic remote gateways use native/embedded OAuth.
   // Reload after success so boot mints a fresh ticket against the new session.
+  // The cloud ladder is shared with Settings (reestablishCloudAgentSession) so
+  // the boot recovery and the in-Settings recovery cannot drift apart.
   const signInRemote = async () => {
     if (!remoteReauth) {
       return
@@ -255,37 +258,37 @@ export function BootFailureOverlay() {
     try {
       const desktop = window.hermesDesktop
 
-      await desktop?.oauthLogoutConnectionConfig?.(remoteReauth.url)
-
-      // `error` matters here: the oauth arm (oauthLoginConnectionConfig) and
-      // the cloud cascade can both fail with a reason, and the incomplete
-      // sign-in notice below surfaces it. (DesktopCloudAgentSignInResult has
-      // no error field; oauthLoginConnectionConfig does.)
-      let result: { connected?: boolean; error?: string } | undefined
+      let connected: boolean
+      // Only the oauth arm reports a reason (DesktopOauthLoginResult.error);
+      // the incomplete sign-in notice below surfaces it. The cloud ladder
+      // reports an outcome, handled in its own branch.
+      let error: string | undefined
 
       if (connectionConfig?.mode === 'cloud' && desktop?.cloud) {
-        const status = await desktop.cloud.status()
+        // The ladder drops this gateway's lapsed cookies itself — logging out
+        // here as well would fire the IPC twice for the cloud path.
+        const outcome = await reestablishCloudAgentSession(desktop, remoteReauth.url)
 
-        if (!status.signedIn) {
-          const login = await desktop.cloud.login()
+        if (outcome === 'portal-incomplete') {
+          notify({
+            kind: 'warning',
+            title: t.boot.failure.signInIncompleteTitle,
+            message: t.boot.failure.signInIncompleteMessage
+          })
 
-          if (!login.signedIn) {
-            notify({
-              kind: 'warning',
-              title: t.boot.failure.signInIncompleteTitle,
-              message: t.boot.failure.signInIncompleteMessage
-            })
-
-            return
-          }
+          return
         }
 
-        result = await desktop.cloud.agentSignIn(remoteReauth.url)
+        connected = true
       } else {
-        result = await desktop?.oauthLoginConnectionConfig(remoteReauth.url)
+        await desktop?.oauthLogoutConnectionConfig?.(remoteReauth.url)
+
+        const result: DesktopOauthLoginResult | undefined = await desktop?.oauthLoginConnectionConfig(remoteReauth.url)
+        connected = result?.connected === true
+        error = result?.error
       }
 
-      if (result?.connected) {
+      if (connected) {
         if (connectionConfig?.mode === 'cloud') {
           await desktop?.resetBootstrap().catch(() => undefined)
         }
@@ -299,8 +302,8 @@ export function BootFailureOverlay() {
       notify({
         kind: 'warning',
         title: t.boot.failure.signInIncompleteTitle,
-        message: result?.error
-          ? `${t.boot.failure.signInIncompleteMessage}: ${result.error}`
+        message: error
+          ? `${t.boot.failure.signInIncompleteMessage}: ${error}`
           : t.boot.failure.signInIncompleteMessage
       })
     } catch (err) {

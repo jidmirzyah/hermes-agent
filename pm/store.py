@@ -12,6 +12,7 @@ import tempfile
 import time
 from contextlib import contextmanager
 from pathlib import Path
+from typing import IO
 
 from pm.filesystem import is_junction
 
@@ -29,41 +30,50 @@ ALL_TARGETS = (
 
 
 def _native_machine() -> str:
-    """The MACHINE's architecture, not the interpreter's. An x64 python on
-    Windows-on-ARM reports AMD64 — staging a payload for the wrong target.
-    IsWow64Process2 reports the real machine regardless of emulation."""
-    if sys.platform.startswith("win"):
+    """Native host arch; PM also runs alone before the app is importable."""
+    try:
+        from hermes_platform.host.facts import native_arch
+    except ModuleNotFoundError as exc:
+        if exc.name != "hermes_platform":
+            raise
+    else:
+        return native_arch()
+
+    # Bootstrap's independent PM runtime contains only pm/, not the app.
+    # Consult the OS for translated processes rather than trusting Python's
+    # process architecture (Rosetta and WOW64 both report the wrong target).
+    if sys.platform == "darwin" and platform.machine().lower() in ("x86_64", "amd64"):
+        try:
+            import ctypes
+
+            value = ctypes.c_int()
+            size = ctypes.c_size_t(ctypes.sizeof(value))
+            if ctypes.CDLL(None).sysctlbyname(b"sysctl.proc_translated", ctypes.byref(value),
+                                              ctypes.byref(size), None, 0) == 0 and value.value == 1:
+                return "arm64"
+        except (AttributeError, OSError):
+            pass
+    if sys.platform == "win32":
         try:
             import ctypes
             from ctypes import wintypes
 
-            k32 = ctypes.WinDLL("kernel32", use_last_error=True)
-            k32.GetCurrentProcess.restype = wintypes.HANDLE
-            k32.IsWow64Process2.argtypes = [
-                wintypes.HANDLE,
-                ctypes.POINTER(ctypes.c_ushort),
-                ctypes.POINTER(ctypes.c_ushort),
-            ]
-            k32.IsWow64Process2.restype = wintypes.BOOL
-            process_machine = ctypes.c_ushort()
-            native_machine = ctypes.c_ushort()
-            if k32.IsWow64Process2(
-                k32.GetCurrentProcess(),
-                ctypes.byref(process_machine),
-                ctypes.byref(native_machine),
-            ):
-                if native_machine.value == 0xAA64:
+            kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel.GetCurrentProcess.restype = wintypes.HANDLE
+            kernel.IsWow64Process2.argtypes = [wintypes.HANDLE, ctypes.POINTER(ctypes.c_ushort),
+                                                ctypes.POINTER(ctypes.c_ushort)]
+            kernel.IsWow64Process2.restype = wintypes.BOOL
+            process, native = ctypes.c_ushort(), ctypes.c_ushort()
+            if kernel.IsWow64Process2(kernel.GetCurrentProcess(), ctypes.byref(process), ctypes.byref(native)):
+                if native.value == 0xAA64:
                     return "arm64"
-                if native_machine.value == 0x8664:
+                if native.value == 0x8664:
                     return "x86_64"
-        except Exception:
+        except (AttributeError, OSError):
             pass
-        # Pre-IsWow64Process2 hosts: WOW64 exposes the real machine here.
-        wow = os.environ.get("PROCESSOR_ARCHITEW6432", "")
-        if wow.upper() == "ARM64":
-            return "arm64"
-        if wow.upper() == "AMD64":
-            return "x86_64"
+        wow = os.environ.get("PROCESSOR_ARCHITEW6432", "").lower()
+        if wow in ("arm64", "amd64"):
+            return wow
     return platform.machine().lower()
 
 
@@ -148,17 +158,37 @@ def _tar_filter(member, dest: str):
         return member.replace(deep=False, uid=None, gid=None, uname=None, gname=None, mode=None)
     return tarfile.data_filter(member, dest)
 
+def extract_tar(archive: Path | IO[bytes], dest: Path, *, git_msys: bool = False) -> None:
+    """Extract a tarball (a path, or an open stream such as a .deb's data.tar)
+    with the one containment policy every PM tar consumer shares. Unsafe
+    members raise tarfile.FilterError.
 
-def extract(archive: Path, dest: Path) -> None:
+    MSYS Git ships dev/fd links and etc/mtab into /proc; those aren't usable
+    on Windows. Skip only those known links, never a filter error or failed file write.
+    """
     import tarfile
 
+    dest.mkdir(parents=True, exist_ok=True)
+    real_dest = os.path.realpath(dest)
+    opened = tarfile.open(archive) if isinstance(archive, (str, os.PathLike)) else tarfile.open(fileobj=archive)
+    with opened as tf:
+        if git_msys:
+            members = (m for m in tf if not (m.issym() and (
+                (m.name.lstrip("./").startswith("dev/") and m.linkname.startswith("/proc/"))
+                or (m.name == "etc/mtab" and m.linkname == "/proc/mounts")
+            )))
+            for member in members:
+                tf.extract(member, dest, filter=lambda item, path: _tar_filter(item, real_dest))
+        else:
+            tf.extractall(dest, filter=lambda member, path: _tar_filter(member, real_dest))
+
+
+def extract(archive: Path, dest: Path) -> None:
     shutil.rmtree(dest, ignore_errors=True)
     dest.mkdir(parents=True, exist_ok=True)
     name = archive.name.lower()
     if name.endswith((".tar.gz", ".tgz", ".tar.xz", ".txz", ".tar.bz2")):
-        real_dest = os.path.realpath(dest)
-        with tarfile.open(archive) as tf:
-            tf.extractall(dest, filter=lambda member, path: _tar_filter(member, real_dest))
+        extract_tar(archive, dest)
     elif name.endswith(".zip"):
         _extract_zip(archive, dest)
     else:
@@ -363,16 +393,16 @@ class Store:
     @contextmanager
     def install_lock(self):
         """Serialize writers using the same advisory lock as runtime publication."""
-        from hermes_cli.runtime_state import _lock
+        from pm.filesystem import lock_fd
         self.root.mkdir(parents=True, exist_ok=True)
         lock = self.root / ".install.lock"
         fd = os.open(lock, os.O_CREAT | os.O_RDWR, 0o600)
         try:
             # A second `hermes pm install` behind an sdist build otherwise sits
             # silent for minutes; say what it is waiting on.
-            if not _lock(fd, wait=True, timeout=2):
+            if not lock_fd(fd, wait=True, timeout=2):
                 print(f"waiting for {lock} (another PM operation holds it)", file=sys.stderr, flush=True)
-                _lock(fd, wait=True)
+                lock_fd(fd, wait=True)
             yield
         finally:
             os.close(fd)

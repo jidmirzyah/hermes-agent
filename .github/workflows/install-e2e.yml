@@ -35,7 +35,8 @@ name: Install & Update E2E
 # Triggers:
 #   * every 12 hours, so upstream drift (a new uv, a Node bump, a PyPI change)
 #     surfaces on a schedule rather than in someone's review cycle;
-#   * manually, where you can pick the route and how many releases to sample.
+#   * manually, where you can pick the route (a preset or specific legs) and how many
+#     releases to sample.
 #
 # Deliberately NOT on pull_request: a leg takes ~11 minutes of real toolchain
 # installation, and the matrix multiplies that. Updating is release-shaped work,
@@ -45,11 +46,10 @@ on:
   workflow_dispatch:
     inputs:
       route:
-        description: 'Which combinations to run. all = every OS; both/update/installer = the linux legs; windows-desktop = the windows legs; macos-desktop = the macos legs.'
+        description: 'Which legs to run: all = every OS; both/update/installer = the linux legs; windows-desktop / macos-desktop = that OS; bundled / windows-bundled / macos-bundled = the signed-bundle legs. Anything else selects legs by name (a leg or job name, or a fragment of one).'
         required: false
-        type: choice
+        type: string
         default: all
-        options: [all, both, update, installer, windows-desktop, macos-desktop, bundled, windows-bundled, macos-bundled]
       windows-bundle-manifest:
         description: 'HTTPS manifest pinning signed Windows OLD/NEW msixbundles; NEW must match this ref.'
         type: string
@@ -84,7 +84,7 @@ on:
         type: boolean
         default: false
       route:
-        description: 'Which combinations to run. all = every OS; both/update/installer = the linux legs; windows-desktop = the windows legs; macos-desktop = the macos legs.'
+        description: 'Which legs to run: all = every OS; both/update/installer = the linux legs; windows-desktop / macos-desktop = that OS; bundled / windows-bundled / macos-bundled = the signed-bundle legs. Anything else selects legs by name (a leg or job name, or a fragment of one).'
         required: false
         type: string
         default: all
@@ -200,19 +200,27 @@ jobs:
       linux: ${{ steps.gen.outputs.linux }}
       windows: ${{ steps.gen.outputs.windows }}
       macos: ${{ steps.gen.outputs.macos }}
+      linux-legs: ${{ steps.gen.outputs.linux-legs }}
+      windows-legs: ${{ steps.gen.outputs.windows-legs }}
+      macos-legs: ${{ steps.gen.outputs.macos-legs }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           sparse-checkout: scripts/sandbox/generate-e2e-matrix.mjs
           sparse-checkout-cone-mode: false
       - id: gen
+        env:
+          # Free text on dispatch, so it reaches the script as data, never as script.
+          # Scheduled runs have no inputs: the default route.
+          ROUTE: ${{ inputs.route || 'all' }}
         run: |
           set -euo pipefail
           matrices="$(node scripts/sandbox/generate-e2e-matrix.mjs \
-            --tags '${{ needs.pick-releases.outputs.tags }}')"
+            --tags '${{ needs.pick-releases.outputs.tags }}' --route "$ROUTE")"
           echo "$matrices"
           for key in linux windows macos; do
             echo "$key=$(echo "$matrices" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>console.log(JSON.stringify(JSON.parse(d)[process.argv[1]])))' "$key")" >> "$GITHUB_OUTPUT"
+            echo "$key-legs=$(echo "$matrices" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>console.log(JSON.parse(d)[process.argv[1]].include.length))' "$key")" >> "$GITHUB_OUTPUT"
           done
           # The plan, human-readable: a combination x starting-tag chart on
           # the run's summary page.
@@ -274,10 +282,9 @@ jobs:
 
   linux:
     name: ${{ matrix.name }}
-    # The update/installer route choices map to the linux update methods;
-    # either way the whole linux matrix runs (legs are cheap and the
-    # distinction wasn't worth a filter layer in the generator).
-    if: github.event_name != 'workflow_dispatch' || contains(fromJSON('["all", "both", "update", "installer"]'), inputs.route)
+    # The generator applies the route; an OS it selected no legs for is skipped
+    # (GitHub rejects an empty matrix).
+    if: needs.generate-matrix.outputs.linux-legs != '0'
     needs: generate-matrix
     strategy:
       # One leg breaking is worth knowing about even if another already
@@ -289,12 +296,13 @@ jobs:
       install-method: ${{ matrix.install_method }}
       update-method: ${{ matrix.update_method }}
       install-ref: ${{ matrix.install_ref }}
+      update-ref: ${{ matrix.update_ref }}
       tag-has-desktop: ${{ matrix.tag_has_desktop }}
       leg-id: ${{ matrix.leg_id }}
 
   windows:
     name: ${{ matrix.name }}
-    if: github.event_name != 'workflow_dispatch' || contains(fromJSON('["all", "windows-desktop"]'), inputs.route)
+    if: needs.generate-matrix.outputs.windows-legs != '0'
     needs: generate-matrix
     strategy:
       fail-fast: false
@@ -304,12 +312,13 @@ jobs:
       install-method: ${{ matrix.install_method }}
       update-method: ${{ matrix.update_method }}
       install-ref: ${{ matrix.install_ref }}
+      update-ref: ${{ matrix.update_ref }}
       tag-has-desktop: ${{ matrix.tag_has_desktop }}
       leg-id: ${{ matrix.leg_id }}
 
   macos:
     name: ${{ matrix.name }}
-    if: github.event_name != 'workflow_dispatch' || contains(fromJSON('["all", "macos-desktop"]'), inputs.route)
+    if: needs.generate-matrix.outputs.macos-legs != '0'
     needs: generate-matrix
     strategy:
       fail-fast: false
@@ -321,6 +330,7 @@ jobs:
       install-method: ${{ matrix.install_method }}
       update-method: ${{ matrix.update_method }}
       install-ref: ${{ matrix.install_ref }}
+      update-ref: ${{ matrix.update_ref }}
       tag-has-desktop: ${{ matrix.tag_has_desktop }}
       leg-id: ${{ matrix.leg_id }}
 

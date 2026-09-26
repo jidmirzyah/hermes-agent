@@ -74,7 +74,7 @@ Hermes 先下载本地描述文件，再停止自己的后端、退出并等待�
 
 PM 通过 `pm/lock.json` 管理工具版本，不使用旧的 winget/分层 pip 回退。
 启动器运行工具存储中的 Python，并在导入依赖前选择完整环境。
-`hermes_cli/dep_ensure.py` 将功能需求交给 PM，不再调用 `install.ps1 -Ensure`。
+可选依赖由 PM 管理，不再调用 `install.ps1 -Ensure`。
 
 :::tip 在 Windows 上跳过繁琐的提供商配置
 在 Windows 上，逐个配置工具 API key（Firecrawl、FAL、Browser Use、OpenAI TTS）是获得可用 agent 摩擦最大的部分。[Nous Portal](./features/tool-gateway.md) 订阅通过一次 OAuth 登录即可覆盖模型**以及**所有这些工具。安装程序完成后，运行 `hermes setup --portal` 完成配置。

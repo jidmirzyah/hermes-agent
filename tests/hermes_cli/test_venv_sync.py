@@ -38,7 +38,7 @@ def test_bare_import_and_passive_paths(tmp_path):
         (root / 'install-stamp.json').write_text('{{"updateMechanism":"external"}}')
         assert venv_sync.sync(root) == {{'state': 'sealed', 'ok': True}}
         assert venv_sync.prepare_launch(root, []) is None
-        assert 'pm' not in sys.modules
+        assert 'pm.install' not in sys.modules
     """)
     assert result.returncode == 0, result.stderr
 

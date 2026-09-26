@@ -9,14 +9,6 @@ import sys
 import threading
 
 
-def _members(value):
-    if value is None:
-        return None
-    if "sources" in value:
-        return {Path(identity): Path(source) for identity, source in value["sources"]}
-    return [Path(path) for path in value["paths"]]
-
-
 def _read_controls(messages, pause, fd):
     # Raw reads avoid a daemon thread holding sys.stdin's buffered lock at exit.
     pending = b""
@@ -70,7 +62,7 @@ def main():
         return message
 
     request = receive()
-    from pm import paths, receipt
+    from pm import paths, plugin_inputs, receipt
     from pm.package import InstallError
     from pm.registry import load_package_definitions
     from pm.runtime import lease_current_runtime
@@ -108,7 +100,7 @@ def main():
             implementation = OPERATIONS[operation].resolve(operation)
             arguments = request["arguments"]
             if request["operation"] in ("sync_venv", "venv_is_current"):
-                arguments["plugin_dirs"] = _members(arguments.get("plugin_dirs"))
+                arguments["plugins"] = plugin_inputs.decode(arguments.get("plugins"))
             if request["operation"] == "ensure":
                 arguments["pause_event"] = pause
             for name in ("progress", "download_progress"):

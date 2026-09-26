@@ -53,6 +53,26 @@ def project(tmp_path, monkeypatch):
     return repo, caller, lock
 
 
+def _shared_prefix(root: Path, *, limit: int = 50_000) -> str:
+    """Why ``root`` cannot be digested as a standalone Python package entry, or ''.
+
+    The fixture records the host interpreter's prefix as PM's Python entry,
+    which means reading every file under it. A distro prefix (/usr, /usr/local,
+    Homebrew) holds unrelated, sometimes unreadable, trees; a standalone or
+    self-contained build holds one interpreter.
+    """
+    count = 0
+    for directory, _, filenames in os.walk(root):
+        for name in filenames:
+            path = Path(directory) / name
+            count += 1
+            if count > limit:
+                return f'more than {limit} files'
+            if not path.is_symlink() and not os.access(path, os.R_OK):
+                return f'{path} is unreadable'
+    return ''
+
+
 @pytest.mark.platforms('windows', 'posix')
 def test_uv_refresh_uses_real_installed_tool_and_only_the_owned_project(tmp_path, monkeypatch, capsys):
     repo, caller, lock = project(tmp_path, monkeypatch)
@@ -63,6 +83,9 @@ def test_uv_refresh_uses_real_installed_tool_and_only_the_owned_project(tmp_path
     shutil.copy2(uv, managed)
     python = Path(sys._base_executable).resolve()
     python_root = python.parent if os.name == 'nt' else python.parents[1]
+    shared = _shared_prefix(python_root)
+    if shared:
+        pytest.skip(f"host Python prefix {python_root} is not self-contained: {shared}")
     target = current_target()
     facts = Facts(runtime / 'facts.json')
     for name, package, entry in [('uv', Uv(), managed.parent), ('python', Python(), python_root)]:

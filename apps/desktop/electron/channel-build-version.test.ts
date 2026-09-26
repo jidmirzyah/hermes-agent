@@ -306,6 +306,7 @@ else:
   }
 })
 
+// Four real manifest/recording pairs cross Node and Python process boundaries.
 test('actual MSIX manifest writer consumes the channel quad across rollover instead of semver patch', (): void => {
   const root: string = fs.mkdtempSync(path.join(os.tmpdir(), 'channel-manifest-'))
   const app: string = path.join(root, 'apps/desktop')
@@ -335,15 +336,22 @@ test('actual MSIX manifest writer consumes the channel quad across rollover inst
       'scripts/release-content-types.json',
       'scripts/build/python.mjs',
       'scripts/bundles/desktop_prepare.py',
-      'scripts/releases/bundle_env.py',
+      'hermes_cli/update_channel.py',
       'hermes_cli/release_channels.py',
-      'hermes_cli/__init__.py'
+      'hermes_cli/__init__.py',
+      'hermes_constants.py'
     ]) {
       const destination: string = path.join(root, file)
       fs.mkdirSync(path.dirname(destination), { recursive: true })
       fs.copyFileSync(path.join(repo, file), destination)
     }
 
+    // The version parser imports the PM package, and desktop_prepare imports
+    // release helpers that import each other (versioning -> semver). Copy both
+    // complete trees so a new intra-package import cannot break the fixture.
+    for (const tree of ['pm', 'scripts/releases']) {
+      fs.cpSync(path.join(repo, tree), path.join(root, tree), { recursive: true })
+    }
     fs.symlinkSync(path.join(repo, 'node_modules'), path.join(root, 'node_modules'), 'junction')
     const assets: string = path.join(app, 'assets/appx')
     fs.mkdirSync(assets)
@@ -447,4 +455,4 @@ print(out.read_text(encoding='utf-8'))
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
   }
-})
+}, 20_000)

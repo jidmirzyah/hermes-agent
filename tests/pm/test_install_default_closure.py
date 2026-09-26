@@ -23,12 +23,14 @@ import pm.cli
 
 @pytest.fixture()
 def install_spy(monkeypatch):
-    calls = {"names": None, "verified": None, "sync_extras": None, "activated": []}
+    calls = {"names": None, "verified": None, "sync_extras": None, "activated": [], "fail": set()}
 
     def fake_install_names(names, target=None, *, verify=True):
-        calls["names"] = list(names)
+        # Accumulate: optional defaults install in their own call after the
+        # required closure.
+        calls["names"] = [*(calls["names"] or []), *names]
         calls["verified"] = verify
-        return 0
+        return len(calls["fail"] & set(names))
 
     def fake_sync_venv(extras=None, **kwargs):
         calls["sync_extras"] = list(extras or [])
@@ -100,3 +102,40 @@ def test_a_missing_tool_blocks_the_venv_sync(install_spy, monkeypatch, capsys):
     assert pm.cli.cmd_install(argparse.Namespace(names=None, tools_only=False)) == 1
     assert install_spy["sync_extras"] is None
     assert "git: not installed or outdated" in capsys.readouterr().out
+
+
+def _bare_install(install_spy, **kwargs) -> list[str]:
+    install_spy["names"] = None
+    assert pm.cli.cmd_install(argparse.Namespace(names=None, tools_only=False, **kwargs)) == 0
+    return install_spy["names"]
+
+
+def test_browser_tools_are_a_default_the_user_can_decline_and_restore(install_spy):
+    assert "agent-browser" in _bare_install(install_spy)
+    assert "agent-browser" not in _bare_install(install_spy, without=["agent-browser"])
+    # The opt-out is recorded: a later bare install (the updater's shape) keeps it.
+    assert "agent-browser" not in _bare_install(install_spy)
+    install_spy["names"] = None
+    assert pm.cli.cmd_install(argparse.Namespace(names=["agent-browser"], tools_only=False)) == 0
+    assert "agent-browser" in _bare_install(install_spy)
+
+
+def test_a_failed_default_download_does_not_fail_the_install(install_spy, capsys):
+    install_spy["fail"] = {"agent-browser"}
+    assert "agent-browser" in _bare_install(install_spy)
+    assert install_spy["sync_extras"] == ["all"]
+    assert "hermes pm install agent-browser" in capsys.readouterr().out
+
+
+def test_termux_has_no_pm_browser_default():
+    from pm.defaults import default_packages
+
+    names = pm.cli._lockfile().names()
+    assert "agent-browser" in default_packages(names, target="linux-x64", declined_names=frozenset())
+    assert default_packages(names, target="linux-arm64-bionic", declined_names=frozenset()) == []
+
+
+def test_without_refuses_a_required_package(install_spy, capsys):
+    assert pm.cli.cmd_install(argparse.Namespace(names=None, tools_only=False, without=["git"])) == 1
+    assert "--without accepts only" in capsys.readouterr().out
+    assert install_spy["names"] is None

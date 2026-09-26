@@ -1,5 +1,7 @@
 
 
+
+
 [project]
 name = "hermes-agent"
 version = "0.21.5"
@@ -25,8 +27,8 @@ dependencies = [
   # captured by `mistralai>=2.3.0,<3` rather than an exact pin, every
   # install in the hours before the quarantine would have pulled it.
   #
-  # After a pin change, run `python -m pm.build_env --source . --lock-only`
-  # so the transitive resolution stays consistent. Do not introduce ranges
+  # After a pin change, run `hermes pm lock` so the transitive resolution
+  # stays consistent. Do not introduce ranges
   # without a written justification.
   #
   # Scope rule: only packages used by EVERY hermes session belong here.
@@ -41,7 +43,9 @@ dependencies = [
   # a corporate/internal root installed on the machine just works. certifi
   # above stays a direct pin because httpx/requests/openai each depend on
   # it regardless; it is no longer OUR trust source.
-  "truststore>=0.10.4,<0.11; python_version >= '3.14'",
+  # ssl_verify uses truststore's private original SSLContext for explicit CA overrides.
+  # Keep this exact until that path has a public-API replacement.
+  "truststore==0.10.4; python_version >= '3.14'",
   "python-dotenv==1.2.2; python_version >= '3.14'",
   "fire==0.7.1; python_version >= '3.14'",
   "httpx[socks]==0.28.1; python_version >= '3.14'",
@@ -178,6 +182,12 @@ dependencies = [
   # Ships prebuilt wheels bundling libheif for the common platforms (no system
   # libs needed), so it's safe in the base install alongside Pillow.
   "pillow-heif>=1.4.0,<2; python_version >= '3.14'",
+  # SVG rendering for the icon generator (scripts/generate_icons.py). Source
+  # builds render icons with the runtime interpreter (`hermes desktop`,
+  # `hermes update`), so a source install carries its renderer instead of
+  # preparing a separate environment at launch. abi3 wheels for every
+  # shipped platform, including Windows ARM64 and Android.
+  "resvg-py==0.4.0; python_version >= '3.14'",
   # Windows log rotation. Stdlib ``RotatingFileHandler.doRollover()`` uses
   # ``os.rename()`` which fails with ``PermissionError [WinError 32]`` on
   # Windows whenever any other process holds an append-mode handle on
@@ -231,14 +241,19 @@ fal = ["fal-client==0.13.1"]
 # Edge TTS — default TTS provider but still optional (users can pick
 # ElevenLabs / OpenAI / MiniMax instead).
 edge-tts = ["edge-tts==7.2.7"]
-# These engines' upstream Python ceilings exclude the managed interpreter.
+# NeuTTS's upstream Python ceiling excludes the managed interpreter.
 # Keep dependency markers and PM gates together: bundles omit them, explicit
 # setup requests report unavailable rather than succeeding with an empty set.
 neutts = ["neutts[all]==1.4.1; python_version < '3.14'"]
 kittentts = [
-  # KittenTTS requires misaki[en]>=0.9.4, whose Python ceiling is <3.13.
-  "kittentts @ https://github.com/KittenML/KittenTTS/releases/download/0.8.1/kittentts-0.8.1-py3-none-any.whl ; python_version < '3.13'",
-  "soundfile==0.14.0; python_version < '3.13'",
+  "kittentts @ https://github.com/KittenML/KittenTTS/releases/download/0.8.1/kittentts-0.8.1-py3-none-any.whl ; (platform_machine != 'ARM64' or sys_platform != 'win32') and (platform_machine != 'x86_64' or sys_platform != 'darwin')",
+  # KittenTTS requires misaki[en]>=0.9.4, and PyPI's misaki 0.9.4 caps Python
+  # below 3.13. The NousResearch fork is the same 0.9.4 code with the cap
+  # raised to <3.15. Declaring it here makes KittenTTS's transitive
+  # requirement resolve to the fork. Drop this line when upstream misaki
+  # publishes a release that allows 3.14.
+  "misaki[en] @ git+https://github.com/NousResearch/misaki.git@f03fd2be7346952a83d3d4845c217fc7667f322d ; (platform_machine != 'ARM64' or sys_platform != 'win32') and (platform_machine != 'x86_64' or sys_platform != 'darwin')",
+  "soundfile==0.14.0; (platform_machine != 'ARM64' or sys_platform != 'win32') and (platform_machine != 'x86_64' or sys_platform != 'darwin')",
 ]
 # onnxruntime has no Intel macOS wheel. Piper has no Windows ARM64 wheel.
 piper = [
@@ -539,10 +554,13 @@ dev = [
   "ruff==0.15.10",
   "setuptools==83.0.0",
 ] # starlette: CVE-2026-48710; setuptools: 83 (torch >=2.13 requires setuptools 83)
-# --only-group supplies Pillow without installing the Hermes application.
-icon-build = ["Pillow==12.3.0", "resvg-py==0.4.0"]
-# Native launcher acceptance is required in test environments, not payloads.
-test = ["distlib==0.4.3; sys_platform == 'win32'"]
+# Native launcher and provider-catalog E2E dependencies belong in the test
+# environment, not the core runtime. Keep the Anthropic SDK at the same
+# reviewed version as the optional runtime extra above.
+test = [
+  "distlib==0.4.3; sys_platform == 'win32'",
+  "anthropic==0.87.0",
+]
 
 [build-system]
 # setuptools.build_meta + our setup.py bdist_wheel guard import wheel during
@@ -556,6 +574,13 @@ build-backend = "setuptools.build_meta"
 hermes = "hermes_cli.main:main"
 hermes-agent = "agent.legacy_cli:main"
 hermes-acp = "acp_adapter.entry:main"
+
+[tool.hermes]
+# Extras that only an explicit selection installs (setup, sync_venv). Bundles
+# build with --all-extras and pass --no-extra for each of these, so their
+# closures never ship. KittenTTS pulls torch, transformers and spaCy through
+# misaki[en]: installed when the user picks it, not preinstalled.
+opt-in-extras = ["kittentts"]
 
 # Per-extra platform gates (settled 2026-09-02): an extra listed here is
 # only installable on platforms matching the marker. pm consults this
@@ -580,9 +605,11 @@ wake-openwakeword = "(platform_machine != 'ARM64' or sys_platform != 'win32') an
 # Gate the extra that carries only faster-whisper; [voice] also has ungated deps (sounddevice,
 # numpy) and stays installable, see test_declared_extra_gates_match_dependency_selection.
 stt-whisper = "(platform_machine != 'ARM64' or sys_platform != 'win32') and (platform_machine != 'x86_64' or platform_system != 'Darwin')"
-# NeuTTS excludes Python 3.14. KittenTTS's misaki dependency excludes 3.13+.
+# NeuTTS excludes Python 3.14.
 neutts = "python_version < '3.14'"
-kittentts = "python_version < '3.13'"
+# KittenTTS: onnxruntime has no Intel macOS wheel; misaki[en]'s torch has no
+# Windows ARM64 wheel.
+kittentts = "(platform_machine != 'ARM64' or sys_platform != 'win32') and (platform_machine != 'x86_64' or sys_platform != 'darwin')"
 piper = "(platform_machine != 'ARM64' or sys_platform != 'win32') and (platform_machine != 'x86_64' or sys_platform != 'darwin')"
 
 [tool.uv]
@@ -607,6 +634,23 @@ override-dependencies = [
   # replace that requirement too, not only the vendor's upper bound.
   # Remove this line when alibabacloud-tea-openapi lifts the cap.
   "cryptography==50.0.1",
+  # misaki[en] (pulled by [kittentts]) lists spacy-curated-transformers.
+  # The newest release that fits spacy 3.8 (2.x needs thinc 9), 0.3.1, caps
+  # Python below 3.14, so PM's `uv pip check` rejects the venv. Nothing
+  # imports it: only transformer spaCy models (trf=True) do, and KittenTTS
+  # never builds a misaki G2P. The never-true marker removes it from the lock.
+  # Remove this line when misaki drops it or a 3.14-capable release fits.
+  "spacy-curated-transformers; sys_platform == 'never'",
+  # The never-true marker above stops uv from ever INSTALLING spacy-curated-transformers,
+  # but uv's universal lock still resolves a coherent dependency set for that (unreachable)
+  # marker branch, and spacy-curated-transformers's own real requirement (spacy>=4.0.0.dev2)
+  # conflicts with spacy 3.8's thinc pin. Left alone, the resolver backtracks spacy all the
+  # way down to 2.0.17, which fails to build under this uv/setuptools combo (its legacy
+  # setup.py imports distutils.msvccompiler, removed from modern setuptools). Floor spacy so
+  # the backtrack stops at a buildable, still-marker-satisfying version instead. Discovered
+  # while relocking upstream-sync-batch8; reproduces on NousResearch/hermes-agent's own tree,
+  # unrelated to fork changes. Remove alongside the line above.
+  "spacy>=3.8,<4",
 ]
 exclude-newer = "14 days"
 # aiohttp, cryptography: temporary exclude-newer exceptions — their advisory
@@ -777,8 +821,6 @@ include = [
   "tools.*",
   "hermes_cli",
   "hermes_cli.*",
-  "hermes_wisdom",
-  "hermes_wisdom.*",
   "gateway",
   "gateway.*",
   "tui_gateway",

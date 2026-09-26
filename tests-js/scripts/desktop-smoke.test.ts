@@ -320,7 +320,8 @@ test('driver strips caller secrets and records missing executables as failure wi
   } finally { fs.rmSync(home, { recursive: true, force: true }) }
 })
 
-test.runIf(process.platform !== 'win32')('NEW source smoke settles the clean runtime before Electron launch', async (): Promise<void> => {
+test.runIf(process.platform !== 'win32')('OLD and NEW source smokes settle the clean runtime before Electron launch', async (): Promise<void> => {
+  for (const phase of ['old', 'new'] as const) {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'smoke-source-settle-'))
   const root = path.join(workspace, 'source')
   const home = path.join(workspace, 'home')
@@ -355,13 +356,14 @@ printf 'clean source runtime settled\\n'
 
     try {
       await expect(runInstalledDesktopSmoke({ exe, root, origin: 'source', home, 'user-data': userData,
-        out, phase: 'new', 'expect-commit': 'a'.repeat(40) }, refuseLaunch)).rejects.toThrow('launch observed settled runtime')
+        out, phase, 'expect-commit': 'a'.repeat(40) }, refuseLaunch)).rejects.toThrow('launch observed settled runtime')
     } finally {
       if (prior === undefined) { delete process.env.PM_E2E_LEAK } else { process.env.PM_E2E_LEAK = prior }
     }
 
-    expect(fs.readFileSync(path.join(out, 'desktop-source-settle-new.log'), 'utf8')).toContain('clean source runtime settled')
+    expect(fs.readFileSync(path.join(out, `desktop-source-settle-${phase}.log`), 'utf8')).toContain('clean source runtime settled')
   } finally { fs.rmSync(workspace, { recursive: true, force: true }) }
+  }
 })
 
 test('Windows source settle bypasses the current cmd launcher beside a stale historical exe', (): void => {

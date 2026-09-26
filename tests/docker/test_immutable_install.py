@@ -6,7 +6,7 @@ Build the real image and verify at runtime:
   2. A stale "docker" stamp in $HERMES_HOME is healed (removed) on boot
 
 The hosted write-policy env (PYTHONDONTWRITEBYTECODE,
-HERMES_DISABLE_LAZY_INSTALLS, ...) is covered by
+HERMES_WRITE_SAFE_ROOT, ...) is covered by
 test_immutable_install_permissions.py.
 """
 from __future__ import annotations

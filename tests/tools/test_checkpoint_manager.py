@@ -19,11 +19,9 @@ from tools.checkpoint_manager import (
     _ref_name,
     _project_meta_path,
     _touch_project,
-    prune_checkpoints,
-    maybe_auto_prune_checkpoints,
-    store_status,
-    clear_all,
-    clear_legacy,
+)
+from tools.checkpoint_maintenance import (
+    clear_all, clear_legacy, maybe_auto_prune_checkpoints, prune_checkpoints, store_status,
 )
 
 

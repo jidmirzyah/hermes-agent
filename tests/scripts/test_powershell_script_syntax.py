@@ -3,7 +3,7 @@
 install.ps1 is fetched standalone (``irm | iex``) by every Windows user, so
 a parse error ships instantly and breaks installs at line 1. Linux CI cannot
 execute PowerShell, which is why the other install_ps1 tests are source-regex
-probes; this test runs on the ``windows_only`` lane (tests-os.yml), where a
+probes; this test runs on the ``platforms("windows")`` lane (tests-os.yml), where a
 PowerShell host is part of the OS, and asks the actual language parser.
 
 The harness is written to a file and invoked with ``-File`` because inline

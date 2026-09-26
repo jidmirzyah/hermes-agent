@@ -21,7 +21,7 @@ bytes, dependency selections, or Python environments across targets.
 
 | Product | Implementation | Inputs |
 |---|---|---|
-| Icons | `scripts/generate_icons.py` | Artwork and prepared `icon-build` environment |
+| Icons | `scripts/generate_icons.py` | Artwork and a Python with the runtime dependencies |
 | TUI | `scripts/build/tui.mjs` | Prepared TUI workspace |
 | Dashboard | `scripts/build/web.mjs` | Prepared web workspace and generated icons |
 | Desktop UI | `scripts/build/desktop.mjs` | Prepared desktop workspace, icons, stamp, and native bindings |
@@ -326,9 +326,10 @@ consumers. They are not interchangeable cleanup targets.
   desktop preparation uses its own input snapshot namespace.
   Plain `uv cache prune` removes dangling entries without discarding offline
   wheel inputs. It does not remove all historical versions or enforce a size cap.
-- Standalone icon preparation uses `SOURCE/.cache/icon-build`. Desktop
-  preparation places its icon environment under the job workdir and its wheel
-  cache under `CACHE/python/build`. Neither enters the shipped runtime.
+- Source builds render icons on their runtime interpreter. Desktop preparation
+  and product staging, which have none, prepare the locked runtime dependencies
+  (without the application) under the job workdir; desktop's wheel cache is
+  `CACHE/python/build`. That environment does not enter the shipped runtime.
 - Frontend `node_modules` is a provider input, not a frontend product.
   Docker's runtime TypeScript and Photon selections are separate exceptions.
 

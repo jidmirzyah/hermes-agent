@@ -14,7 +14,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
 
-from scripts.releases.stable import read_admitted_candidate, successful_smoke_results, validate_candidates
+from scripts.releases.stable import read_admitted_candidate, accepted_smoke_results, validate_candidates
 
 
 def sha256_file(file: Path) -> str:
@@ -157,12 +157,15 @@ def validate_windows_bundle(bundle: Path, windows: list[dict]) -> None:
 
 
 def assemble(root: Path, tag: str, commit: str, public_base: str, out: Path,
-             *, smoke_results: dict, release_epoch: int) -> dict:
-    """Bind the native metadata to files already staged by their build jobs."""
+             *, smoke_results: dict, release_epoch: int, archive: str) -> dict:
+    """Bind the native metadata to files already staged by their build jobs.
+
+    `tag` stays the plain payload identity; `archive` is the attempt ref the
+    manifest and every artifact URL are keyed under."""
     from scripts.releases.handoff import receipt_name, validate_receipt
     from scripts.releases.r2 import put, staging_key_for
 
-    smoke_results = successful_smoke_results(smoke_results)
+    smoke_results = accepted_smoke_results(smoke_results)
     expected = ("win32-x64", "win32-arm64", "darwin-x64", "darwin-arm64", "termux", "windows-universal")
     by_name = {}
     for name in expected:
@@ -170,7 +173,9 @@ def assemble(root: Path, tag: str, commit: str, public_base: str, out: Path,
         if not file.is_file():
             raise ValueError(f"Missing candidate handoff: {name}")
         receipt = json.loads(file.read_text(encoding="utf-8-sig"))
-        for row in validate_receipt(receipt, tag, commit, name):
+        # Handoffs are staged under the archive ref; their bound tag is the
+        # archive, not the plain payload tag.
+        for row in validate_receipt(receipt, archive, commit, name):
             prior = by_name.get(row["path"])
             if prior is not None and prior != row:
                 raise ValueError("Candidate handoffs disagree on file receipts")
@@ -187,7 +192,7 @@ def assemble(root: Path, tag: str, commit: str, public_base: str, out: Path,
     single(name for name in by_name if name.endswith(".msixbundle") and name.startswith("Store-"))
     windows = [r for r in rows if r["platform"] == "windows"]
     validate_windows_bundle(root / universal_name, windows)
-    files = [{**row, "url": f"{public_base.rstrip('/')}/{staging_key_for(tag, name)}"}
+    files = [{**row, "url": f"{public_base.rstrip('/')}/{staging_key_for(archive, name)}"}
              for name, row in sorted(by_name.items()) if not name.startswith("metadata-")]
     by_name = {item["path"]: item for item in files}
     packages = []
@@ -197,17 +202,19 @@ def assemble(root: Path, tag: str, commit: str, public_base: str, out: Path,
         item = by_name[filename]
         packages.append({k: v for k, v in {**row, "artifact": {"url": item["url"], "sha256": item["sha256"]}}.items() if k != "filename"})
     result = {"schema": 2, "tag": tag, "commit": commit, "releaseEpoch": release_epoch,
+              "archive": archive,
               "packages": packages, "files": files, "smoke_results": smoke_results}
-    validate_candidates(result, tag, commit, public_base, release_epoch)
+    validate_candidates(result, tag, commit, public_base, release_epoch, archive=archive)
     if not any(row["platform"] == "termux" for row in packages):
         raise ValueError("Missing Termux candidate")
     out.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
-    put(tag=tag, key="release-candidates.json", file=out, immutable=True)
+    put(tag=archive, key="release-candidates.json", file=out, immutable=True)
     return result
 
 
 def materialize(manifest: dict, root: Path, *, public_base: str, store_only: bool = False) -> None:
-    validate_candidates(manifest, manifest["tag"], manifest["commit"], public_base)
+    validate_candidates(manifest, manifest["tag"], manifest["commit"], public_base,
+                        archive=manifest["archive"])
     files = manifest.get("files", [])
     if not files or len({item["path"] for item in files}) != len(files):
         raise ValueError("Missing or duplicate candidate file receipts")
@@ -221,7 +228,7 @@ def materialize(manifest: dict, root: Path, *, public_base: str, store_only: boo
         relative = Path(item["path"])
         if relative.is_absolute() or ".." in relative.parts or any(c in item["path"] for c in "\\:%?#") or item["path"].startswith("/") or "//" in item["path"]:
             raise ValueError("Invalid artifact path")
-        expected = f"{public_base.rstrip('/')}/releases/tag/{manifest['tag']}/{relative.as_posix()}"
+        expected = f"{public_base.rstrip('/')}/releases/tag/{manifest['archive']}/{relative.as_posix()}"
         if item["url"] != expected or not re.fullmatch(r"[a-f0-9]{64}", item["sha256"]):
             raise ValueError("Invalid artifact URL or digest")
         target = root / relative
@@ -311,7 +318,8 @@ def promote(manifest: dict, root: Path, public_base: str) -> None:
     if not any(p.name == "InRelease" for p in indexes):
         raise ValueError("Missing signed APT index")
     # Every package and index must exist before the first channel write.
-    finalize(tag=manifest["tag"], dir=root)
+    # The merged feed points at the attempt archive; the version stays plain.
+    finalize(tag=manifest["tag"], dir=root, archive=manifest["archive"])
     def publish_pointer(key, file):
         put(tag=manifest["tag"], key=key, file=file, key_is_full=True)
         digest = hashlib.sha256()
@@ -336,6 +344,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--out", type=Path)
     parser.add_argument("--tag", default=os.environ.get("RELEASE_TAG"))
+    parser.add_argument("--archive", default=os.environ.get("HERMES_ARCHIVE_TAG"),
+                        help="Attempt ref the release archive is keyed under when the payload tag is plain vX.Y.Z")
     parser.add_argument("--commit", default=os.environ.get("GITHUB_SHA"))
     parser.add_argument("--public-base", default=os.environ.get("CLOUDFLARE_R2_PUBLIC_URL"))
     parser.add_argument("--release-epoch", type=int, default=os.environ.get("HERMES_RELEASE_EPOCH"))
@@ -365,15 +375,20 @@ def main(argv: list[str] | None = None) -> None:
     elif args.command == "assemble":
         if args.release_epoch is None:
             parser.error("assemble requires the admitted --release-epoch")
+        if not args.archive:
+            parser.error("assemble requires the admitted --archive ref")
         assemble(args.root, args.tag, args.commit, args.public_base, args.out,
                  smoke_results=json.loads(os.environ.get("RELEASE_NEEDS", "{}")),
-                 release_epoch=args.release_epoch)
+                 release_epoch=args.release_epoch, archive=args.archive)
         if os.environ.get("GITHUB_OUTPUT"):
             with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as file:
-                file.write(f"manifest-url={args.public_base.rstrip('/')}/releases/tag/{args.tag}/release-candidates.json\nmanifest-sha256={sha256_file(args.out)}\n")
+                file.write(f"manifest-url={args.public_base.rstrip('/')}/releases/tag/{args.archive}/release-candidates.json\nmanifest-sha256={sha256_file(args.out)}\n")
     else:
+        if not args.archive:
+            parser.error(f"{args.command} requires the admitted --archive ref")
         manifest = read_admitted_candidate(args.tag, args.commit, args.public_base,
-                                          os.environ.get("CANDIDATE_MANIFEST_SHA256", ""))
+                                          os.environ.get("CANDIDATE_MANIFEST_SHA256", ""),
+                                          archive=args.archive)
         if args.command == "materialize":
             materialize(manifest, args.root, public_base=args.public_base, store_only=args.store_only)
         else:
