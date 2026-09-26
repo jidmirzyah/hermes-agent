@@ -97,7 +97,7 @@ scripts/run_tests.sh -v --tb=long             # pass-through pytest flags
 
 - Tests auto-redirect `HERMES_HOME` to temp dirs — never touch real `~/.hermes/`.
 - Prepare Python through the PM developer workflow before building a test environment.
-- Run `python -m pm.build_env --source . --out .venv --extra dev --group test`.
+- Run `python -m pm.build_env --source . --out .venv --group dev --group test`.
   The output must not exist. Stop its processes and intentionally remove only
   that disposable environment before regeneration.
 - The runner probes repository `.venv`, `venv`, and the standard source-install

@@ -21,14 +21,90 @@ def completion_tail(monkeypatch):
     scratch tree here — building products with the selected interpreter; the tests below
     cover the sync decision, not the build.
     """
-    spawned = []
+    class Spawned(list):
+        exit_code = 0
+        kwargs: dict = {}
+
+    spawned = Spawned()
 
     def call(command, **kwargs):
         spawned.append(command)
-        return 0
+        spawned.kwargs = kwargs
+        return spawned.exit_code
 
     monkeypatch.setattr(venv_sync.subprocess, "call", call)
     return spawned
+
+
+def _self_checkout(tmp_path, monkeypatch):
+    root = tmp_path / "checkout"
+    root.mkdir()
+    (root / ".git").mkdir()
+    (root / "pyproject.toml").write_text("[project]\nname='example'\n")
+    (root / "install-stamp.json").write_text(json.dumps({"updateMechanism": "self"}))
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.delenv("HERMES_DISABLE_LAZY_INSTALLS", raising=False)
+    return root
+
+
+@pytest.mark.parametrize("argv", [["--version"], ["-V"], ["--help"], ["-p", "work", "-h"]])
+def test_metadata_query_never_waits_on_source_completion(tmp_path, monkeypatch, argv):
+    """`hermes --version` offline must answer from the tree, not run a network-bound sync."""
+    import pm
+
+    root = _self_checkout(tmp_path, monkeypatch)
+    monkeypatch.setattr(pm, "venv_is_current", lambda **kw: pytest.fail("metadata query reached PM"))
+    assert venv_sync.prepare_launch(root, argv) is None
+
+
+def test_failed_completion_tail_is_retried_without_rebuilding_dependencies(tmp_path, monkeypatch, completion_tail):
+    """Dependencies committed, tail failed: the next launch owes the tail only."""
+    import pm
+    from hermes_cli import _launchers
+
+    root = _self_checkout(tmp_path, monkeypatch)
+    fact = runtime_facts_path(root)
+    syncs = []
+    monkeypatch.setattr(pm, "venv_is_current", lambda **kw: fact.is_file())
+    monkeypatch.setattr(_launchers, "resolve_store_python", lambda _: Path(sys.executable))
+
+    def sync(extras=None, **kwargs):
+        syncs.append(extras)
+        fact.parent.mkdir(parents=True, exist_ok=True)
+        fact.write_text(json.dumps({"packages": {"venv": {"stamp": "complete", "extras": ["all"]}}}))
+
+    monkeypatch.setattr(pm, "sync_venv", sync)
+    completion_tail.exit_code = 1
+    with pytest.raises(RuntimeError, match="run `hermes update`"):
+        venv_sync.prepare_launch(root, [])
+    assert len(syncs) == 1 and len(completion_tail) == 1
+    assert pm.venv_is_current()
+
+    with pytest.raises(RuntimeError, match="run `hermes update`"):
+        venv_sync.prepare_launch(root, [])
+    assert len(syncs) == 1, "current dependencies were rebuilt for a tail retry"
+    assert len(completion_tail) == 2
+
+    completion_tail.exit_code = 0
+    # Dependencies are already this interpreter's: the tail alone owes no re-exec.
+    assert venv_sync.prepare_launch(root, []) is None
+    assert len(syncs) == 1 and len(completion_tail) == 3
+    assert venv_sync.prepare_launch(root, []) is None
+    assert len(completion_tail) == 3, "a finished tail was run again"
+
+
+def test_completion_tail_output_stays_off_stdout(tmp_path, monkeypatch, completion_tail):
+    """The automatic tail runs in front of the user's command, which may be piping JSON."""
+    import pm
+    from hermes_cli import _launchers
+
+    root = _self_checkout(tmp_path, monkeypatch)
+    monkeypatch.setattr(pm, "venv_is_current", lambda **kw: False)
+    monkeypatch.setattr(pm, "sync_venv", lambda *a, **kw: None)
+    monkeypatch.setattr(_launchers, "resolve_store_python", lambda _: Path(sys.executable))
+    venv_sync.prepare_launch(root, [])
+    assert completion_tail.kwargs["stdout"] is sys.__stderr__
 
 
 def test_first_launch_syncs_without_marker_then_uses_completion_fact(tmp_path, monkeypatch, completion_tail):
@@ -51,7 +127,7 @@ def test_first_launch_syncs_without_marker_then_uses_completion_fact(tmp_path, m
 
     def sync(extras=None, **kwargs):
         calls.append((extras, kwargs))
-        fact.parent.mkdir(parents=True)
+        fact.parent.mkdir(parents=True, exist_ok=True)
         fact.write_text(json.dumps({"packages": {"venv": {"stamp": "complete", "extras": ["all"]}}}))
 
     monkeypatch.setattr(pm, "sync_venv", sync)
@@ -116,7 +192,7 @@ def test_failed_launch_keeps_previous_completion_and_retries(tmp_path, monkeypat
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
     fact = runtime_facts_path(root)
     fact.parent.mkdir(parents=True)
-    previous = '{"packages":{"venv":{"stamp":"previous","extras":["all","dev"]}}}'
+    previous = '{"packages":{"venv":{"stamp":"previous","extras":["all","anthropic"]}}}'
     fact.write_text(previous)
     monkeypatch.setattr(pm, "venv_is_current", lambda **kw: False)
     calls = []
@@ -185,3 +261,25 @@ def test_live_old_update_blocks_launch_sync(tmp_path, monkeypatch):
     monkeypatch.setattr(_launchers, "resolve_store_python", lambda _: Path(sys.executable))
     assert venv_sync.prepare_launch(root, []) is None
     assert marker.is_file()
+
+
+def test_launch_under_the_owning_update_does_not_run_the_tail_again(tmp_path, monkeypatch, completion_tail):
+    """The tail imports the application, whose entry point runs prepare_launch: inside the
+    process tree of the update that owns the pending tail it must be a no-op, not recurse."""
+    import time
+    import pm
+    from hermes_cli.update_lock import update_marker_path
+
+    root = _self_checkout(tmp_path, monkeypatch)
+    pending = venv_sync.completion_pending_path(root)
+    pending.parent.mkdir(parents=True)
+    pending.write_text("owed\n")
+    monkeypatch.setattr(pm, "venv_is_current", lambda **kw: True)
+    marker = update_marker_path()
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(f"{os.getppid()}\n{int(time.time())}\n")  # an ancestor holds the update
+
+    assert venv_sync.prepare_launch(root, []) is None
+    assert completion_tail == []
+    assert pending.is_file(), "the owning update's obligation was discharged by its own tail"
+

@@ -18,10 +18,14 @@ never which tests run. Over-selecting here is harmless (the skips drop the
 extras); the failure mode to care about is UNDER-selecting, which is why
 the workflow fails the job when zero tests end up selected.
 
-A file matches when a quoted ``platforms("...")`` spec names the platform —
-including negated (``"not macos"``) and any-of lists. The match is anchored
-inside the string literal so bare identifiers (a variable named ``windows``)
-don't produce false positives.
+A file matches when a quoted spec inside a ``mark.platforms(...)`` call
+COVERS the platform, resolved the way the conftest gate resolves it:
+``"posix"`` covers linux and macOS, ``"any"`` covers every lane, and a
+negated spec (``"not macos"``) lists on every lane since it admits all the
+others (and the named one keeps its import, harmlessly). Matching the
+literal word only would drop every ``platforms("posix")`` file from the
+macOS lane. The match is anchored inside the string literal so bare
+identifiers (a variable named ``windows``) don't produce false positives.
 
 Usage:
     python scripts/ci/list_os_marked_tests.py macos [tests_root]
@@ -40,12 +44,48 @@ from pathlib import Path
 
 _VALID_PLATFORMS = ("linux", "macos", "windows")
 
+# Mirrors tests/conftest.py::_PLATFORM_ALIASES, keyed by lane name rather than
+# sys.platform value: this side never runs on the host it is asking about.
+_SPEC_HOSTS = {
+    "linux": frozenset({"linux"}),
+    "macos": frozenset({"macos"}),
+    "windows": frozenset({"windows"}),
+    "posix": frozenset({"linux", "macos"}),
+    "any": frozenset(_VALID_PLATFORMS),
+}
+_PLATFORMS_CALL = re.compile(r"mark\.platforms\(([^)]*)\)")
+_QUOTED = re.compile(r"""["']([^"']*)["']""")
+
+
+def gated_specs(text: str) -> set[str]:
+    """Every quoted spec inside the ``mark.platforms(...)`` calls of a test file.
+
+    Keyword values (``arch="arm64"``) come along; they resolve to no host below,
+    so they can never select a lane.
+    """
+    return {
+        spec.strip().lower()
+        for call in _PLATFORMS_CALL.finditer(text)
+        for spec in _QUOTED.findall(call.group(1))
+    }
+
+
+def spec_hosts(spec: str) -> frozenset[str]:
+    """Lane names a spec admits; ``not X`` admits every lane but X's; unknown → none."""
+    leaf = spec.removeprefix("not ").strip()
+    hosts = _SPEC_HOSTS.get(leaf, frozenset())
+    return _SPEC_HOSTS["any"] - hosts if spec.startswith("not ") else hosts
+
+
+def file_gates_on(text: str, platform: str) -> bool:
+    """True when some spec covers *platform* — or is negated (see module docstring)."""
+    return any(
+        platform in spec_hosts(spec) or spec.startswith("not ") for spec in gated_specs(text)
+    )
+
 
 def find_marked_files(platform: str, root: Path) -> list[Path]:
     """Return every ``test_*.py`` under *root* gating on *platform*."""
-    pattern = re.compile(
-        rf'platforms\(\s*[^)]*?"[^")]*\b{re.escape(platform)}\b[^")]*"'
-    )
     hits: list[Path] = []
     # os.walk, not Path.rglob: rglob raises FileNotFoundError when a directory
     # (a sibling job's __pycache__) vanishes mid-scan; os.walk skips it.
@@ -58,7 +98,7 @@ def find_marked_files(platform: str, root: Path) -> list[Path]:
                 text = path.read_text(encoding="utf-8-sig", errors="replace")
             except OSError:
                 continue
-            if pattern.search(text):
+            if file_gates_on(text, platform):
                 hits.append(path)
     return sorted(hits)
 

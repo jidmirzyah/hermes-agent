@@ -19,7 +19,6 @@ from gateway.config import Platform
 from gateway.platforms.event import MessageEvent
 from gateway.session import SessionSource
 
-
 def _make_event(text="/update", platform=Platform.TELEGRAM,
                 user_id="12345", chat_id="67890"):
     """Build a MessageEvent for testing."""
@@ -30,7 +29,6 @@ def _make_event(text="/update", platform=Platform.TELEGRAM,
         user_name="testuser",
     )
     return MessageEvent(text=text, source=source)
-
 
 def _make_runner(hermes_home=None):
     """Create a bare GatewayRunner without calling __init__."""
@@ -54,11 +52,9 @@ def _make_runner(hermes_home=None):
     }
     return runner
 
-
 # ---------------------------------------------------------------------------
 # _gateway_prompt (file-based IPC in main.py)
 # ---------------------------------------------------------------------------
-
 
 class TestGatewayPrompt:
     """Tests for _gateway_prompt() function."""
@@ -87,12 +83,9 @@ class TestGatewayPrompt:
         assert not (hermes_home / ".update_prompt.json").exists()
         assert not (hermes_home / ".update_response").exists()
 
-
-
 # ---------------------------------------------------------------------------
 # Update command spawns --gateway flag
 # ---------------------------------------------------------------------------
-
 
 class TestUpdateCommandGatewayFlag:
     """Verify the gateway spawns hermes update --gateway."""
@@ -132,11 +125,9 @@ class TestUpdateCommandGatewayFlag:
         assert "rc=$?" in cmd_string
         assert "status=$?" not in cmd_string
 
-
 # ---------------------------------------------------------------------------
 # _watch_update_progress — output streaming
 # ---------------------------------------------------------------------------
-
 
 class TestWatchUpdateProgress:
     """Tests for _watch_update_progress() streaming output."""
@@ -232,7 +223,6 @@ class TestWatchUpdateProgress:
         # Check session was marked as having pending prompt
         # (may be cleared by the time we check since update finished)
 
-
     @pytest.mark.asyncio
     async def test_prompt_is_recovered_after_watcher_restart(self, tmp_path):
         """A forwarded prompt stays on disk until answered so a new watcher can recover it."""
@@ -302,15 +292,12 @@ class TestWatchUpdateProgress:
         ]
         assert len(prompt_sends) == 1
 
-
 # ---------------------------------------------------------------------------
 # Message interception for update prompts
 # ---------------------------------------------------------------------------
 
-
 class TestUpdatePromptInterception:
     """Tests for update prompt response interception in _handle_message."""
-
 
     @pytest.mark.asyncio
     async def test_recognized_slash_command_bypasses_pending_update_prompt(self, tmp_path):
@@ -349,11 +336,9 @@ class TestUpdatePromptInterception:
         # re-intercepted for a prompt that is no longer outstanding.
         assert session_key not in runner._update_prompt_pending
 
-
 # ---------------------------------------------------------------------------
 # cmd_update --gateway flag
 # ---------------------------------------------------------------------------
-
 
 class TestCmdUpdateGatewayMode:
     """Tests for cmd_update with --gateway flag."""
@@ -398,4 +383,3 @@ class TestCmdUpdateGatewayMode:
         assert "Restore" in gateway_prompt.call_args.args[0]
         assert (root / "notes.txt").read_text(encoding="utf-8") == "committed\n"
         assert git("stash", "show", "-p").endswith("+user edit")
-

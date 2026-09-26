@@ -63,7 +63,12 @@ export interface DownloadStatusCopy {
   downloadProgress: (done: string, total: string) => string
   downloadSpeed: (rate: string) => string
   downloadEta: (time: string) => string
+  downloadEtaSeconds: (count: number) => string
+  downloadEtaMinutes: (count: number) => string
+  downloadEtaHours: (hours: number, minutes: number) => string
 }
+
+export type DownloadEtaCopy = Pick<DownloadStatusCopy, 'downloadEtaHours' | 'downloadEtaMinutes' | 'downloadEtaSeconds'>
 
 export function formatSpeed(bytesPerSec: number | null | undefined): string {
   if (!bytesPerSec || bytesPerSec <= 0 || !Number.isFinite(bytesPerSec)) {
@@ -75,25 +80,24 @@ export function formatSpeed(bytesPerSec: number | null | undefined): string {
   return mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB/s` : mb >= 10 ? `${Math.round(mb)} MB/s` : `${mb.toFixed(1)} MB/s`
 }
 
-export function formatEta(seconds: number | null | undefined): string {
+// Byte-rate units (MB/s, GB/s) are SI symbols and stay as-is; the duration
+// words are the locale's, so the ETA only picks the magnitude here.
+export function formatEta(seconds: number | null | undefined, copy: DownloadEtaCopy): string {
   if (seconds == null || !Number.isFinite(seconds) || seconds < 1) {
     return ''
   }
 
   if (seconds < 60) {
-    return `${Math.max(1, Math.round(seconds))} sec`
+    return copy.downloadEtaSeconds(Math.max(1, Math.round(seconds)))
   }
 
-  const minutes = Math.round(seconds / 60)
+  const minutes: number = Math.round(seconds / 60)
 
   if (minutes < 60) {
-    return `${minutes} min`
+    return copy.downloadEtaMinutes(minutes)
   }
 
-  const hours = Math.floor(minutes / 60)
-  const rest = minutes % 60
-
-  return rest ? `${hours} h ${rest} min` : `${hours} h`
+  return copy.downloadEtaHours(Math.floor(minutes / 60), minutes % 60)
 }
 
 // One status line for every download surface: what it is doing, how far, how
@@ -125,7 +129,7 @@ export function downloadStatusText(job: LocalRuntimeJob, copy: DownloadStatusCop
     if (speed) {
       parts.push(copy.downloadSpeed(speed))
 
-      const eta = formatEta(job.eta_seconds)
+      const eta: string = formatEta(job.eta_seconds, copy)
 
       if (eta) {
         parts.push(copy.downloadEta(eta))
@@ -197,7 +201,10 @@ export function LocalModelDownloadActions({
       watchLocalRuntimeJobs(owner)
     } catch (err) {
       if (!owner || isCurrentLocalModelsOwner(owner)) {
-        notifyError(err, copy.downloadFailed(job.target))
+        notifyError(
+          err,
+          kind === 'pause' ? copy.downloadPauseFailed(job.target) : copy.downloadResumeFailed(job.target)
+        )
       }
     } finally {
       setBusy(false)

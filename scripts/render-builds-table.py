@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S bash -c 'exec "$BASH" "$(dirname "$0")/_hermes-python" "$0" "$@"'
 """Render the release download tables into <!-- HERMES_BUILDS_TABLE -->, and
 the same rows as standalone pages in the bucket.
 
@@ -64,7 +64,7 @@ DEFAULT_REPO = "NousResearch/hermes-agent"
 #   Hermes-0.28.0-mac-arm64.dmg        (bundled)
 #   HermesBundled-0.28.0-win-x64.msix  (bundled)
 _ASSET_RE = re.compile(
-    r"^(?P<app>HermesBundled|HermesLight)-(?P<version>[^-]+(?:-canary\.\d{8}(?:\d{6})?)?)"
+    r"^(?P<app>HermesBundled|HermesLight)-(?P<version>[^-]+)"
     r"-(?P<os>mac|win|linux)-(?P<arch>x64|arm64)\.(?P<ext>dmg|msix|AppImage)$"
 )
 
@@ -176,19 +176,19 @@ def filter_names_for_version(names: list[str], version: str) -> list[str]:
 # A row needs a unique receipt-listed artifact and its uploaded object.
 _COMMIT_EXPECTED = [
     ("Windows x64 (MSIX)", "win32-x64",
-     r"^HermesBundled-[^-]+(?:-canary\.\d+)?-win-x64\.msix$"),
+     r"^HermesBundled-[^-]+-win-x64\.msix$"),
     ("Windows ARM64 (MSIX)", "win32-arm64",
-     r"^HermesBundled-[^-]+(?:-canary\.\d+)?-win-arm64\.msix$"),
+     r"^HermesBundled-[^-]+-win-arm64\.msix$"),
     ("Windows universal bundle (MSIXBUNDLE)", "windows-universal",
-     r"^HermesBundled-[^-]+(?:-canary\.\d+)?-win\.msixbundle$"),
+     r"^HermesBundled-[^-]+-win\.msixbundle$"),
     ("macOS Apple Silicon (DMG)", "darwin-arm64",
-     r"^HermesBundled-[^-]+(?:-canary\.\d+)?-mac-arm64\.dmg$"),
+     r"^HermesBundled-[^-]+-mac-arm64\.dmg$"),
     ("macOS Intel (DMG)", "darwin-x64",
-     r"^HermesBundled-[^-]+(?:-canary\.\d+)?-mac-x64\.dmg$"),
+     r"^HermesBundled-[^-]+-mac-x64\.dmg$"),
     ("macOS Apple Silicon (ZIP)", "darwin-arm64",
-     r"^HermesBundled-[^-]+(?:-canary\.\d+)?-mac-arm64\.zip$"),
+     r"^HermesBundled-[^-]+-mac-arm64\.zip$"),
     ("macOS Intel (ZIP)", "darwin-x64",
-     r"^HermesBundled-[^-]+(?:-canary\.\d+)?-mac-x64\.zip$"),
+     r"^HermesBundled-[^-]+-mac-x64\.zip$"),
     ("Termux aarch64 (.deb)", "termux", r"^.*\.deb$"),
 ]
 
@@ -488,6 +488,13 @@ def supersedes(existing_page: str | None, tag: str) -> bool:
     recorded = recorded_build(existing_page)
     if not recorded:
         return True
+    from hermes_cli.update_channel import canary_timestamp, is_canary_tag
+    if is_canary_tag(recorded) != is_canary_tag(tag):
+        return False
+    if is_canary_tag(tag):
+        recorded_stamp = canary_timestamp(recorded)
+        tag_stamp = canary_timestamp(tag)
+        return recorded_stamp is not None and tag_stamp is not None and recorded_stamp <= tag_stamp
     try:
         return semver.compare(recorded.lstrip("v"), tag.lstrip("v")) <= 0
     except ValueError:

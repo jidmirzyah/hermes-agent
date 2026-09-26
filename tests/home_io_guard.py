@@ -18,6 +18,12 @@ _INTERPRETER_PREFIXES = tuple({
     # whose site-packages sits under the (real) Hermes home; third-party imports from it are the
     # interpreter's installation, not Hermes state.
     Path(p).resolve() for p in sys.path if p and Path(p).name in ("site-packages", "dist-packages")
+} | {
+    # The default install checks the repo out INSIDE the home (install.sh:
+    # INSTALL_DIR=$HERMES_HOME/hermes-agent). Reading test data, sources for tracebacks, or the
+    # checkout's own .venv is not Hermes state; without this every run from a default install
+    # trips on its first traceback.
+    Path(__file__).resolve().parent.parent,
 })
 
 

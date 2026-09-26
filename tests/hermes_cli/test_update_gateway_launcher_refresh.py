@@ -27,11 +27,9 @@ import pytest
 
 import hermes_cli.gateway_windows as gateway_windows
 
-
 # ---------------------------------------------------------------------------
 # _resolve_detached_python: legacy pythonw normalization
 # ---------------------------------------------------------------------------
-
 
 def _make_venv(tmp_path: Path, *, with_console_python: bool) -> tuple[Path, Path]:
     scripts = tmp_path / "venv" / "Scripts"
@@ -43,7 +41,6 @@ def _make_venv(tmp_path: Path, *, with_console_python: bool) -> tuple[Path, Path
         python.write_text("", encoding="utf-8")
     return pythonw, python
 
-
 def test_resolve_detached_python_swaps_legacy_pythonw_for_console_sibling(tmp_path):
     pythonw, python = _make_venv(tmp_path, with_console_python=True)
 
@@ -52,9 +49,6 @@ def test_resolve_detached_python_swaps_legacy_pythonw_for_console_sibling(tmp_pa
     assert exe == str(python)
     assert venv_dir == tmp_path / "venv"
     assert extra == []
-
-
-
 
 @pytest.mark.platforms("windows")
 def test_restart_spec_normalizes_legacy_pythonw_argv(tmp_path):
@@ -79,9 +73,6 @@ def test_restart_spec_normalizes_legacy_pythonw_argv(tmp_path):
     assert cwd == str(tmp_path)
     assert env["VIRTUAL_ENV"] == str(tmp_path / "venv")
 
-
 # ---------------------------------------------------------------------------
 # _refresh_windows_gateway_launchers: hermes update regenerates launchers
 # ---------------------------------------------------------------------------
-
-

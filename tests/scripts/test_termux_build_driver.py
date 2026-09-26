@@ -197,7 +197,7 @@ def test_builder_image_identity_covers_all_inputs(tmp_path, changed_input):
     # Only inspect an already-published image; any build/push call is a failure.
     command = 'docker() { [[ "$1 $2" == "manifest inspect" ]]; }; export -f docker; bash "$1"'
     env = {**os.environ, "PATH": f"{tools}{os.pathsep}{os.environ['PATH']}",
-           "GITHUB_REPOSITORY_OWNER": "fixture"}
+           "GITHUB_REPOSITORY_OWNER": "FiXtUrE"}
 
     def image():
         result = subprocess.run(["bash", "-c", command, "fixture", str(scripts / "build_builder_image.sh")],
@@ -206,6 +206,7 @@ def test_builder_image_identity_covers_all_inputs(tmp_path, changed_input):
         return result.stdout.splitlines()[-1]
 
     original = image()
+    assert original.startswith("ghcr.io/fixture/hermes-termux-builder:")
     assert image() == original
     changed = scripts / "termux-builder.Dockerfile" if changed_input == "Dockerfile" else repo / "pm/lock.json"
     before = changed.read_bytes()

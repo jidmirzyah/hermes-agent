@@ -138,7 +138,7 @@ For an admitted source checkout, `hermes update` runs these phases:
 3. **Post-pull syntax validation + auto-rollback** — after the pull, Hermes compiles the nine critical files every `hermes` invocation imports at startup. If any fails to parse (e.g. an orphan merge-conflict marker, an accidentally truncated file), Hermes runs `git reset --hard <pre-pull-sha>` to roll the install back so your shell stays bootable. Re-run `hermes update` once the upstream fix lands.
 4. **Dependency preparation** — PM provisions required tools and prepares a complete Python environment from the new lock, existing extras, and enabled plugin requirements. It validates that environment before publishing its selection.
 5. **Config migration** — detects new config options added since your version and prompts you to set them
-6. **Desktop rebuild (stage-and-swap)** — if the Hermes Desktop app was built from this checkout, it is rebuilt so the GUI matches the new code. The rebuild packs into a temporary staging directory next to `apps/desktop/release/`, verifies the staged app, and only then renames it over the previous build (on Windows a real-time scanner briefly holding `release/win-unpacked` is ridden out with a few short retries). A rebuild that fails at any point — corrupt Electron download, missing dependency, disk full — leaves the previous app untouched and launchable; the update reports `⚠ Update partially complete` and `hermes desktop` retries the rebuild. On macOS the rebuilt bundle is then copied (with `ditto`, signature intact) over a stale `/Applications/Hermes.app` or `~/Applications/Hermes.app`, so the copy Finder and the Dock launch matches the backend; an installed copy that is currently running is left alone and the update tells you to quit it and run `hermes update` again.
+6. **Desktop rebuild (stage-and-swap)** — if the Hermes Desktop app was built from this checkout, it is rebuilt so the GUI matches the new code. The rebuild packs into a temporary staging directory next to `apps/desktop/release/`, verifies the staged app, and only then renames it over the previous build (on Windows a real-time scanner briefly holding `release/win-unpacked` is ridden out with a few short retries). A rebuild that fails at any point — corrupt Electron download, missing dependency, disk full — leaves the previous app untouched and launchable; the update fails at that step, and `hermes desktop --build-only --force-build` or the next `hermes update` retries the rebuild. On macOS the rebuilt bundle is then copied (with `ditto`, signature intact) over a stale `/Applications/Hermes.app` or `~/Applications/Hermes.app`, so the copy Finder and the Dock launch matches the backend; an installed copy that is currently running is left alone and the update tells you to quit it and run `hermes update` again.
 7. **Gateway auto-restart**: running gateways are refreshed after the update completes. Service-managed gateways (systemd on Linux, launchd on macOS) restart through the service manager. Manual gateways are relaunched when Hermes can map their PID to a profile. Manually launched `hermes serve` / `hermes dashboard` backends are different: the updater leaves them running and asks their owner to restart them. See [Manual backend restart reminders](#manual-backend-restart-reminders). Backends owned by a running Desktop app remain the app's responsibility.
 8. **Multiplex migration (multi-profile installs)** — once the fleet is verified on the new code, an install with two or more profiles that still run **one gateway per profile** is folded into a single multiplexed default gateway when nothing blocks it (same as `hermes gateway migrate --multiplex --yes`); if a blocker exists (a bot token shared by two profiles, a secondary profile binding a port with no `/p/<profile>/` ingress) the update prints the blockers with their fixes and changes nothing. Single-profile installs are never touched. See [Migrating from per-profile gateways](../user-guide/multi-profile-gateways.md#migrating-from-per-profile-gateways).
 
@@ -379,6 +379,30 @@ format. Preserve the current data before attempting a restore.
 
 Package-owned installations use their package manager's rollback or reinstall
 procedure. Do not run Git or pip inside a signed app or an immutable image.
+
+### Python 3.14 and older interpreters
+
+Hermes runs only on **Python 3.14**. `pyproject.toml` still declares
+`requires-python = ">=3.11,<3.15"`, but every runtime dependency carries a
+`python_version >= '3.14'` marker. The wider range exists for one reason: a
+source install whose venv predates the PM migration (Python 3.11–3.13) must be
+able to check out the new code and run `hermes update` once more. That update
+hands off to a fresh completion process, PM provisions the pinned 3.14
+interpreter from `pm/lock.json`, builds the dependency environment on it, and
+repoints the launchers. After that the old interpreter is no longer used.
+
+What this means outside `hermes update`:
+
+- `pip install .`, `uv pip install .`, `pip install -e .`, or a Homebrew/PyPI
+  package built on Python 3.11–3.13 installs `hermes-agent` with **no
+  dependencies** and the package does not import. These install methods are
+  [unsupported](./platform-support.md#unsupported); use the source installer or
+  a packaged build.
+- A Nix build outside the repo flake sees the same marker-gated dependency set
+  and needs a 3.14 interpreter.
+- A `hermes` launcher that still points at a pre-migration venv should be
+  repaired with `hermes update` (or `python -m pm.cli install` from the
+  checkout), not by reinstalling into the old venv.
 
 ### Image-managed installs (Docker): the provenance marker
 

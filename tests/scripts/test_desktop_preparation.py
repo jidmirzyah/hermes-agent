@@ -29,6 +29,40 @@ def _project(tmp_path: Path) -> tuple[Path, str]:
     return source, commit
 
 
+def test_stable_build_accepts_the_admitted_commit_before_the_final_tag_exists(tmp_path, monkeypatch):
+    from scripts.bundles.desktop_inputs import identity_environment
+    from scripts.bundles.desktop_prepare import BuildRequest
+
+    source, commit = _project(tmp_path)
+    subprocess.run([
+        "git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test",
+        "-c", "tag.gpgSign=false", "tag", "-a", "v1.2.4-rc", "-m", "claim",
+    ], cwd=source, check=True, env={**__import__("os").environ,
+                                  "GIT_COMMITTER_DATE": "2026-08-29T01:02:03Z"})
+    monkeypatch.setenv("RELEASE_CLAIM_TAG", "v1.2.4-rc")
+    claim_object = subprocess.check_output(
+        ["git", "rev-parse", "v1.2.4-rc"], cwd=source, text=True,
+    ).strip()
+    monkeypatch.setenv("RELEASE_CLAIM_OBJECT", claim_object)
+    request = BuildRequest.create(
+        source, tag="v1.2.4", commit=None, release_commit=commit, variant="bundled",
+        work=tmp_path / "work", cache=tmp_path / "cache", bundle_env={},
+    )
+
+    assert request.commit == commit
+    assert request.version == "1.2.4"
+    assert request.release_epoch == 1787965323
+    env = identity_environment(request, "bundled", {"HERMES_RELEASE_EPOCH": "1"})
+    assert env["HERMES_RELEASE_EPOCH"] == "1787965323"
+
+    monkeypatch.setenv("RELEASE_CLAIM_OBJECT", "f" * 40)
+    with pytest.raises(ValueError, match="exact claim tag object"):
+        BuildRequest.create(
+            source, tag="v1.2.4", commit=None, release_commit=commit, variant="bundled",
+            work=tmp_path / "wrong-work", cache=tmp_path / "wrong-cache", bundle_env={},
+        )
+
+
 def test_prepared_input_roundtrip_rejects_mutation_and_foreign_source(tmp_path):
     from scripts.bundles.desktop_prepare import BuildRequest, PreparedDesktop
 
@@ -115,7 +149,7 @@ def test_source_admission_rejects_dirty_checkout_and_invalid_store_before_writes
     source, commit = _project(tmp_path)
     work = tmp_path / "work"
     cache = tmp_path / "cache"
-    for tag, selected in [(None, commit), ("v1.2.0-canary.20260911120000", None)]:
+    for tag, selected in [(None, commit), ("v1.2.0+canary.20260911T120000Z", None)]:
         with pytest.raises(ValueError, match="Store.*stable"):
             BuildRequest.create(source, tag=tag, commit=selected, variant="store", work=work, cache=cache, bundle_env={})
     (source / "package.json").write_text("{}", encoding="utf-8")

@@ -58,6 +58,18 @@ STEWARD_UPDATE_MESSAGES = {
     ),
 }
 
+# A git checkout on a Termux host is not ours to update either: the lock
+# pins a bionic CPython with no Android wheels, so a source sync would
+# build sdists on the phone. The APT package is the only supported shape.
+SOURCE_ON_TERMUX_UPDATE_MESSAGE = (
+    "✗ This Hermes is a source checkout running under Termux.\n"
+    "\n"
+    "Source installs are not supported on Termux — `hermes update` would\n"
+    "build Python packages on the device. Switch to the APT package:\n"
+    "  pkg install hermes-agent"
+)
+SOURCE_ON_TERMUX_UPDATE_COMMAND = "pkg install hermes-agent"
+
 
 _STEWARD_UPDATE_FALLBACK = (
     "✗ This Hermes install is managed by {steward}.\n"
@@ -165,6 +177,23 @@ def steward_uninstall_message(steward: str, platform: "str | None" = None) -> st
     return _STEWARD_UNINSTALL_FALLBACK.format(steward=steward)
 
 
+def install_stamp_path(project_root: Path) -> Path:
+    """THE stamp location for ``project_root``, shared by every stamp reader.
+
+    Beside the code in checkouts, Docker and desktop payloads. A Nix package
+    bakes the stamp outside the store's package dir and its wrapper carries
+    ``HERMES_INSTALL_ROOT`` for the executing tree only — so the executing
+    tree resolves through pm.paths.install_root, any other tree is taken
+    literally. Two resolvers here once classified Nix as "unknown".
+    """
+    from pm.paths import install_root, repo_root
+
+    root = Path(project_root)
+    if root.resolve() == repo_root():
+        root = install_root()
+    return root / BUILD_INFO_NAME
+
+
 def read_install_stamp(project_root: Path) -> dict:
     """The build stamp of ``project_root``, or ``{}``.
 
@@ -173,9 +202,7 @@ def read_install_stamp(project_root: Path) -> dict:
     refuses (see :func:`sealed_steward`), so garbage degrades safely.
     """
     try:
-        data = json.loads(
-            (Path(project_root) / BUILD_INFO_NAME).read_text(encoding="utf-8-sig")
-        )
+        data = json.loads(install_stamp_path(project_root).read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         return {}
     return data if isinstance(data, dict) else {}

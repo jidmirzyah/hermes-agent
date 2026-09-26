@@ -21,6 +21,12 @@ def source_channel(name, repository, branch="main"):
             "delivery": {"kind": "source-branch", "branch": branch}}
 
 
+class Installation(tuple):
+    """The 8-tuple every test unpacks, plus the GitHub probe's request/response hooks."""
+    authorizations: list
+    response_headers: dict
+
+
 @pytest.fixture
 def installation(tmp_path, monkeypatch):
     from hermes_cli import source_releases
@@ -52,14 +58,23 @@ def installation(tmp_path, monkeypatch):
     responses = {MAIN_CHANNEL: (200, lambda: source_channel(
         "main", source_releases.source_repository(["git"], root)))}
     requests = []
+    # Authorization header of every api.github.com call, in request order (None when anonymous).
+    authorizations = []
+    # Optional extra response headers per path (rate-limit headers for the failure-copy tests).
+    response_headers = {}
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             requests.append(self.path)
-            code, body = responses.get(self.path, (404, {}))
+            authorizations.append(self.headers.get("Authorization"))
+            entry = responses.get(self.path, (404, {}))
+            # A callable entry decides per request (it sees the handler, hence the headers).
+            code, body = entry(self) if callable(entry) else entry
             if callable(body):
                 body = body()
             self.send_response(code)
+            for name, value in response_headers.get(self.path, {}).items():
+                self.send_header(name, value)
             self.end_headers()
             self.wfile.write((body if isinstance(body, str) else json.dumps(body)).encode())
 
@@ -75,10 +90,21 @@ def installation(tmp_path, monkeypatch):
     def local(request, *args, **kwargs):
         url = urlsplit(request.full_url)
         assert url.hostname in {"api.github.com", "hermes-assets.nousresearch.com"}
-        return original(f"http://127.0.0.1:{server.server_port}{url.path}" + (f"?{url.query}" if url.query else ""), *args, **kwargs)
+        rewritten = urllib.request.Request(
+            f"http://127.0.0.1:{server.server_port}{url.path}" + (f"?{url.query}" if url.query else ""),
+            headers=dict(request.header_items()))
+        return original(rewritten, *args, **kwargs)
 
     monkeypatch.setattr(urllib.request, "urlopen", local)
-    yield root, linked, home, base, head, responses, requests, git
+    # The credential ladder must not read this machine's gh login or env.
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    from hermes_cli import github_api
+    monkeypatch.setattr(github_api, "_gh_cli_token", lambda: None)
+    fixture = Installation((root, linked, home, base, head, responses, requests, git))
+    fixture.authorizations = authorizations
+    fixture.response_headers = response_headers
+    yield fixture
     server.shutdown()
     server.server_close()
     thread.join()
@@ -375,3 +401,41 @@ def test_official_ssh_healing_uses_public_https_without_retargeting_forks(instal
         assert status["behind"] == 0
     else:
         assert status["error"] == "fetch-failed"
+
+
+def github_authorizations(installation, path):
+    """Authorization header of each api.github.com call to ``path``, in order."""
+    return [auth for seen, auth in zip(installation[6], installation.authorizations) if seen == path]
+
+
+def test_github_calls_carry_the_configured_token_and_retry_anonymously_on_401(installation, monkeypatch):
+    from hermes_cli.source_check import check_for_updates
+    root, linked, home, base, head, responses, requests, git = installation
+    url = "/repos/fixture/fork/commits/main"
+    responses[url] = (200, head)
+    monkeypatch.setenv("GITHUB_TOKEN", "  ghp_fixture  ")
+    assert check_for_updates(install_root=root, home=home)["behind"] == 0
+    assert github_authorizations(installation, url) == ["Bearer ghp_fixture"]
+
+    # A rejected token is not a failed check: the same request is retried without it.
+    responses[url] = lambda handler: (401, {}) if handler.headers.get("Authorization") else (200, head)
+    assert check_for_updates(install_root=root, home=home, force=True)["behind"] == 0
+    assert github_authorizations(installation, url)[-2:] == ["Bearer ghp_fixture", None]
+
+
+def test_branch_tip_failure_names_the_cause(installation):
+    from hermes_cli.source_check import check_for_updates
+    root, linked, home, base, head, responses, requests, git = installation
+    url = "/repos/fixture/fork/commits/main"
+    responses[url] = (403, {})
+    installation.response_headers[url] = {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "4102444800"}
+    status = check_for_updates(install_root=root, home=home)
+    assert status["error"] == "fetch-failed"
+    assert "rate limit" in status["message"] and "GITHUB_TOKEN" in status["message"]
+    assert github_authorizations(installation, url) == [None]
+
+    installation.response_headers.pop(url)
+    responses[url] = (503, {})
+    status = check_for_updates(install_root=root, home=home, force=True)
+    assert status["error"] == "fetch-failed"
+    assert "HTTP 503" in status["message"]

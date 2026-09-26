@@ -54,7 +54,6 @@ _requires_gnu_sort = pytest.mark.skipif(
         (["rg", "--pre-glob", "--pre", "needle"], "needle\n", 0, "needle\n"),
     ],
 )
-@pytest.mark.platforms("linux")
 def test_real_read_tool_binaries_confirm_option_ownership(
     argv, stdin, expected_returncode, expected_output
 ):

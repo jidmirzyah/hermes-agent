@@ -2,11 +2,17 @@ name: Termux verification
 
 on:
   push:
-    branches: [ethie/cli-bundles]
+    branches: [main]
     paths:
       - 'scripts/termux/**'
       - 'pm/**'
-      - 'tests/test_termux*'
+      - 'tests/scripts/test_termux*'
+      - '.github/workflows/termux-verify.yml'
+  pull_request:
+    paths:
+      - 'scripts/termux/**'
+      - 'pm/**'
+      - 'tests/scripts/test_termux*'
       - '.github/workflows/termux-verify.yml'
   workflow_dispatch:
   workflow_call:
@@ -45,7 +51,8 @@ jobs:
           sudo apt-get install -y patchelf
       - uses: ./.github/actions/setup-pm
         with:
-          extras: '["dev"]'
+          extras: '[]'
+          test-environment: 'true'
           cache-python: false
       - name: Run the native linker and wheel contracts
         run: |
@@ -81,9 +88,32 @@ jobs:
           npm run check --workspace ui-tui
           npm run build --workspace ui-tui
 
+  # A job-level `if` cannot read `secrets`, so the gate is a job that exports
+  # whether the release-signing environment is provisioned. Without R2 the
+  # bionic verification below cannot fetch its pinned inputs; skipping it
+  # keeps a fork or an unprovisioned main green instead of red.
+  r2-provisioned:
+    name: Detect R2 credentials
+    if: github.event_name != 'pull_request' && github.event_name != 'pull_request_target'
+    runs-on: ubuntu-24.04
+    environment: release-signing
+    timeout-minutes: 5
+    outputs:
+      configured: ${{ steps.check.outputs.configured }}
+    steps:
+      - id: check
+        env:
+          CLOUDFLARE_R2_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_R2_ACCOUNT_ID }}
+        run: |
+          echo "configured=${CLOUDFLARE_R2_ACCOUNT_ID:+true}" >> "$GITHUB_OUTPUT"
+          [ -n "$CLOUDFLARE_R2_ACCOUNT_ID" ] || echo "::notice::CLOUDFLARE_R2_* secrets are not configured; the bionic runtime verification is skipped."
+
   native-runtime:
     name: Verify bionic runtime tools
-    if: github.event_name != 'pull_request' && github.event_name != 'pull_request_target'
+    needs: r2-provisioned
+    # A stable-release candidate run still fails loudly on missing R2: the
+    # release must not pass on a skipped verification.
+    if: needs.r2-provisioned.outputs.configured == 'true' || inputs.release == true
     runs-on: ubuntu-24.04-arm
     environment: release-signing
     timeout-minutes: 45

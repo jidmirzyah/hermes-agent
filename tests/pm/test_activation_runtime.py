@@ -32,7 +32,7 @@ def _sync_checkout(tmp_path: Path):
         with (root / "calls.jsonl").open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(record) + "\\n")
         assert all(value is None for value in record["python_env"].values()), record
-        assert sys.argv[1:] == ["runtime-only"], record
+        assert sys.argv[1:] == ["runtime-only", "--trust-recorded", "--test-environment"], record
         print("setup progress")
         if (root / "fail").exists():
             sys.exit(42)
@@ -60,10 +60,12 @@ def _sync_checkout(tmp_path: Path):
         binary.parent.mkdir(parents=True)
         binary.write_text(f"#!/bin/sh\nexec {shlex.quote(str(python))} \"$@\"\n", encoding="utf-8")
         binary.chmod(0o755)
+    # Activation's contract with setup is the runtime-only switch; setup
+    # itself maps that to PM's --trust-recorded install.
     (root / "setup-hermes.sh").write_text(
-        'test "$#" = 1 && test "$1" = --runtime-only || exit 2\n'
+        'test "$#" = 2 && test "$1" = --runtime-only && test "$2" = --test-environment || exit 2\n'
         f'cd {shlex.quote(str(root))} || exit 3\n'
-        f'exec {shlex.quote(str(python))} sync.py runtime-only\n', encoding="utf-8",
+        f'exec {shlex.quote(str(python))} sync.py runtime-only --trust-recorded --test-environment\n', encoding="utf-8",
     )
     (root / "setup-hermes.ps1").write_text(
         "param([switch]$RuntimeOnly)\n"
@@ -73,14 +75,14 @@ def _sync_checkout(tmp_path: Path):
         "argv=[Environment]::GetCommandLineArgs()}\n"
         "$record | ConvertTo-Json -Compress | Add-Content -LiteralPath \"$PSScriptRoot\\ps-calls.jsonl\"\n"
         "Set-Location -LiteralPath $PSScriptRoot\n"
-        f"& '{python}' sync.py runtime-only\nexit $LASTEXITCODE\n", encoding="utf-8",
+        f"& '{python}' sync.py runtime-only --trust-recorded --test-environment\nexit $LASTEXITCODE\n", encoding="utf-8",
     )
     return root, env
 
 
 def _assert_syncs(root: Path):
     calls = [json.loads(line) for line in (root / "calls.jsonl").read_text(encoding="utf-8").splitlines()]
-    assert calls == [{"argv": ["runtime-only"], "python_env": {
+    assert calls == [{"argv": ["runtime-only", "--trust-recorded", "--test-environment"], "python_env": {
         "PYTHONHOME": None, "PYTHONPATH": None, "VIRTUAL_ENV": None,
     }}] * 3
     assert (root / "builds").read_text(encoding="utf-8").splitlines() == ["first", "second"]

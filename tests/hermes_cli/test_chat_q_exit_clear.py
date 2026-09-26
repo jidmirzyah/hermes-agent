@@ -142,7 +142,7 @@ def _fallback_cli():
     return SimpleNamespace(), ExplodingStdout()
 
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX `clear` path; the nt path has its own test")
+@pytest.mark.platforms("posix")  # POSIX `clear` path; the nt path has its own test
 def test_clear_fallback_spawns_no_shell(monkeypatch):
     """#116904: fallback used os.system() — a shell spawn (console flash on Windows,
     silent no-op without `clear`). It must now be an argv subprocess.run of the
@@ -185,7 +185,7 @@ def test_clear_fallback_windows_runs_cls_with_hidden_console(monkeypatch):
     assert calls == [(["cmd", "/c", "cls"], {"stdin": sp.DEVNULL, "creationflags": sp.CREATE_NO_WINDOW, "check": False})]
 
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX `clear` lookup")
+@pytest.mark.platforms("posix")  # POSIX `clear` lookup
 def test_clear_fallback_skips_spawn_when_no_clear(monkeypatch):
     """POSIX without `clear` on PATH: skip the spawn entirely instead of letting a
     shell swallow the failure (#116904's silent no-op)."""

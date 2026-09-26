@@ -14,7 +14,7 @@ import pm.paths as paths
 import pm.registry as registry
 from pm.lock import Facts, Lockfile
 from pm.package import InstallError, compose_env
-from pm.packages import BinaryPackage
+from pm.packages import BinaryPackage, Venv
 from pm.store import Store, current_target
 from tests.pm._fixtures import make_tar, served as served
 
@@ -71,9 +71,12 @@ def pm_env(tmp_path, served, monkeypatch):
     ensure_mod = importlib.import_module("pm.install")
     monkeypatch.setattr(ensure_mod, "lazy_installs_allowed", lambda: True)
 
+    # Restore the real registry wholesale on teardown. Tests must not
+    # monkeypatch.setitem into the cleared dict: that undo runs after this
+    # restore and deletes the built-in entry from the live registry.
     saved = dict(registry._packages)
     registry._packages.clear()
-    for cls in (FakeTool, DepTool, TopTool, MultiTool):
+    for cls in (FakeTool, DepTool, TopTool, MultiTool, Venv):
         registry._packages[cls.name] = cls()
     FakeTool.base_url = base_url
     MultiTool.base_url = base_url
@@ -182,6 +185,44 @@ def test_deps_compose_dependents_win(pm_env):
     assert path.index("toptool-1.0") < path.index("deptool-1.0")
 
 
+def test_activation_trusts_a_recorded_entry_a_deliberate_install_repairs(pm_env, monkeypatch):
+    """Shell activation skips the byte re-hash; a deliberate install keeps it.
+
+    Hashing every published tree costs seconds per shell, so activation trusts
+    the digest the install recorded. That trust must not leak: the same
+    corruption, installed without the flag, is still detected and rewritten.
+    """
+    import importlib
+    from pm.cli import _install_names
+
+    ensure = importlib.import_module("pm.install")
+    lockfile_path, runtime, docroot, _ = pm_env
+    _, digest = make_tar(docroot, "faketool-1.0.tar.gz", {"bin/faketool": "good"})
+    _pin(lockfile_path, "faketool", "1.0", digest)
+    assert _install_names(["faketool"]) == 0
+
+    fact = Facts(runtime / "facts.json").get("faketool")
+    assert fact is not None
+    binary = runtime / fact["entry"] / "bin/faketool"
+    binary.write_text("corrupt", encoding="utf-8")
+
+    checked = []
+    original = ensure._entry_verified
+
+    def verify(package, fact, store, target):
+        checked.append(package.name)
+        return original(package, fact, store, target)
+
+    monkeypatch.setattr(ensure, "_entry_verified", verify)
+    assert _install_names(["faketool"], verify=False) == 0
+    assert checked == []
+    assert binary.read_text(encoding="utf-8") == "corrupt"
+
+    assert _install_names(["faketool"]) == 0
+    assert "faketool" in checked
+    assert binary.read_text(encoding="utf-8") == "good"
+
+
 def test_warm_install_verifies_shared_dependencies_once_under_lock(pm_env, monkeypatch):
     import importlib
     import os
@@ -243,7 +284,6 @@ def test_install_forgets_verification_when_state_operation_releases_lock(pm_env,
     import os
     from hermes_cli.runtime_state import _lock
     from pm.cli import _install_names
-    from pm.packages import Venv
 
     ensure = importlib.import_module("pm.install")
     lockfile_path, runtime, docroot, _ = pm_env
@@ -266,7 +306,6 @@ def test_install_forgets_verification_when_state_operation_releases_lock(pm_env,
             os.close(fd)
 
     monkeypatch.setattr(ensure, "sync_venv", sync)
-    monkeypatch.setitem(registry._packages, "venv", Venv())
     assert _install_names(["deptool", "venv", "toptool"]) == 0
     assert binary.read_text(encoding="utf-8") == "deptool"
 
@@ -400,8 +439,13 @@ def test_gc_keeps_used_removes_orphans(pm_env):
     ensure("faketool", base_env={})
     orphan = runtime / "orphan-9.9-nowhere"
     orphan.mkdir()
+    # A killed installer's scratch dir; its restore point must survive gc.
+    (runtime / ".staging-abandoned" / "tree").mkdir(parents=True)
+    (runtime / ".previous-faketool-1.0").mkdir()
     cmd_gc(None)
     assert not orphan.exists()
+    assert not (runtime / ".staging-abandoned").exists()
+    assert (runtime / ".previous-faketool-1.0").is_dir()
     assert any(p.name.startswith("faketool-1.0") for p in runtime.iterdir())
 
 

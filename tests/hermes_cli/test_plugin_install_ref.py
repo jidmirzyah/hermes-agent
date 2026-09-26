@@ -14,6 +14,8 @@ from tests.hermes_cli.plugin_worker_support import (
 )
 import hermes_yaml as yaml
 
+from hermes_cli.subcommands.plugins import build_plugins_parser
+
 
 @pytest.fixture(autouse=True)
 def _offline_pm(plugin_world):
@@ -421,3 +423,40 @@ def test_checkout_that_lands_on_another_commit_is_still_rejected(monkeypatch, tm
 
     with pytest.raises(PluginOperationError, match="does not match requested"):
         _checkout_exact_revision(clone, "git", tag_object_sha)
+
+
+@pytest.mark.parametrize("update_url", ["http://feed.example/f.yml", "file:///etc/feed.yml", "ftp://feed.example/f.yml"])
+def test_install_refuses_a_non_https_update_url(monkeypatch, tmp_path, update_url):
+    """The saved update_url is fetched unattended by the gateway and picks which origin commit
+    gets installed; anything a network peer can rewrite (http/ftp) or a local path must not
+    become the feed. Refused before any install state exists."""
+    from hermes_cli.plugins_cmd import PluginOperationError, _install_plugin_core
+
+    repo, _old, _new = _plugin_repo(tmp_path)
+    (repo / "plugin.yaml").write_text(
+        yaml.safe_dump({"name": "demo", "version": "1.0.0", "update_url": update_url}), encoding="utf-8")
+    _commit(repo, "feed", "feed")
+    home = tmp_path / "home"
+    monkeypatch.setenv("HERMES_HOME", str(home))
+
+    with pytest.raises(PluginOperationError, match="https://"):
+        _install_plugin_core(repo.as_uri(), force=False)
+
+    assert not (home / "plugins" / "demo").exists()
+    assert not (home / "plugins" / ".install-metadata.json").exists()
+
+
+def test_install_saves_an_https_update_url_tag(monkeypatch, tmp_path):
+    from hermes_cli.plugins_cmd import _install_plugin_core
+
+    repo, _old, sha = _plugin_repo(tmp_path)
+    (repo / "plugin.yaml").write_text(
+        yaml.safe_dump({"name": "demo", "version": "1.0.0", "update_url": " https://feed.example/f.yml "}),
+        encoding="utf-8")
+    sha = _commit(repo, "feed", "feed")
+    home = tmp_path / "home"
+    monkeypatch.setenv("HERMES_HOME", str(home))
+
+    _install_plugin_core(repo.as_uri(), force=False)
+
+    assert _metadata(home)["demo"]["update_url"] == "https://feed.example/f.yml"

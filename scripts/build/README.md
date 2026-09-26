@@ -288,8 +288,10 @@ save. The packaged `uv-cache/` is a copy, not the writable build cache.
 ### Windows ARM64 build prerequisites
 
 `scripts/windows-build-deps.ps1` owns Visual Studio ARM64, Clang, Rust, and
-static OpenSSL preparation. Source setup calls its initializer. Native build
-adapters use `scripts/build/windows-deps.ps1` through `windows_deps.py`, before
+static OpenSSL preparation. PM calls it through `pm/native_build.py` before any
+dependency build from a checkout, so every source install path gets it. Native
+build adapters use the same `scripts/build/windows-deps.ps1` entrypoint through
+`pm.native_build`, before
 isolating HOME or compiling Node/Python dependencies. CI uses the same script
 through `setup-windows-build-deps`, with an OpenSSL cache outside the product.
 The product compilers and assembler do not install these prerequisites.

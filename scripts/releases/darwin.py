@@ -5,8 +5,8 @@ import re
 from typing import Any, Callable
 
 from . import r2 as r2_module
-from .semver import compare, is_valid_version
-from hermes_cli.update_channel import is_canary_tag
+from .semver import compare, is_release_version
+from hermes_cli.update_channel import canary_timestamp, is_canary_tag
 
 ARCHES = ("arm64", "x64")
 _HASH_PATTERN = re.compile(r"^[A-Za-z0-9+/]{86}==$")
@@ -30,7 +30,7 @@ def parse_mac_feed(text: str) -> dict[str, Any]:
     feed = yaml.safe_load(text)
     if (
         not isinstance(feed, dict)
-        or not is_valid_version(str(feed.get("version", "")))
+        or not is_release_version(str(feed.get("version", "")))
         or not isinstance(feed.get("files"), list)
         or not feed["files"]
     ):
@@ -81,7 +81,7 @@ def merge_mac_feeds(legs: dict[str, str], tag: str, light: bool = False) -> dict
     import hermes_yaml as yaml  # lazy
 
     version = tag[1:] if isinstance(tag, str) and tag.startswith("v") else ""
-    if not is_valid_version(version):
+    if not is_release_version(version):
         raise ValueError("Invalid macOS release tag")
     selection = _darwin_feed("canary" if is_canary_tag(tag) else "stable", light)
     expected = [f"{arch}-{selection['fileName']}" for arch in ARCHES]
@@ -116,6 +116,7 @@ def merge_mac_feeds(legs: dict[str, str], tag: str, light: bool = False) -> dict
         "key": f"{selection['directory']}/{selection['fileName']}",
         "text": text,
         "files": merged["files"],
+        "tag": tag,
         "version": version,
     }
 
@@ -137,7 +138,15 @@ def publish_mac_feed(
     if live:
         old_feed = parse_mac_feed(live["text"])
         next_feed = parse_mac_feed(plan["text"])
-        order = compare(plan["version"], str(old_feed["version"]))
+        old_url = str(old_feed["files"][0]["url"])
+        old_tag = old_url.split("/releases/tag/", 1)[1].split("/", 1)[0]
+        old_canary = canary_timestamp(old_tag)
+        next_canary = canary_timestamp(plan.get("tag"))
+        order = (
+            (next_canary > old_canary) - (next_canary < old_canary)
+            if next_canary is not None and old_canary is not None
+            else compare(plan["version"], str(old_feed["version"]))
+        )
         if order < 0:
             raise ValueError("Refusing to move the macOS feed backward")
         if order == 0:

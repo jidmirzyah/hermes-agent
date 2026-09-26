@@ -72,15 +72,15 @@ def test_disposable_scope_is_opt_in_and_lease_bound(monkeypatch):
     monkeypatch.setattr(r2, "credentials", lambda: ({"access_key_id": "inert", "secret_key": "inert"}, "https://r2.example", "bucket"))
     unscoped = channel_build.configured_publisher("ethernet8023/hermes-agent")
     assert unscoped.store.scope.key("releases/channels/preview.json") == "releases/channels/preview.json"
-    monkeypatch.setenv("R2_DISPOSABLE_RUN", "123-1")
+    monkeypatch.setenv("R2_DISPOSABLE_RUN", "123")
     monkeypatch.setenv("GITHUB_REPOSITORY_ID", "456")
     monkeypatch.setattr(channel_build.commit_build, "output", lambda args: "789")
     with pytest.raises(ValueError, match="another repository"):
         channel_build.configured_publisher("ethernet8023/hermes-agent")
     monkeypatch.setattr(channel_build.commit_build, "output", lambda args: "456")
     publisher = channel_build.configured_publisher("ethernet8023/hermes-agent")
-    assert publisher.store.scope.key("releases/channels/preview.json") == "ci-disposable/456/123-1/releases/channels/preview.json"
-    assert publisher.reader.base_url == "https://archive.example/ci-disposable/456/123-1"
+    assert publisher.store.scope.key("releases/channels/preview.json") == "ci-disposable/456/123/releases/channels/preview.json"
+    assert publisher.reader.base_url == "https://archive.example/ci-disposable/456/123"
 
 
 def test_release_parser_preserves_plain_oneoff_dispatch(monkeypatch):

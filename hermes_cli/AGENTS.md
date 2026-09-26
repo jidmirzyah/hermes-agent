@@ -19,9 +19,9 @@ Moved bodies late-bind cli-level names via `from cli import ...` at call time, s
 handles input + autocomplete; `KawaiiSpinner` (`agent/display.py`) animates API calls and prints
 the `┊` activity feed. `load_cli_config()` in `cli.py` merges CLI defaults + user YAML.
 
-`hermes_cli/gateway.py` is the `hermes gateway` facade (process discovery, systemd backend, command
-dispatch); topical siblings re-exported by the facade: `gateway_service_unit.py` (systemd unit
-generation/refresh), `gateway_launchd.py` (macOS LaunchAgent backend), `gateway_setup_wizard.py`
+`hermes_cli/gateway.py` is the `hermes gateway` facade (process discovery, PM-aware systemd unit
+generation/refresh, command dispatch); topical siblings re-exported by the facade include
+`gateway_launchd.py` (macOS LaunchAgent backend), `gateway_setup_wizard.py`
 (`hermes gateway setup`: `_PLATFORMS` registry, status table, per-platform prompts, service offer),
 `gateway_windows*.py`, `gateway_supervised_restart.py`, `gateway_migrate*.py`, `gateway_multiplex_*.py`,
 `gateway_enroll.py`, `gateway_command_errors.py`. Sibling bodies read facade names through `_gw()`
@@ -242,9 +242,8 @@ supervisor (control-socket `identify` answering anything but `manual`, OR the ar
 for a fresh supervised PID, never stop + foreground `run_gateway` (that stamps the CLI's PID and wedges
 every KeepAlive respawn, #110637).
 
-Service installs are a matrix, not a unit file: `gateway_service_unit.py::generate_systemd_unit(system=,
-run_as_user=)` (systemd unit generation / `systemd_unit_is_current` / `refresh_systemd_unit_if_needed` live in that
-sibling and read facade helpers late-bound through `hermes_cli.gateway`, so patch them on the facade; user unit AND `--system` unit with `User=`; an unresolvable `User=` is a blocker,
+Service installs are a matrix, not a unit file: `gateway.py::generate_systemd_unit(system=,
+run_as_user=)` (systemd unit generation / `systemd_unit_is_current` / `refresh_systemd_unit_if_needed` are PM-aware facade owners; user unit AND `--system` unit with `User=`; an unresolvable `User=` is a blocker,
 never a dir-owner fallback), `gateway_launchd.py::generate_launchd_plist` (`gui/<uid>` then `user/<uid>` domains, never a
 `~/Library/LaunchAgents` glob; the whole launchd backend — plist refresh, `launchctl` bootstrap/kickstart,
 `launchd_start/stop/restart/status`, detached-process degrade — lives in that sibling, with the domain cache

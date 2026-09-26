@@ -6,6 +6,7 @@ Prompt strings and config write order are behavior.
 
 from __future__ import annotations
 
+from pm import install_hint
 from dataclasses import dataclass, field
 
 from hermes_cli.config import clear_model_endpoint_credentials
@@ -56,7 +57,7 @@ def _azure_entra_preflight(current_entra: dict):
         _say("◐ The 'azure-identity' package is not installed yet.",
              "  The preflight requests it through PM if lazy installs are enabled.",
              "  To install explicitly, run from the Hermes environment:",
-             "    python -c \"from pm import sync_venv; sync_venv(['azure-identity'], explicit=True)\"",
+             f"    {install_hint('azure-identity')}",
              "  Then restart Hermes.")
 
     # Only the optional scope override is persisted; identity selection (tenant,

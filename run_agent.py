@@ -9,8 +9,9 @@
 # hermes_bootstrap must be the very first import (UTF-8 stdio on Windows; no-op on POSIX).
 try:
     import hermes_bootstrap  # noqa: F401
-except ModuleNotFoundError:
-    pass  # partial `hermes update` — only skips the Windows UTF-8 stdio setup
+except ModuleNotFoundError as exc:  # partial `hermes update` left the bootstrap unregistered
+    if exc.name != "hermes_bootstrap":
+        raise  # the bootstrap exists but cannot load: skipping it would skip PM activation
 
 import json
 import logging
@@ -1534,6 +1535,14 @@ def main(
     if list_tools:
         return _print_tool_listing()
 
+    # One TLS authority: trust the OS store before any outbound call (bare
+    # requests/urllib included) resolves a CA bundle — see agent/ssl_verify.py.
+    # The `hermes` CLI does this in hermes_cli.main; this console script
+    # bypasses it. Never raises.
+    from agent.ssl_verify import install_truststore
+
+    install_truststore()
+
     enabled_toolsets_list = _parse_toolset_arg(enabled_toolsets, "🎯 Enabled toolsets")
     disabled_toolsets_list = _parse_toolset_arg(disabled_toolsets, "🚫 Disabled toolsets")
     if save_trajectories:
@@ -1568,8 +1577,9 @@ def main(
 
 
 if __name__ == "__main__":
-    import fire
-    fire.Fire(main)
+    from agent.legacy_cli import main as _legacy_cli_main
+
+    raise SystemExit(_legacy_cli_main(run=main))
 
 
 # ---- BEGIN PLUGIN-COMPAT (revert-scheduled; see COMPAT_MANIFEST.md) ----

@@ -15,7 +15,7 @@ from pm.install import _facts, _lockfile, _store, ensure, stage_only
 from pm.operations import lock_project
 from pm.package import InstallError
 from pm.paths import repo_root
-from pm.registry import get_package, source_install_packages
+from pm.registry import get_package, source_install_packages, tool_roots
 from pm.store import ALL_TARGETS, current_target, hash_url
 from pm.update import Resolved, resolve_package, reuse_index_responses
 
@@ -124,7 +124,7 @@ def _live_progress(name: str):
     return report
 
 
-def _install_names(names: list[str], target: str | None = None) -> int:
+def _install_names(names: list[str], target: str | None = None, *, verify: bool = True) -> int:
     from pm.install import _install_operation
 
     failed = 0
@@ -137,7 +137,7 @@ def _install_names(names: list[str], target: str | None = None) -> int:
                     entry = stage_only(name, target)
                     print(f"✓ {name} (staged for {target}: {entry.name})")
                 else:
-                    ensure(name, explicit=True, progress=progress, _operation=operation)
+                    ensure(name, explicit=True, verify=verify, progress=progress, _operation=operation)
                     if name == "python":
                         from hermes_cli.venv_sync import publish_launchers
 
@@ -164,9 +164,47 @@ def cmd_install(args) -> int:
             return 1
     # Source-install launchers require the store interpreter, even though
     # Python remains optional when provisioning individual tools.
-    names = args.names or source_install_packages(_lockfile().names())
-    failed = _install_names(names, target=cross_target)
-    if not args.names:
+    extras = list(dict.fromkeys(getattr(args, "extra", None) or ()))
+    tools_only = bool(getattr(args, "tools_only", False))
+    trust_recorded = bool(getattr(args, "trust_recorded", False))
+    test_environment = getattr(args, "test_environment", None)
+    if test_environment is not None and (extras or cross_target or args.names or tools_only):
+        print("✗ --test-environment builds beside the default closure; it does not take names, --extra, --target, or --tools-only")
+        return 1
+    if tools_only and (extras or cross_target or args.names):
+        print("✗ --tools-only installs the tool closure and then stops; it does not take names, --extra, or --target")
+        return 1
+    if trust_recorded and (extras or cross_target or args.names):
+        print("✗ --trust-recorded installs the default closure and then stops; it does not take names, --extra, or --target")
+        return 1
+    if extras and cross_target:
+        print("✗ --extra syncs this install's venv and cannot combine with --target")
+        return 1
+    names = args.names if args.names or extras else source_install_packages(_lockfile().names())
+    # Only the whole default closure verifies everything an activated shell
+    # composes from, so only it advances the prologue's input stamps.
+    full_closure = not (args.names or tools_only or cross_target)
+    from pm.environments import activation_input_mtimes
+
+    input_mtimes = activation_input_mtimes(repo_root()) if full_closure else {}
+    # Tools before the venv. A bare `pm install` used to install tools and
+    # sync the venv in one breath, so a native build (Windows ARM64 source
+    # wheels) resolved compilers and git from the host PATH. Publish every
+    # tool first and put it on PATH; sync only after that.
+    tool_names = names if args.names else tool_roots(names)
+    failed = _install_names(tool_names, target=cross_target, verify=not trust_recorded)
+    if failed:
+        return 1
+    if not cross_target and (not args.names or tools_only):
+        from pm.install import activate
+
+        problems = activate(allow_incomplete=True)
+        if problems:
+            print(f"✗ tools not on PATH before venv sync: {'; '.join(problems)}", flush=True)
+            return 1
+    if tools_only:
+        return 0
+    if extras or not args.names:
         from pm.install import sync_venv
 
         try:
@@ -175,11 +213,29 @@ def cmd_install(args) -> int:
             # the installers' old `--extra all` did. sync_venv unions, so
             # any lazy extras already recorded survive this; it only makes
             # a fresh bootstrap match what the first update would do.
-            sync_venv(["all"], explicit=True)
-            print("✓ venv")
+            sync_venv(extras or ["all"], explicit=True)
+            print(f"✓ venv{' +' + ' +'.join(extras) if extras else ''}")
         except InstallError as e:
             print(f"✗ {e}")
             failed += 1
+    if test_environment is not None and not failed:
+        from pm import check_project_lock
+        from pm.testenv import ensure_testenv, parse_extras
+
+        # Before the input stamps: they then cover this environment too, so
+        # the shebang/run_tests.sh staleness check rebuilds it when it drifts.
+        try:
+            check_project_lock(repo_root(), explicit=True)
+            ensure_testenv(repo_root(), parse_extras(test_environment))
+            print("✓ test environment")
+        except InstallError as e:
+            print(f"✗ {e}")
+            failed += 1
+    if full_closure and not failed:
+        from pm.environments import activation_inputs_dir, record_activation_inputs
+
+        record_activation_inputs(activation_inputs_dir(repo_root()), input_mtimes, repo_root(),
+                                 test_environment=test_environment is not None)
     return 1 if failed else 0
 
 
@@ -264,7 +320,13 @@ def _gc_store(store, facts) -> tuple[int, int]:
         keep = facts.entries_in_use()
         collect_partials(partials_dir)
         for item in sorted(store.root.iterdir()):
-            if not item.is_dir() or item.name.startswith("."):
+            if not item.is_dir():
+                continue
+            # Scratch dirs are created and removed under this same lock, so any
+            # that remain belong to a killed installer. Other dot-dirs stay:
+            # .previous-* is the restore point the next install of that entry
+            # consumes, and it is only safe to drop after that verification.
+            if item.name.startswith(".") and not item.name.startswith(".staging-"):
                 continue
             if item.name in keep:
                 continue
@@ -282,9 +344,13 @@ def cmd_gc(args) -> int:
     facts = _facts() if store.root == _store().root else Facts(store.root / "facts.json")
     removed, kept = _gc_store(store, facts)
     from hermes_cli.runtime_state import collect_generations
+    from pm.environments import install_state_dir
     from pm.paths import repo_root
+    from pm.runtime import collect_runtime_generations
     generations = collect_generations(repo_root())
-    print(f"gc: removed {removed}, kept {kept}; removed {len(generations)} dependency generations")
+    runtimes = collect_runtime_generations(install_state_dir(repo_root()) / "pm-runtime")
+    print(f"gc: removed {removed}, kept {kept}; removed {len(generations)} dependency generations, "
+          f"{len(runtimes)} PM runtime generations")
     return 0
 
 
@@ -533,6 +599,16 @@ def main(argv=None) -> int:
 
     p = sub.add_parser("install", help="install packages (default: all required)")
     p.add_argument("names", nargs="*")
+    p.add_argument("--extra", action="append", default=[], metavar="NAME",
+                   help="enable a declared dependency extra in the venv (repeatable)")
+    p.add_argument("--tools-only", action="store_true",
+                   help="install the tool closure, put it on PATH, and stop before the venv sync")
+    p.add_argument("--trust-recorded", action="store_true",
+                   help="trust the recorded tool digest instead of re-hashing every entry. "
+                        "shell activation only. a deliberate install re-checks the bytes")
+    p.add_argument("--test-environment", nargs="?", const="", default=None, metavar="EXTRAS",
+                   help="also make this checkout's isolated test environment current (activation). "
+                        "EXTRAS is comma-separated; omitted selects [all]")
     p.add_argument(
         "--target",
         help="stage for a cross target (e.g. linux-arm64-bionic on a glibc "

@@ -8,7 +8,6 @@ import hermes_cli.banner as banner
 import model_tools
 import tools.mcp_tool_discovery
 
-
 def test_banner_snapshot_accepts_bom_without_weakening_freshness(tmp_path, monkeypatch):
     import json
 
@@ -27,7 +26,6 @@ def test_banner_snapshot_accepts_bom_without_weakening_freshness(tmp_path, monke
     (tmp_path / "config.yaml").write_text("display: {skin: mono}", encoding="utf-8")
     assert banner.load_banner_snapshot(["file"]) is None
 
-
 def test_cprint_falls_back_to_plain_print_when_prompt_toolkit_has_no_console(capsys):
     with patch(
         "prompt_toolkit.print_formatted_text",
@@ -36,21 +34,6 @@ def test_cprint_falls_back_to_plain_print_when_prompt_toolkit_has_no_console(cap
         banner.cprint("fallback text")
 
     assert capsys.readouterr().out == "fallback text\n"
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 def test_empty_model_shows_the_free_tier_route_when_it_carries_inference(tmp_path, monkeypatch):
     """The banner prints before credentials resolve, so ``model`` is empty on a fresh install. On the

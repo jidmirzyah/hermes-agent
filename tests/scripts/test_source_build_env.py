@@ -17,6 +17,7 @@ def _stamp_probe(tmp_path, shell):
     repo = tmp_path / "installed source"
     for relative in (
         "scripts/write_install_stamp.py", "hermes_cli/__init__.py",
+        "scripts/releases/distance.py", "scripts/releases/versioning.py",
         "hermes_cli/update_channel.py", "hermes_cli/release_channels.py",
         "pm/paths.py", "pm/environments.py",
         "hermes_cli/steward.py", "hermes_constants.py",
@@ -40,11 +41,14 @@ def _stamp_probe(tmp_path, shell):
     git("add", ".")
     git("commit", "-qm", "OLD")
     old = git("rev-parse", "HEAD")
+    git("tag", "v1.0.0", old)
     git("commit", "--allow-empty", "-qm", "NEW")
     new = git("rev-parse", "HEAD")
     # Control: this is the real stamp writer's CI preference, not a source-text assertion.
     stamp_command = [sys.executable, "-I", "-S", str(repo / "scripts/write_install_stamp.py"),
-                     "--output", str(tmp_path / "contaminated.json"), "--update-mechanism", "self"]
+                     "--output", str(tmp_path / "contaminated.json"),
+                     "--base-version", "1.0.0", "--distance", "0",
+                     "--update-mechanism", "self"]
     git("checkout", "-q", "-B", "installed", old)
     subprocess.run(stamp_command, env={**env, "GITHUB_SHA": new}, check=True,
                    capture_output=True, text=True, timeout=30)
@@ -60,7 +64,7 @@ def _stamp_probe(tmp_path, shell):
     probe.write_text('''import json, os, runpy
 from pathlib import Path
 stamp = runpy.run_path(str(Path(os.environ['PROBE_ROOT']) / 'scripts/write_install_stamp.py'))
-stamp['write_stamp'](os.environ['PROBE_OUT'], update_mechanism='self')
+stamp['write_stamp'](os.environ['PROBE_OUT'], update_mechanism='self', base_version='1.0.0', distance=0)
 Path(os.environ['PROBE_ENV']).write_text(json.dumps(dict(os.environ)), encoding='utf-8')
 ''', encoding="utf-8")
     env["PROBE_SCRIPT"] = str(probe)
@@ -138,6 +142,8 @@ if ($LASTEXITCODE) { exit $LASTEXITCODE }
         stamp = json.loads(Path(env["PROBE_OUT"]).read_text(encoding="utf-8-sig"))
         assert (stamp["commit"], stamp["branch"], stamp["source"], stamp["payload"]) == (
             sha, "installed", "local", "bootstrap")
+        assert (stamp["baseVersion"], stamp["distance"], stamp["displayVersion"]) == (
+            "1.0.0", 0, "1.0.0")
         child = json.loads(Path(env["PROBE_ENV"]).read_text(encoding="utf-8-sig"))
         assert not overrides.keys() & child.keys()
         assert child["GIT_CONFIG_GLOBAL"] == env["GIT_CONFIG_GLOBAL"]

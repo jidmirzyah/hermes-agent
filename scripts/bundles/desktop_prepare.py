@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 import hashlib
 import json
 import re
@@ -95,11 +96,12 @@ class BuildRequest:
     target: str
     bundle_env: dict[str, str | None]
     channel_request: dict | None = None
+    release_epoch: int | None = None
 
     @classmethod
     def create(cls, source: Path, *, tag: str | None, commit: str | None, variant: str,
                work: Path, cache: Path, bundle_env: dict[str, str | None],
-               channel_request: dict | None = None) -> BuildRequest:
+               channel_request: dict | None = None, release_commit: str | None = None) -> BuildRequest:
         from pm.store import current_target
         from scripts.bundles.desktop import release_version
         from scripts.releases.bundle_env import validate
@@ -139,13 +141,34 @@ class BuildRequest:
         else:
             assert tag is not None  # The exclusive selection was checked above.
             version = release_version(source, tag)
-            commit = git(source, "rev-parse", "--verify", f"refs/tags/{tag}^{{commit}}")
+            commit = require_commit(release_commit) if release_commit else \
+                git(source, "rev-parse", "--verify", f"refs/tags/{tag}^{{commit}}")
+        release_epoch = None
+        if tag:
+            canary = re.fullmatch(r"v\d+\.\d+\.\d+\+canary\.(20\d{6}T\d{6}Z)", tag)
+            if canary:
+                release_epoch = int(datetime.strptime(canary.group(1), "%Y%m%dT%H%M%SZ")
+                                    .replace(tzinfo=timezone.utc).timestamp())
+            else:
+                claim_tag = os.environ.get("RELEASE_CLAIM_TAG", "")
+                if claim_tag != tag + "-rc":
+                    raise ValueError("stable preparation requires its exact claim tag")
+                claim_object = os.environ.get("RELEASE_CLAIM_OBJECT", "")
+                if not re.fullmatch(r"[a-f0-9]{40}", claim_object) or \
+                        git(source, "rev-parse", f"refs/tags/{claim_tag}") != claim_object:
+                    raise ValueError("stable preparation requires its exact claim tag object")
+                metadata = git(source, "cat-file", "-p", claim_object)
+                tagger = re.search(r"^tagger .* (\d+) [+-]\d{4}$", metadata, re.MULTILINE)
+                if tagger is None:
+                    raise ValueError("stable claim has no immutable tagger timestamp")
+                release_epoch = int(tagger.group(1))
         require_source(source, commit)
         if channel_request is not None:
             if version != channel_request["sourceVersion"]:
                 raise ValueError("channel sourceVersion differs from checkout project version")
             version = channel_request["version"]
-        return cls(source, work, cache, commit, tag, version, variant, current_target(), bundle_env, channel_request)
+        return cls(source, work, cache, commit, tag, version, variant, current_target(), bundle_env,
+                   channel_request, release_epoch)
 
     def data(self) -> dict:
         return {**asdict(self), "source": str(self.source), "work": str(self.work), "cache": str(self.cache)}

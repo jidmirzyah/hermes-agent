@@ -9,6 +9,7 @@ subscriber runs fail-isolated on the emitter thread; ``event_filter`` keeps othe
 
 from __future__ import annotations
 
+from pm import install_hint
 import importlib
 import logging
 import os
@@ -66,7 +67,7 @@ def _require_sdk(names: Iterable[str] = _SPAN_SDK, *, auto_install: bool = True)
     except Exception as e:  # ImportError or partial install
         raise OTLPUnavailable(
             "OTLP export requires the optional dependency. Install with:\n"
-            "    python -c \"from pm import sync_venv; sync_venv(['otlp'], explicit=True)\"\n"
+            f"    {install_hint('otlp')}\n"
             f"(import error: {e})"
         )
 

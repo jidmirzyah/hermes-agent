@@ -328,6 +328,12 @@ hermes update
 
 User-modified skills are never overwritten.
 
+Dependency preparation reads every profile's `config.yaml` to compute the
+plugin set the shared environment must carry. A profile whose `config.yaml`
+does not parse (or whose `plugins` / `memory` sections have the wrong shape)
+fails that step for the whole install — see
+[Dependency preparation and preservation](./features/plugins.md#dependency-preparation-and-preservation).
+
 ## Managing profiles
 
 ```bash

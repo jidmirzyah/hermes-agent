@@ -6,7 +6,6 @@ import os
 from pathlib import Path
 import shutil
 import sys
-import tarfile
 import tempfile
 
 import pytest
@@ -106,13 +105,6 @@ def test_uv_refresh_uses_real_installed_tool_and_only_the_owned_project(tmp_path
 
 @pytest.mark.platforms('windows', 'posix')
 def test_npm_refresh_uses_its_installed_entry_and_owned_project(monkeypatch, capsys):
-    node_source = Path(shutil.which('node') or pytest.fail('node is required'))
-    npm_source = Path(shutil.which('npm.cmd' if os.name == 'nt' else 'npm') or pytest.fail('npm is required')).resolve()
-    npm_source = npm_source.parent / 'node_modules/npm' if os.name == 'nt' else npm_source.parents[1]
-    if not (npm_source / 'bin/npm-cli.js').is_file():
-        npm_source = next((path for path in (npm_source / 'lib/npm', npm_source / 'lib/node_modules/npm')
-                           if (path / 'bin/npm-cli.js').is_file()), npm_source)
-    assert (npm_source / 'bin/npm-cli.js').is_file()
     # Keep the real tool's argv clear of the harness's hermes-update guard.
     temp_root = Path(os.environ['LOCALAPPDATA']) / 'Temp' if os.name == 'nt' else Path('/tmp')
     with tempfile.TemporaryDirectory(prefix='pm-deps-', dir=temp_root) as temporary, monkeypatch.context() as scoped:
@@ -128,12 +120,9 @@ def test_npm_refresh_uses_its_installed_entry_and_owned_project(monkeypatch, cap
         node_entry = runtime / 'node-fixture'
         node_binary = node_entry / ('node.exe' if os.name == 'nt' else 'bin/node')
         node_binary.parent.mkdir(parents=True)
-        shutil.copy2(node_source, node_binary)
-        bundled_npm = node_entry / ('node_modules/npm' if os.name == 'nt' else 'lib/node_modules/npm')
-        shutil.copytree(npm_source, bundled_npm)
-        for directory in (bundled_npm, *bundled_npm.rglob('*')):
-            if directory.is_dir():
-                directory.chmod(directory.stat().st_mode | 0o700)
+        node_binary.write_bytes(b'MZ' if os.name == 'nt' else b'#!/bin/sh\nexit 99\n')
+        if os.name != 'nt':
+            node_binary.chmod(0o755)
         facts = Facts(runtime / 'facts.json')
         node, npm = Nodejs(), Npm()
         monkeypatch.setitem(registry._packages, 'node', node)
@@ -142,18 +131,37 @@ def test_npm_refresh_uses_its_installed_entry_and_owned_project(monkeypatch, cap
         facts.record('node', 'fixture', str(node_entry), node.env(node_entry, target), runtime,
                      target=target, artifacts=['1' * 64])
         lock.save()
-        archive = root / 'npm.tgz'
-        with tarfile.open(archive, 'w:gz', dereference=True) as output:
-            output.add(npm_source, arcname='package')
         npm_entry = runtime / 'npm-fixture'
-        npm.unpack(archive, npm_entry, target)
-        version = json.loads((npm_source / 'package.json').read_text(encoding='utf-8'))['version']
+        cli_script = npm_entry / 'lib/npm_cli.py'
+        cli_script.parent.mkdir(parents=True)
+        cli_script.write_text(
+            "import json\n"
+            "from pathlib import Path\n"
+            "try:\n"
+            "    package = json.loads(Path('package.json').read_text(encoding='utf-8'))\n"
+            "    Path('package-lock.json').write_text(json.dumps({\n"
+            "        'name': package['name'], 'lockfileVersion': 3,\n"
+            "    }), encoding='utf-8')\n"
+            "except Exception as error:\n"
+            "    raise SystemExit(str(error))\n",
+            encoding='utf-8',
+        )
+        if os.name == 'nt':
+            (npm_entry / 'npm.cmd').write_text(
+                f'@echo off\r\n"{sys.executable}" "%~dp0lib\\npm_cli.py" %*\r\n', encoding='utf-8')
+        else:
+            npm_binary = npm_entry / 'bin/npm'
+            npm_binary.parent.mkdir()
+            npm_binary.write_text(
+                f'#!/bin/sh\nexec "{sys.executable}" "{cli_script}" "$@"\n',
+                encoding='utf-8',
+            )
+            npm_binary.chmod(0o755)
+        version = 'fixture'
         lock.set_pin('npm', version, {target: {'url': 'https://example.invalid/npm', 'sha256': '2' * 64}})
         facts.record('npm', version, str(npm_entry), npm.env(npm_entry, target), runtime,
                      target=target, artifacts=['2' * 64])
         lock.save()
-        # After install, Node's bundled npm is no longer available as a fallback.
-        shutil.rmtree(bundled_npm)
         (repo / 'package.json').write_text(json.dumps({'name': 'pm-leg-proof', 'version': '1.0.0', 'private': True}), encoding='utf-8')
         (repo / '.npmrc').write_text('offline=true\naudit=false\nfund=false\nignore-scripts=true\n', encoding='utf-8')
         monkeypatch.setenv('PATH', str(Path(os.environ.get('SYSTEMROOT', '/')) / 'System32') if os.name == 'nt' else '/usr/bin:/bin')

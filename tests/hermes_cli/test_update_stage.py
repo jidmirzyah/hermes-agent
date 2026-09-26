@@ -67,6 +67,24 @@ def test_marker_fallback_covers_the_old_shim(status_file, tmp_path, monkeypatch)
                     "Updating Python dependencies (PM)")
 
 
+def test_marker_fallback_uses_the_platform_home_without_env_var(status_file, tmp_path, monkeypatch):
+    """The shim without HERMES_HOME resolved the platform default, which is not ~/.hermes
+    on every host (sudo invoker, data-dir suffix); the marker must be looked up there."""
+    import hermes_constants
+
+    monkeypatch.delenv("HERMES_HOME", raising=False)
+    monkeypatch.setattr(hermes_constants, "_get_platform_default_hermes_home", lambda: tmp_path / "platform")
+    (tmp_path / "platform").mkdir()
+    (tmp_path / "platform" / update_stage.MARKER_NAME).write_text(
+        f"80335\n{int(time.time())}\n", encoding="utf-8")
+    status_file.write_text('{"status":"running","message":"old"}', encoding="utf-8")
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+
+    update_stage.publish_stage("Building products")
+
+    _assert_running(status_file.read_text(encoding="utf-8"), "Building products")
+
+
 def test_no_ui_sources_is_inert(status_file, tmp_path, monkeypatch):
     """A plain CLI update has no env var and no marker: publish must no-op."""
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))  # no marker inside

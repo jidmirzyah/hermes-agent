@@ -225,7 +225,7 @@ class TestResolveAzureFoundryRuntimeApiKey:
 
 class TestAzureFoundryAuthStatus:
     @pytest.mark.parametrize("installed", [True, False])
-    def test_entra_status_does_not_mint_token(self, monkeypatch, tmp_path, installed):
+    def test_entra_status_does_not_mint_token(self, monkeypatch, installed):
         """Status checks availability and gives an explicit PM command for missing dependencies."""
         from hermes_cli import auth as _auth
         # Force load_config to return our entra config.
@@ -250,14 +250,9 @@ class TestAzureFoundryAuthStatus:
         assert info["azure_identity_installed"] is installed
         assert info["scope"].endswith("/.default")
         if not installed:
-            import pm
-            from unittest.mock import Mock
+            from pm.extras import install_hint
 
-            sync = Mock()
-            monkeypatch.setattr(pm, "sync_venv", sync)
-            command = info["hint"].split('python -c "', 1)[1].split('"', 1)[0]
-            exec(command, {})
-            sync.assert_called_once_with(["azure-identity"], explicit=True)
+            assert install_hint("azure-identity") in info["hint"]
             assert "restart" in info["hint"].lower()
 
 

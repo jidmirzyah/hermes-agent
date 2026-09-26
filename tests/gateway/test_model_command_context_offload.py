@@ -20,7 +20,6 @@ from gateway.config import Platform
 from gateway.platforms.event import MessageEvent, MessageType
 from gateway.session import SessionSource
 
-
 def _make_source() -> SessionSource:
     return SessionSource(
         platform=Platform.TELEGRAM,
@@ -30,14 +29,12 @@ def _make_source() -> SessionSource:
         chat_type="dm",
     )
 
-
 def _event(text: str) -> MessageEvent:
     return MessageEvent(
         text=text,
         message_type=MessageType.TEXT,
         source=_make_source(),
     )
-
 
 def _runner_with_store(tmp_path, monkeypatch):
     """Minimal GatewayRunner harness driving the real /model handler."""
@@ -89,7 +86,6 @@ def _runner_with_store(tmp_path, monkeypatch):
     runner._async_session_store = _store
     return runner
 
-
 @pytest.mark.asyncio
 async def test_context_resolution_runs_off_the_loop_thread(tmp_path, monkeypatch):
     """The sync resolver must execute on a worker thread when the /model
@@ -117,5 +113,3 @@ async def test_context_resolution_runs_off_the_loop_thread(tmp_path, monkeypatch
         "the /model handler must offload it via "
         "resolve_display_context_length_async"
     )
-
-

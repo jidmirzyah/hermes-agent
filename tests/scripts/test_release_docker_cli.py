@@ -6,6 +6,8 @@ from pathlib import Path
 import subprocess
 import sys
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -49,3 +51,26 @@ def test_cli_manifest_and_verify(tmp_path):
         out.write_text(json.dumps(bad) if change else 'not json', encoding='utf-8')
         result = cli('verify', *identity, str(out))
         assert result.returncode == 1 and '::error::' in result.stderr
+
+
+def test_promotion_reuses_the_receipt_digest_without_rebuilding():
+    from scripts.releases.docker import DockerReleaseError, promote_stable
+
+    digest = 'sha256:' + 'd' * 64
+    calls = []
+
+    def run(argv):
+        calls.append(argv)
+        if argv[:4] == ['docker', 'buildx', 'imagetools', 'inspect']:
+            return digest
+        if argv[:4] == ['docker', 'buildx', 'imagetools', 'create']:
+            return ''
+        raise AssertionError(argv)
+
+    promote_stable('v1.2.3', digest, run=run)
+    create = next(argv for argv in calls if argv[3] == 'create')
+    assert create[-1] == f'nousresearch/hermes-agent@{digest}'
+    assert all('build' not in argv for argv in calls)
+
+    with pytest.raises(DockerReleaseError, match='versioned tag'):
+        promote_stable('v1.2.3', digest, run=lambda _argv: 'sha256:' + 'e' * 64)

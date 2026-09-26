@@ -78,6 +78,59 @@ def test_historical_payload_maps_to_takeover_request_schema(tmp_path, desktop, r
     assert "desktop" not in handoff and "assume_yes" not in handoff
 
 
+@pytest.mark.live_system_guard_bypass
+def test_shipped_post_swap_argv_enters_takeover_before_current_cli(tmp_path):
+    """The 2026.9.21 updater starts HEAD as ``hermes update <flags> --post-swap FILE``.
+
+    That command must reach the historical takeover before current launch preparation or
+    argparse: both belong to the replacement updater and may require dependencies the old
+    environment has not installed yet.
+    """
+    source = Path(__file__).resolve().parents[2]
+    root = tmp_path / "updated checkout"
+    package = root / "hermes_cli"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "main.py").write_text(
+        "import hermes_bootstrap\nraise AssertionError('current CLI parsed a legacy continuation')\n",
+        encoding="utf-8",
+    )
+    for relative in ("hermes_bootstrap.py", "hermes_cli/update_handoff.py", "hermes_cli/_old_updater.py"):
+        shutil.copy2(source / relative, root / relative)
+    (package / "_update_takeover.py").write_text(
+        "import json, sys\nfrom pathlib import Path\n"
+        "request = json.loads(Path(sys.argv[1]).read_text())\n"
+        "assert request['desktop'] is True\n"
+        "assert request['assume_yes'] is True\n"
+        "assert request['argv'][1:] == ['update', '--yes', '--no-gateway-restart', "
+        "'--branch', 'main', '--post-swap', request['legacy_handoff']]\n"
+        "Path(sys.argv[2]).write_text(json.dumps({'resume_handled': True}), encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    home = tmp_path / "home"
+    home.mkdir()
+    handoff = home / "post_swap_3185.json"
+    payload = {
+        "legacy_handoff": str(handoff),
+        "gateway_mode": False,
+        "had_desktop_app_before_update": True,
+        "windows_gateway_resume": None,
+        "plan": {"install_method": "git"},
+        "receipt": {"update_id": "old-correlation", "outcome": "running"},
+    }
+    handoff.write_text(json.dumps(payload), encoding="utf-8")
+    env = {key: value for key, value in os.environ.items()
+           if not key.startswith(("HERMES_", "PYTHON", "UV_"))}
+    env.update(HOME=str(home), HERMES_HOME=str(home))
+    result = subprocess.run(
+        [sys.executable, "-B", "-m", "hermes_cli.main", "update", "--yes",
+         "--no-gateway-restart", "--branch", "main", "--post-swap", str(handoff)],
+        cwd=root, env=env, capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not handoff.exists()
+
+
 @pytest.mark.parametrize("status", [0, 7])
 @pytest.mark.parametrize("encoding", ["utf-8", "utf-8-sig"])
 @pytest.mark.parametrize("desktop", [None, False, True])
@@ -349,17 +402,36 @@ def test_completed_serve_token_is_acknowledged_without_preparation(tmp_path, enc
 
 
 def test_bootstrap_lock_remains_live_without_application_dependencies(tmp_path):
+    """A dependency-free (-I -S) takeover child still sees another live updater's claim.
+
+    The holder is a separate, unrelated process: a claim naming the caller's own pid is
+    adopted as a fresh attempt, so only a foreign live holder can prove liveness detection.
+    """
     root = Path(__file__).resolve().parents[2]
-    script = (
+    lock = tmp_path / "lock"
+    prelude = (
         "import os, sys\nfrom pathlib import Path\n"
         f"sys.path.insert(0, {str(root)!r})\n"
         "from hermes_cli.update_lock import UpdateLock\n"
-        f"path = Path({str(tmp_path / 'lock')!r})\n"
-        "first = UpdateLock(path=path)\nassert first.acquire()\n"
-        "second = UpdateLock(path=path)\nassert not second.acquire(), 'live lock was stolen'\n"
-        "assert second.holder.pid == os.getpid()\n"
-        "first.release()\n"
+        f"lock = UpdateLock(path=Path({str(lock)!r}))\n"
     )
-    result = subprocess.run([sys.executable, "-I", "-S", "-B", "-c", script],
-                            capture_output=True, text=True, timeout=30)
+    holder = subprocess.Popen(
+        [sys.executable, "-I", "-S", "-B", "-c",
+         prelude + "assert lock.acquire()\nprint(os.getpid(), flush=True)\n"
+                   "sys.stdin.readline()\nlock.release()\n"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, encoding="utf-8",
+    )
+    assert holder.stdout is not None
+    try:
+        holder_pid = int(holder.stdout.readline())
+        result = subprocess.run(
+            [sys.executable, "-I", "-S", "-B", "-c",
+             prelude + "assert not lock.acquire(), 'live lock was stolen'\n"
+                       f"assert lock.holder.pid == {holder_pid}, lock.holder\n"],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", timeout=30,
+        )
+    finally:
+        holder.communicate("\n", timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
+    assert holder.returncode == 0
+    assert not lock.exists()

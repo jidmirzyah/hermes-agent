@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import { createRequire } from 'node:module'
 import os from 'node:os'
 import path from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 import { Arch, MacPackager } from 'app-builder-lib'
 import { MacTargetHelper } from 'app-builder-lib/internal'
@@ -13,6 +14,7 @@ const require = createRequire(import.meta.url)
 const config = require('../electron-builder.config.cjs')
 const repo = path.resolve(import.meta.dirname, '../../..')
 const desktop = path.resolve(import.meta.dirname, '..')
+const digestModule = pathToFileURL(path.join(import.meta.dirname, 'payload-digests.mjs')).href
 const python = process.env.HERMES_PYTHON || 'python'
 
 function fixture() {
@@ -47,6 +49,12 @@ function fixture() {
   const facts = path.join(tools, 'facts.json')
   const initial = JSON.parse(fs.readFileSync(facts, 'utf8'))
   return { root, app, payload, tools, nested, binaries, ignored, env, py, facts, initial }
+}
+
+function rehashInSubprocess(f) {
+  return childProcess.spawnSync(process.execPath, ['--input-type=module', '-e',
+    `import { rehashPayloadDigests } from ${JSON.stringify(digestModule)}; rehashPayloadDigests(process.argv[1])`,
+    f.payload], { cwd: repo, env: f.env, encoding: 'utf8', timeout: 60000 })
 }
 
 async function signThroughBuilder(f) {
@@ -131,30 +139,26 @@ test('builder dispatch refreshes real facts after every payload signature and be
   }
 }, 30000)
 
-test('builder dispatch refuses corrupt payload facts before the outer seal but signs a payload-free app', async () => {
+test('payload digest refresh rejects corrupt and missing PM facts but skips payload-free builds', () => {
   const f = fixture()
-  const signed = []
-  armEnvironment(f)
-  fs.writeFileSync(f.facts, 'invalid-json')
-  const native = vi.spyOn(childProcess, 'execFile').mockImplementation((file, args, options, callback) => {
-    assert.equal(file, 'codesign')
-    if (args.includes('--sign')) signed.push(args.at(-1))
-    callback(null, '', '')
-    return undefined
-  })
   try {
-    await assert.rejects(signThroughBuilder(f))
-    assert.ok(signed.includes(f.binaries[1]))
-    assert.ok(!signed.includes(f.app))
+    fs.writeFileSync(f.facts, 'invalid-json')
+    const corrupt = rehashInSubprocess(f)
+    assert.notEqual(corrupt.status, 0)
+    assert.match(corrupt.stderr, /cannot read recorded package state/)
     assert.equal(fs.readFileSync(f.facts, 'utf8'), 'invalid-json')
+
+    fs.unlinkSync(f.facts)
+    const missing = rehashInSubprocess(f)
+    assert.notEqual(missing.status, 0)
+    assert.match(missing.stderr, /payload facts carry no tool entries/)
+    assert.equal(fs.existsSync(f.facts), false)
+
     fs.rmSync(f.payload, { recursive: true })
-    signed.length = 0
-    await signThroughBuilder(f)
-    assert.deepEqual(signed, [f.binaries[0], f.app])
-    assert.ok(!fs.existsSync(f.payload))
+    const light = rehashInSubprocess(f)
+    assert.equal(light.status, 0, light.stdout + light.stderr)
+    assert.equal(fs.existsSync(f.payload), false)
   } finally {
-    native.mockRestore()
-    vi.unstubAllEnvs()
     fs.rmSync(f.root, { recursive: true, force: true })
   }
 }, 30000)

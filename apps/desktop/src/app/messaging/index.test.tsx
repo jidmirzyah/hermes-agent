@@ -126,7 +126,7 @@ async function renderMessaging() {
 }
 
 describe('MessagingView profile scope', () => {
-  it('follows the active profile instead of targeting primary when there is no override', async () => {
+  it('names the active profile explicitly instead of sending an unscoped request', async () => {
     $settingsScopeOverride.set(null)
     getMessagingPlatforms.mockResolvedValue({ platforms: [platform()] })
 

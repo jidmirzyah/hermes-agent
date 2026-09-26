@@ -51,7 +51,7 @@ def complete_source_checkout(
     build_update_products(root, desktop=desktop)
     if announce:
         print(announce)
-    return _run_post_update_maintenance(
+    complete = _run_post_update_maintenance(
         assume_yes=assume_yes,
         gateway_mode=gateway_mode,
         pre_update_snapshot_id=pre_update_snapshot_id,
@@ -59,6 +59,11 @@ def complete_source_checkout(
         pre_update_version=pre_update_version,
         completion_message=completion_message,
     )
+    if complete:
+        from hermes_cli.source_stamp import write_source_stamp
+
+        write_source_stamp(root)
+    return complete
 
 
 def _bootstrap_command(root: Path, argv: list[str]) -> list[str]:

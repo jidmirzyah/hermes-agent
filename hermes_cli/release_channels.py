@@ -148,11 +148,15 @@ def validate_request(value: object, *, repository: str | None = None,
         if (request.get("version"), request.get("windowsVersion")) != versions:
             raise ChannelError("Channel package version does not match sequence")
     else:
-        _match(r"v[0-9]+\.[0-9]+\.[0-9]+(?:-canary\.[0-9]+)?", request.get("releaseTag"), "legacy release tag")
+        _match(
+            r"v[0-9]+\.[0-9]+\.[0-9]+(?:\+canary\.20[0-9]{6}T[0-9]{6}Z)?",
+            request.get("releaseTag"),
+            "release tag",
+        )
         if request.get("version") != request["releaseTag"][1:]:
-            raise ChannelError("Legacy package version mismatch")
-        # Canary revisions encode minutes since the stable baseline; only stable
-        # packages reserve revision zero.
+            raise ChannelError("Release package version mismatch")
+        # Stable uses the Store quad with revision zero; canary uses its UTC
+        # yy.mmdd.hh.mmss package version.
         pattern = r"[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" if policy == "canary-release" else r"[0-9]+\.[0-9]+\.[0-9]+\.0"
         quad = _match(pattern, request.get("windowsVersion"), "Windows version")
         if any(int(part) > 65535 for part in quad.split(".")):

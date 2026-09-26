@@ -1,6 +1,7 @@
 """Release handoffs use exact R2 bytes without advancing a channel."""
 import copy
 import json
+from urllib.parse import unquote
 
 import pytest
 
@@ -8,7 +9,7 @@ from scripts.releases import handoff, r2
 from tests.scripts.test_release_r2 import r2_server  # noqa: F401
 
 
-@pytest.mark.parametrize('tag', ['v1.2.3', 'v1.2.3-canary.20260908232538', None])
+@pytest.mark.parametrize('tag', ['v1.2.3', 'v1.2.3+canary.20260908T232538Z', None])
 def test_stage_and_fetch_bind_tag_commit_and_files_without_feed_writes(tmp_path, monkeypatch, r2_server, tag):
     commit = "a" * 40
     identity = ['--tag', tag, '--commit', commit] if tag else ['--commit-build', commit]
@@ -32,7 +33,7 @@ def test_stage_and_fetch_bind_tag_commit_and_files_without_feed_writes(tmp_path,
     assert {row["path"] for row in receipt["files"]} == {p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file()}
     assert all(key.startswith(prefix) for key in r2_server.store)
     puts = [path for method, path, _ in r2_server.requests if method == "PUT"]
-    assert puts[-1].endswith(receipt_key)
+    assert unquote(puts[-1]).endswith(receipt_key)
     assert all(headers.get("If-None-Match") == "*" for method, _, headers in r2_server.requests if method == "PUT")
 
     downloaded = tmp_path / "downloaded"

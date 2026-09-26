@@ -993,8 +993,20 @@ export interface Translations {
     fieldDescriptions: Record<string, string>
     uninstallSection: {
       dangerZone: string
-      confirmUninstall: string
+      checkingInstalled: string
       uninstallHermes: string
+      chooseHowMuch: string
+      confirmUninstall: string
+      confirmBody: (what: string) => string
+      appLabel: string
+      couldNotStart: string
+      uninstalling: string
+      yesUninstall: string
+      options: {
+        gui: { title: string; description: string; consequence: string }
+        lite: { title: string; description: string; consequence: string }
+        full: { title: string; description: string; consequence: string }
+      }
     }
     poolLimits: {
       warmBotBackendsAria: string
@@ -1003,6 +1015,39 @@ export interface Translations {
       backendIdleTimeoutTitle: string
     }
     customEndpoints: {
+      active: string
+      apiKeySet: string
+      use: string
+      editTitle: string
+      addTitle: string
+      fields: {
+        name: string
+        providerId: string
+        endpointUrl: string
+        defaultModel: string
+        context: string
+        apiKey: string
+        apiKeyNewPlaceholder: string
+        apiKeyPlaceholder: string
+        useNewChats: string
+        discoverModels: string
+      }
+      test: string
+      save: string
+      newEndpoint: string
+      apiMode: string
+      autoDetect: string
+      couldNotLoad: string
+      endpointSaved: string
+      saveFailed: string
+      endpointReachable: string
+      endpointReachableTransport: (transport: string) => string
+      endpointReachableModels: (reachable: string, count: number) => string
+      endpointValidationFailed: string
+      validationFailed: string
+      activationFailed: string
+      deleteConfirm: (name: string) => string
+      deleteFailed: string
       title: string
       deleteEndpoint: string
       emptyDescription: string
@@ -1367,6 +1412,19 @@ export interface Translations {
       deepLinkErrorTooLarge: string
     }
     model: {
+      setupProviderFallback: string
+      setUpProvider: (name: string) => string
+      staleAuxBefore: (count: number, names: string) => string
+      staleAuxAfter: string
+      staleAuxOtherProviders: string
+      moaEnabled: string
+      moaSetDefault: string
+      moaNewPresetPlaceholder: string
+      moaAddPreset: string
+      moaDefault: string
+      moaReferenceToggle: (enabled: boolean, index: number) => string
+      moaReferenceTitle: (index: number) => string
+      moaAddReference: string
       loading: string
       appliesDesc: string
       provider: string
@@ -1431,6 +1489,11 @@ export interface Translations {
       downloadStatusRunning: string
       downloadSpeed: (rate: string) => string
       downloadEta: (time: string) => string
+      /** Duration units the ETA is composed from; hours carries its
+       *  remainder so a locale orders the two parts itself. */
+      downloadEtaSeconds: (count: number) => string
+      downloadEtaMinutes: (count: number) => string
+      downloadEtaHours: (hours: number, minutes: number) => string
       downloadPausedLabel: string
       downloadPauseAction: string
       downloadResumeAction: string
@@ -1476,6 +1539,8 @@ export interface Translations {
       activateFailed: (model: string) => string
       activateDoneToast: (model: string) => string
       downloadFailed: (model: string) => string
+      downloadPauseFailed: (model: string) => string
+      downloadResumeFailed: (model: string) => string
       pillFitsGpu: string
       pillUsesRam: string
       pillTooBig: string
@@ -1508,6 +1573,217 @@ export interface Translations {
       deleteConfirm: (model: string) => string
       deleted: (model: string) => string
       deleteFailed: string
+    }
+    billing: {
+      perMonth: (amount: string) => string
+      creditsPerMonth: (amount: string) => string
+      usageLabel: (label: string) => string
+      freeTier: {
+        signIn: string
+        title: string
+        message: string
+        caption: string
+        name: string
+        footnote: string
+        plan: string
+        model: string
+        connectors: string
+        included: string
+      }
+      amountValidation: {
+        reloadTo: string
+        greaterThanThreshold: string
+        decimal: (label: string) => string
+        positive: (label: string) => string
+        minimum: (label: string, amount: string) => string
+        maximum: (label: string, amount: string) => string
+      }
+      stepUp: {
+        openVerification: string
+        dismiss: string
+        waiting: string
+        verify: string
+        deniedTitle: string
+        deniedBody: string
+        successTitle: string
+        successBody: string
+      }
+      charge: {
+        added: (amount: string) => string
+        failedTitle: string
+        unconfirmedTitle: string
+        unconfirmedBody: (message: string) => string
+        checkTitle: string
+        checkBody: string
+        untrackedTitle: string
+        untrackedBody: string
+        timeoutTitle: string
+        timeoutBody: string
+        authenticationRequired: string
+        expired: string
+        declined: string
+        failedBody: (reason: string) => string
+      }
+      title: string
+      preview: string
+      summary: {
+        balance: string
+        plan: string
+        autoRefill: string
+      }
+      sections: {
+        invoices: string
+
+        plan: string
+        paymentAndCredits: string
+        usage: string
+      }
+      usage: {
+        title: string
+      }
+      buyCredits: {
+        customAmount: string
+        title: string
+        buyButton: string
+        processing: string
+        added: (amount: string) => string
+        retry: string
+        openPortal: string
+      }
+      plan: {
+        title: string
+        changePlan: string
+        viewPlans: string
+        backAria: string
+        current: string
+        scheduled: string
+        empty: string
+        undo: string
+        undoing: string
+        downgrade: string
+        confirmDowngrade: string
+        tryAgain: string
+        checkingChange: string
+        cannotChange: string
+        alreadyOn: (name: string) => string
+        notScheduleable: string
+        scheduling: string
+        cancel: string
+        effectScheduled: (targetName: string, effectiveAt: string, creditsDelta: string) => string
+      }
+      autoReload: {
+        threshold: string
+        thresholdAria: string
+        reloadTo: string
+        reloadToAria: string
+        turnOffConfirm: string
+        turnOff: string
+        disable: string
+        updated: string
+        turnedOff: string
+        manage: string
+        save: string
+        saving: string
+        cancel: string
+      }
+      state: {
+        notice: {
+          loggedOut: { title: string; message: string; action: string }
+          noCard: { title: string; message: string; action: string }
+        }
+        paymentMethod: {
+          title: string
+          description: string
+          addAction: string
+          updateAction: string
+          provenance: {
+            autoRefill: string
+            customerDefault: string
+            subPin: string
+            suffix: (label: string) => string
+          }
+        }
+        buyCredits: {
+          description: string
+        }
+        autoRefill: {
+          title: string
+          genericDescription: string
+          offPill: string
+          enabledPill: string
+          notAvailablePill: string
+          manageCaption: string
+          turnOnCaption: string
+          chargesDescription: (reloadTo: string, threshold: string) => string
+          distinctCardCaption: (cardLabel: string) => string
+          distinctCardFallback: string
+          reconcileAction: string
+        }
+        usage: {
+          subscriptionCredits: {
+            title: string
+            barLabel: string
+            captionResets: (date: string) => string
+            valueOf: (remaining: string, monthly: string) => string
+            valueOver: (remaining: string, monthly: string, over: string) => string
+          }
+          topupCredits: {
+            title: string
+            caption: string
+          }
+          monthlyCap: {
+            title: string
+            barLabel: string
+            captionDefault: string
+            captionSpending: string
+            valueUsed: (spent: string, limit: string) => string
+          }
+        }
+        planCard: {
+          freeTier: string
+          chooseAction: string
+          adjustPlanAction: string
+          unavailableCaption: string
+          downgradeCaption: (tierName: string, when: string) => string
+          cancellationCaption: (when: string) => string
+          renewsCaption: (date: string) => string
+          noSubscriptionCaption: string
+        }
+      }
+      errors: {
+        consentRequired: { title: string; message: string }
+        insufficientScope: { title: string; message: string }
+        remoteSpendingRevoked: {
+          title: string
+          messageByAdmin: string
+          messageBySelf: string
+        }
+        remoteSpendingReconnect: (who: string) => string
+        sessionRevoked: { title: string; message: string }
+        cliBillingDisabled: { title: string; message: string }
+        roleRequired: { title: string; message: string }
+        idempotencyConflict: { title: string; message: string }
+        noPaymentMethod: { title: string; message: string }
+        orgAccessDenied: { title: string; message: string }
+        monthlyCapExceeded: {
+          title: string
+          messageReached: string
+          messageHeadroom: (remaining: string) => string
+        }
+        rateLimited: {
+          title: string
+          message: (mins: number) => string
+        }
+        stripeUnavailable: {
+          title: string
+          message: (mins: number) => string
+        }
+        upgradeCapExceeded: { title: string; message: string }
+        endpointUnavailable: { title: string; message: string }
+        timeout: { title: string; message: string }
+        transport: { title: string; message: string }
+        default: { title: string; message: string }
+      }
     }
     providers: {
       connectAccount: string

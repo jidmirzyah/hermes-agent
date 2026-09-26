@@ -45,6 +45,25 @@ def test_enabled_plugins_ordered_reads_all_homes(homes):
     assert by_root.get(profile_home / "plugins") == ["c-plug"]
 
 
+def test_only_live_profiles_join_the_dependency_union(homes):
+    from hermes_constants import mark_named_profile_deleted
+
+    default_home, profile_home = homes
+    profiles = profile_home.parent
+    _write_config(default_home, ["a-plug"])
+    _write_config(profile_home, ["live-plug"])
+    for name in (".work.staging-123", "Bad Name", "retired", "ghost"):
+        (profiles / name).mkdir()
+    for name in (".work.staging-123", "Bad Name", "retired"):
+        _write_config(profiles / name, [f"{name}-plug"])
+    mark_named_profile_deleted(profiles / "retired")
+    (profiles / "ghost" / "plugins").mkdir()  # runtime side-effect dir, no identity marker
+
+    assert pstate.dependency_homes() == [default_home, profile_home]
+    by_root = pstate.enabled_plugins_ordered()
+    assert set(by_root) == {default_home / "plugins", profile_home / "plugins"}
+
+
 @pytest.mark.parametrize("boundary", ["profile-listing", "profile-stat", "config-read", "plugin-stat", "manifest-read", "manifest-stat", "provider-stat"])
 def test_unreadable_profile_state_is_not_an_empty_selection(homes, monkeypatch, boundary):
     from pm.workspace import enabled_member_dirs

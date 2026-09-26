@@ -237,6 +237,9 @@ test('built web freshness follows shared sources and build inputs, not mtimes or
   expect(productCurrent({ source, product: 'web', out })).toBe(true)
   put(source, 'web/node_modules/.tmp/tsbuildinfo', 'generated')
   expect(productCurrent({ source, product: 'web', out })).toBe(true)
+  // Install completion rewrites the runtime identity after building products.
+  put(source, 'install-stamp.json', '{"builtAt": "later"}')
+  expect(productCurrent({ source, product: 'web', out })).toBe(true)
   put(icons, 'web/public/favicon.ico', 'changed prepared icon')
   expect(productCurrent({ source, product: 'web', out })).toBe(false)
   await buildWeb({ source, icons, out })

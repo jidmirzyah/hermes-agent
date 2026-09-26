@@ -25,15 +25,18 @@ def sha256_file(file: Path) -> str:
 def stamp_matches(stamp: dict, tag: str, commit: str, *, channel_request: dict | None = None) -> None:
     if channel_request is not None and channel_request.get("receiverCandidate"):
         if (stamp.get("channelBuild") is not None or stamp.get("source") != "build"
-                or stamp.get("receiverProtocol") != 1 or stamp.get("displayVersion") != channel_request["version"]):
+                or stamp.get("receiverProtocol") != 1 or stamp.get("displayVersion") != channel_request["version"]
+                or stamp.get("commit") != commit or stamp.get("tag") != channel_request["releaseTag"]
+                or stamp.get("baseVersion") != channel_request["sourceVersion"]):
             raise ValueError("Receiver candidate must use ordinary stable update ownership")
-        tag, channel_request = channel_request["releaseTag"], None
+        return
     if channel_request is not None:
         if (stamp.get("source") != "channel-build" or stamp.get("channelBuild") != channel_request
                 or stamp.get("commit") != channel_request["commit"] or stamp.get("tag")):
             raise ValueError("Built package provenance does not match the channel request")
         return
-    if stamp.get("commit") != commit or stamp.get("tag") != tag:
+    if (stamp.get("commit") != commit or stamp.get("tag") != tag
+            or stamp.get("baseVersion") != tag.removeprefix("v")):
         raise ValueError("Built package provenance does not match the release")
 
 
@@ -63,6 +66,8 @@ def record(platform: str, arch: str, root: Path, tag: str, commit: str, out: Pat
     row: dict = {"platform": platform, "arch": arch, "tag": tag, "commit": commit}
     if platform == "windows":
         package = single(p for p in root.glob(f"*-win-{arch}.msix") if not p.name.startswith("Store-"))
+        if channel_request is None and not package.name.endswith(f"-{tag[1:]}-win-{arch}.msix"):
+            raise ValueError("Windows artifact filename differs from release tag")
         with zipfile.ZipFile(package) as archive:
             manifest = ET.fromstring(archive.read("AppxManifest.xml"))
             identity = manifest.find("{*}Identity")
@@ -74,10 +79,25 @@ def record(platform: str, arch: str, root: Path, tag: str, commit: str, out: Pat
             raise ValueError("MSIX architecture differs from release target")
         row.update(identity=identity.attrib["Name"], publisher=identity.attrib["Publisher"],
                    applicationId=application.attrib["Id"], version=identity.attrib["Version"])
+        version_sidecar = root / f"version-info-{arch}.json"
+        if version_sidecar.is_file():
+            row["executableVersion"] = json.loads(
+                version_sidecar.read_text(encoding="utf-8-sig"),
+            )["productVersion"]
+        elif os.name == "nt":
+            executable_name = (stamp.get("identity") or {}).get("windowsExecutableName")
+            executables = list(root.rglob(f"{executable_name}.exe")) if executable_name else []
+            executable = single(executables)
+            row["executableVersion"] = subprocess.check_output([
+                "powershell", "-NoProfile", "-Command",
+                "(Get-Item -LiteralPath $args[0]).VersionInfo.ProductVersion", str(executable),
+            ], text=True, encoding="utf-8", stdin=subprocess.DEVNULL).strip()
         if stamp.get("receiverProtocol") == 1:
             row["receiverProtocol"] = 1
     elif platform == "macos":
         package = single(root.glob(f"*-mac-{arch}.zip"))
+        if not package.name.endswith(f"-{tag[1:]}-mac-{arch}.zip"):
+            raise ValueError("macOS artifact filename differs from release tag")
         app = single(root.glob("mac*/*.app"))
         subprocess.run(["codesign", "--verify", "--strict", str(app)], check=True)
         signature = subprocess.run(["codesign", "-dv", "--verbose=4", str(app)], check=True, capture_output=True, text=True, encoding="utf-8")
@@ -98,6 +118,8 @@ def record(platform: str, arch: str, root: Path, tag: str, commit: str, out: Pat
         fields = subprocess.check_output(["dpkg-deb", "--field", str(package), "Package", "Version", "Architecture"], text=True, encoding="utf-8")
         parsed = dict(line.split(": ", 1) for line in fields.splitlines())
         row.update(identity=parsed["Package"], version=parsed["Version"], filename=package.relative_to(root).as_posix())
+        if parsed["Version"] != f"{tag[1:]}-1":
+            raise ValueError("Termux artifact version differs from release tag")
         if parsed["Architecture"] != "aarch64":
             raise ValueError("Wrong Termux package architecture")
         with tempfile.TemporaryDirectory() as temp:
@@ -135,7 +157,7 @@ def validate_windows_bundle(bundle: Path, windows: list[dict]) -> None:
 
 
 def assemble(root: Path, tag: str, commit: str, public_base: str, out: Path,
-             *, smoke_results: dict) -> dict:
+             *, smoke_results: dict, release_epoch: int) -> dict:
     """Bind the native metadata to files already staged by their build jobs."""
     from scripts.releases.handoff import receipt_name, validate_receipt
     from scripts.releases.r2 import put, staging_key_for
@@ -174,9 +196,9 @@ def assemble(root: Path, tag: str, commit: str, public_base: str, out: Path,
         filename = universal_name if row["platform"] == "windows" else row["filename"]
         item = by_name[filename]
         packages.append({k: v for k, v in {**row, "artifact": {"url": item["url"], "sha256": item["sha256"]}}.items() if k != "filename"})
-    result = {"schema": 2, "tag": tag, "commit": commit, "packages": packages, "files": files,
-              "smoke_results": smoke_results}
-    validate_candidates(result, tag, commit, public_base)
+    result = {"schema": 2, "tag": tag, "commit": commit, "releaseEpoch": release_epoch,
+              "packages": packages, "files": files, "smoke_results": smoke_results}
+    validate_candidates(result, tag, commit, public_base, release_epoch)
     if not any(row["platform"] == "termux" for row in packages):
         raise ValueError("Missing Termux candidate")
     out.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
@@ -316,6 +338,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--tag", default=os.environ.get("RELEASE_TAG"))
     parser.add_argument("--commit", default=os.environ.get("GITHUB_SHA"))
     parser.add_argument("--public-base", default=os.environ.get("CLOUDFLARE_R2_PUBLIC_URL"))
+    parser.add_argument("--release-epoch", type=int, default=os.environ.get("HERMES_RELEASE_EPOCH"))
     parser.add_argument("--store-only", action="store_true")
     for name in ("identity", "publisher", "version", "self-uri", "artifact-uri"):
         parser.add_argument(f"--{name}")
@@ -340,8 +363,11 @@ def main(argv: list[str] | None = None) -> None:
         request = json.loads(args.channel_request.read_text(encoding="utf-8-sig")) if args.channel_request else None
         record(args.platform, args.arch, args.root, args.tag, args.commit, args.out, channel_request=request)
     elif args.command == "assemble":
+        if args.release_epoch is None:
+            parser.error("assemble requires the admitted --release-epoch")
         assemble(args.root, args.tag, args.commit, args.public_base, args.out,
-                 smoke_results=json.loads(os.environ.get("RELEASE_NEEDS", "{}")))
+                 smoke_results=json.loads(os.environ.get("RELEASE_NEEDS", "{}")),
+                 release_epoch=args.release_epoch)
         if os.environ.get("GITHUB_OUTPUT"):
             with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as file:
                 file.write(f"manifest-url={args.public_base.rstrip('/')}/releases/tag/{args.tag}/release-candidates.json\nmanifest-sha256={sha256_file(args.out)}\n")

@@ -3,6 +3,7 @@
 // runs it under a bare `node` with no workspace install, so nothing here may
 // import Playwright, zod, or the TypeScript smoke modules.
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 /**
@@ -39,18 +40,58 @@ export function smokeEnvironment(inherited, home, userData) {
     }
     clean[key] = value;
   }
+  const electronTemp = process.platform === 'win32' ? os.tmpdir() : '/tmp';
   return {
     ...clean, HOME: path.join(home, '.desktop-smoke-home'), USERPROFILE: path.join(home, '.desktop-smoke-home'),
     XDG_CONFIG_HOME: path.join(home, '.desktop-smoke-home', '.config'),
     XDG_DATA_HOME: path.join(home, '.desktop-smoke-home', '.local', 'share'),
     XDG_CACHE_HOME: path.join(home, '.desktop-smoke-home', '.cache'),
     HERMES_HOME: home, HERMES_DESKTOP_USER_DATA_DIR: userData,
+    // Chromium puts ProcessSingleton's Unix socket below TMPDIR. Deep CI
+    // workspaces exceed sockaddr_un.sun_path before Electron reaches ready.
+    TEMP: electronTemp, TMP: electronTemp, TMPDIR: electronTemp,
     // app.close() cannot answer a native modal. This bypasses confirmation only;
     // normal backend teardown and the driver's process-exit checks still run.
     HERMES_DESKTOP_SKIP_QUIT_CONFIRM: '1',
     APPDATA: path.join(home, '.desktop-smoke-home', 'AppData', 'Roaming'),
     LOCALAPPDATA: path.join(home, '.desktop-smoke-home', 'AppData', 'Local'),
   };
+}
+
+const UPDATE_WINDOW_STATE = ['connection.json', 'connections.json'];
+
+/**
+ * Give the independently driven update window its own Electron instance route.
+ * Copy only Hermes-owned connection contracts. Cloning Chromium's profile
+ * carries browser locks and process state from the prior app into a supposedly
+ * isolated launch. HERMES_HOME remains shared so the app updates the actual
+ * installed runtime.
+ *
+ * @template {Record<string, string>} T
+ * @param {T & {HERMES_DESKTOP_USER_DATA_DIR: string}} env
+ * @returns {T & {HERMES_DESKTOP_USER_DATA_DIR: string}}
+ */
+export function isolateUpdateWindowEnvironment(env) {
+  const source = env.HERMES_DESKTOP_USER_DATA_DIR;
+  const isolated = fs.mkdtempSync(path.join(path.dirname(source), `${path.basename(source)}-app-update-`));
+  for (const filename of UPDATE_WINDOW_STATE) {
+    const from = path.join(source, filename);
+    if (fs.existsSync(from)) fs.copyFileSync(from, path.join(isolated, filename));
+  }
+  return { ...env, HERMES_DESKTOP_USER_DATA_DIR: isolated };
+}
+
+/**
+ * Route Electron's native ProcessSingleton before app JavaScript requests the lock.
+ * Older packaged apps honor the environment override after Electron has initialized,
+ * which can still leave Playwright attached to a lock-losing secondary instance.
+ * @param {string[]} args
+ * @param {string} userData
+ * @returns {string[]}
+ */
+export function isolatedElectronArgs(args, userData) {
+  const prefix = '--user-data-dir=';
+  return [`${prefix}${userData}`, ...args.filter((arg) => !arg.startsWith(prefix))];
 }
 
 // Source updater processes still need the git redirect; smokeEnvironment keeps

@@ -6,7 +6,7 @@ from pathlib import Path
 import sys
 
 
-def finish_update(*, assume_yes, gateway_mode, pre_update_snapshot_id,
+def finish_update(*, root, assume_yes, gateway_mode, pre_update_snapshot_id,
                   had_desktop_app_before_update, pre_update_version,
                   plan, windows_resume) -> None:
     """Finish the selected checkout; never fetch, switch branches or restore a stash."""
@@ -22,6 +22,10 @@ def finish_update(*, assume_yes, gateway_mode, pre_update_snapshot_id,
         had_desktop_app_before_update=had_desktop_app_before_update,
         pre_update_version=pre_update_version,
     )
+    if complete:
+        from hermes_cli.source_stamp import write_source_stamp
+
+        write_source_stamp(Path(root))
     # Restart can kill this process's gateway cgroup; record its result first.
     if gateway_mode:
         _write_gateway_update_exit_code(complete)
@@ -103,7 +107,7 @@ def main(context: Path, result: Path) -> int:
                                or _desktop_dist_exists(desktop_dir))
                 build_update_products(root, desktop=desktop)
                 finish_update(
-                    assume_yes=request["assume_yes"], gateway_mode=request["gateway_mode"],
+                    root=root, assume_yes=request["assume_yes"], gateway_mode=request["gateway_mode"],
                     pre_update_snapshot_id=request.get("pre_update_snapshot_id"),
                     had_desktop_app_before_update=desktop,
                     pre_update_version=request.get("pre_update_version"),

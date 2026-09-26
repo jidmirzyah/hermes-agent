@@ -8,9 +8,12 @@ of hunting fixed locations.
 Resolution order:
   1. Windows: the git Package's staged bash (via facts.json) — the store
      structurally guarantees it in a bundle; no hunt.
-  2. Provisioned PATH: shutil.which("bash") — the store dirs are on the
+  2. Windows: conventional Git for Windows under Program Files, then PATH —
+     minus C:\Windows\System32\bash.exe (the WSL launcher stub, first on PATH
+     on most machines; #116818) and WindowsApps\bash.exe (an MSIX alias that
+     only spawns inside its package). See windows_bash_candidates().
+  3. Provisioned PATH: shutil.which("bash") — the store dirs are on the
      process PATH after pm.activate() ran.
-  3. Conventional Git for Windows under Program Files, even with an empty PATH.
   4. POSIX fallback table for non-bundle / daemon-launch PATH edge cases
      (/usr/bin/bash, /bin/bash, $SHELL, /bin/sh). A systemd/cron-launched
      gateway may have a minimal PATH and macOS /bin/bash is not on PATH by
@@ -19,8 +22,10 @@ Resolution order:
 
 from __future__ import annotations
 
+import ntpath
 import os
 import shutil
+from collections.abc import Mapping
 
 from pm import paths
 from pm.lock import Facts
@@ -52,6 +57,29 @@ def _staged_bash() -> str | None:
     return None
 
 
+# PATH dirs whose bash.exe is not a shell: System32 holds the WSL launcher
+# stub (prints "no installed distributions", exits 1) and WindowsApps holds
+# MSIX execution aliases that fail with WinError 5 from an arbitrary process.
+_WINDOWS_BASH_STUB_DIRS = ("system32", "windowsapps")
+
+
+def windows_bash_candidates(on_path: str | None, env: Mapping[str, str]) -> list[str]:
+    """Ordered bash.exe candidates for a Windows host, as pure data: the
+    conventional Git for Windows dirs first, then ``on_path`` (the
+    ``shutil.which("bash")`` result) unless it is a stub. Program Files beats
+    PATH because System32 precedes Git on most PATHs (#116818)."""
+    programfiles = env.get("ProgramFiles", r"C:\Program Files")
+    candidates = [
+        ntpath.join(programfiles, "Git", "bin", "bash.exe"),
+        ntpath.join(programfiles, "Git", "usr", "bin", "bash.exe"),
+    ]
+    if on_path:
+        norm = ntpath.normpath(on_path).lower()
+        if not any(stub in norm for stub in _WINDOWS_BASH_STUB_DIRS):
+            candidates.append(on_path)
+    return candidates
+
+
 def bash() -> str | None:
     """Resolve the bash binary to use, or None if none is available."""
     staged = _staged_bash()
@@ -59,18 +87,12 @@ def bash() -> str | None:
         return staged
 
     on_path = shutil.which("bash")
-    # An MSIX-packaged bash (WindowsApps alias) only spawns inside its
-    # package's context — from an arbitrary process (dev checkout, test
-    # child, emulated-python CreateProcess) it fails with WinError 5.
-    # Prefer a conventional install when one exists.
-    if on_path and "windowsapps" not in on_path.lower():
-        return on_path
     if os.name == "nt":
-        programfiles = os.environ.get("ProgramFiles", r"C:\Program Files")
-        for rel in (("Git", "bin", "bash.exe"), ("Git", "usr", "bin", "bash.exe")):
-            cand = os.path.join(programfiles, *rel)
-            if os.path.isfile(cand):
-                return cand
+        return next(
+            (c for c in windows_bash_candidates(on_path, os.environ) if os.path.isfile(c)),
+            None,
+        )
+    if on_path:
         return on_path
 
     # POSIX fallbacks for minimal-PATH daemon launches / macOS /bin/bash.

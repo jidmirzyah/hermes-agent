@@ -37,7 +37,7 @@ test('installed stamp independently binds payload, mechanism, commit and tag', (
 
 test.each([
   ['arm64', 'stable', 'v0.29.0', 'arm64-stable-mac.yml'],
-  ['x64', 'canary', 'v0.30.0-canary.20260907000000', 'canary-mac.yml'],
+  ['x64', 'canary', 'v0.30.0+canary.20260907T000000Z', 'canary-mac.yml'],
 ])('%s %s feed binds parsed YAML to copied artifact bytes', async (arch, channel, tag, name) => {
   const outDir = scratch()
   const zip = path.join(outDir, 'payload.zip')

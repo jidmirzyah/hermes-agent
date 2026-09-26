@@ -11,14 +11,21 @@ from tests.conftest import _host_matches_platforms, _platform_machine
     (("posix",), {"linux", "darwin"}), (("not macos",), {"linux", "win32"}),
     (("not windows",), {"linux", "darwin"}), (("linux", "macos"), {"linux", "darwin"}),
     (("any",), {"linux", "darwin", "win32"}), ((), {"linux", "darwin", "win32"}),
-    (("linux", "amiga"), {"linux"}), (("linux", "win32host-mismatch"), {"linux"}),
-    (("amiga",), set()), (("not amiga",), set()),
 ])
 def test_native_spec_table(specs, hosts):
     ok, reason = _host_matches_platforms(specs)
     assert ok is (sys.platform in hosts), reason
-    if specs in (("amiga",), ("not amiga",)):
-        assert "unknown spec" in reason
+
+
+@pytest.mark.parametrize("specs", [
+    ("amiga",), ("not amiga",), ("linx",),
+    # A matching spec never excuses a misspelt sibling: the typo would drop the
+    # test on the host it was meant for while this host stays green.
+    ("linux", "amiga"), ("darwin", "linux"), ("win32", "posix"),
+])
+def test_unknown_spec_is_a_collection_error_not_a_skip(specs):
+    with pytest.raises(pytest.UsageError, match="unknown spec"):
+        _host_matches_platforms(specs)
 
 
 @pytest.mark.parametrize("negate", [False, True])

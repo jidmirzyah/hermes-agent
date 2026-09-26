@@ -15,7 +15,7 @@
 #
 # Inputs (host mode, all required):
 #   --repo <dir>   hermes-agent checkout to build from (must contain the tag)
-#   --tag <tag>    immutable release tag (vX.Y.Z or vX.Y.Z-canary.<ts>)
+#   --tag <tag>    immutable release tag (vX.Y.Z or vX.Y.Z+canary.<UTC timestamp>)
 #   --out <dir>    output dir (wheelhouse/ + index.json + SHA256SUMS land here)
 
 set -Eeuo pipefail
@@ -146,18 +146,23 @@ fi
 REPO=""
 TAG=""
 COMMIT_MODE=""
+RELEASE_COMMIT=""
 OUT=""
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --repo) REPO="${2:?}"; shift 2 ;;
         --tag) TAG="${2:?}"; shift 2 ;;
         --commit) COMMIT_MODE="${2:?}"; shift 2 ;;
+        --release-commit) RELEASE_COMMIT="${2:?}"; shift 2 ;;
         --out) OUT="${2:?}"; shift 2 ;;
         *) printf 'usage: termux_build.sh --repo <dir> (--tag <tag> | --commit <full-sha>) --out <dir>\n' >&2; exit 2 ;;
     esac
 done
-[ -n "$REPO" ] && [ -n "$OUT" ] && { [ -n "$TAG" ] || [ -n "$COMMIT_MODE" ]; } && { [ -z "$TAG" ] || [ -z "$COMMIT_MODE" ]; } || {
+[ -n "$REPO" ] && [ -n "$OUT" ] && { [ -n "$TAG" ] || [ -n "$COMMIT_MODE" ]; } || {
     printf 'usage: termux_build.sh --repo <dir> (--tag <tag> | --commit <full-sha>) --out <dir>\n' >&2; exit 2; }
+{ [ -z "$TAG" ] || [ -z "$COMMIT_MODE" ]; } || fail "--tag and --commit are mutually exclusive"
+[ -z "$RELEASE_COMMIT" ] || { [ -n "$TAG" ] && [ -z "$COMMIT_MODE" ]; } \
+    || fail "--release-commit requires --tag and conflicts with --commit"
 
 for tool in git curl docker python3; do
     command -v "$tool" >/dev/null 2>&1 \
@@ -171,7 +176,13 @@ case "$ARCH" in
 esac
 
 # Check source identity before writing build output.
-if [ -n "$COMMIT_MODE" ]; then
+if [ -n "$RELEASE_COMMIT" ]; then
+    [[ "$RELEASE_COMMIT" =~ ^[a-f0-9]{40}$ ]] || fail "--release-commit requires an exact full 40-character SHA"
+    [ "$(git -C "$REPO" rev-parse HEAD)" = "$RELEASE_COMMIT" ] || fail "checkout does not match --release-commit"
+    python3 "$HERE/deb_version.py" "$TAG" >/dev/null || fail "invalid release identity $TAG"
+    log "Stable release build of $TAG at admitted commit $RELEASE_COMMIT"
+    REF="$RELEASE_COMMIT"
+elif [ -n "$COMMIT_MODE" ]; then
     [[ "$COMMIT_MODE" =~ ^[a-f0-9]{40}$ ]] || fail "--commit requires an exact full 40-character SHA"
     [ "$(git -C "$REPO" rev-parse HEAD)" = "$COMMIT_MODE" ] || fail "checkout does not match --commit"
     log "Commit-only build of $COMMIT_MODE -- skipping the tag/release gates"
@@ -397,7 +408,7 @@ cp -a "$WORK/tree" "$OUT_ABS/app"
 # [h] Only a successful native build and both gates can publish cache proof.
 log "Emitting index.json and SHA256SUMS"
 provenance=(--tag "$TAG")
-if [ -n "$COMMIT_MODE" ]; then provenance=(--commit "$COMMIT_MODE"); fi
+if [ -z "$TAG" ]; then provenance=(--commit "$COMMIT_MODE"); fi
 python3 "$HERE/wheelhouse_cache.py" write "${CACHE_ARGS[@]}" "${provenance[@]}" \
     || fail "manifest emission failed"
 

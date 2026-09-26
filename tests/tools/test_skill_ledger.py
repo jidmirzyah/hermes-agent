@@ -613,9 +613,6 @@ def test_backup_fill_ignores_tar_path_traversal(ledger_env):
     # Malicious members are not.
     assert not any(p.endswith("evil.md") or p.endswith("outside.md") for p in paths)
 
-
-from pathlib import Path
-
 import pytest
 
 

@@ -16,7 +16,7 @@ import { $desktopBoot } from '@/store/boot'
 import { notify, notifyError } from '@/store/notifications'
 import { $desktopOnboarding } from '@/store/onboarding'
 
-import { type LocalBootFailureCopy, localBootFailureCopy } from './boot-failure-cause'
+import { classifyLocalBootFailure, type LocalBootFailureCopy, localBootFailureCopy } from './boot-failure-cause'
 import type { RemoteReauth } from './boot-failure-reauth'
 import {
   deriveProviderShape,
@@ -83,9 +83,9 @@ export function BootFailureOverlay() {
   // A remote/cloud backend that failed to boot is fixable from gateway settings,
   // so the escape hatch earns emphasis (local failures keep it as a quiet ghost).
   const [remoteFailure, setRemoteFailure] = useState(false)
-  // A bundled install (payload ships in-app) has no installer to repair with —
-  // the only recovery is reinstalling the app. Read from the bootstrap state
-  // snapshot so the Repair affordance is replaced by "Reinstall the app".
+  // A bundled install (payload ships in-app) has no installer to repair with.
+  // Read from the bootstrap state snapshot so Repair is never offered there;
+  // "Reinstall the app" replaces it only when the payload itself is damaged.
   const [bundled, setBundled] = useState(false)
   // Swap the card body to the embedded Gateway settings panel in place of routing
   // to the full Settings page (keeps the user on the recovery surface, no z-index
@@ -215,6 +215,12 @@ export function BootFailureOverlay() {
       }
 
       const result = await window.hermesDesktop.repairBootstrap()
+
+      // Main refuses repair on a bundled install (its stamp is authoritative;
+      // our snapshot may be stale) — say what to do instead of the raw code.
+      if (result?.error === 'bundled-immutable') {
+        throw new Error(t.boot.failure.bundledReinstallHint)
+      }
 
       if (!result?.ok) {
         throw new Error(result?.error || t.boot.errors.desktopBootFailed)
@@ -410,18 +416,22 @@ export function BootFailureOverlay() {
   } else {
     // Local failure: Use-local is redundant with Retry (both re-target local), so
     // it's dropped here; keep it for remote failures where it's the fall-back.
-    // On a bundled install the Repair affordance is replaced by "Reinstall the
-    // app" — the payload is immutable, so there is no installer to re-run.
-    actions = [
-      retryAction,
-      bundled
-        ? {
-            key: 'reinstall',
-            label: copy.reinstallApp,
-            onClick: () => openExternalLink(DESKTOP_DOCS_URL),
-            icon: <ExternalLink />,
-            variant: 'secondary'
-          }
+    // A bundled install's payload is immutable, so there is no installer to
+    // re-run: Repair is dropped, and "Reinstall the app" is offered only when
+    // the payload itself is what's broken — a port clash or timeout on a
+    // bundled install is not fixed by reinstalling.
+    const damagedPayload: boolean = bundled && classifyLocalBootFailure(boot.error) === 'installMissing'
+
+    const fixAction: RecoveryAction | null = damagedPayload
+      ? {
+          key: 'reinstall',
+          label: copy.reinstallApp,
+          onClick: () => openExternalLink(DESKTOP_DOCS_URL),
+          icon: <ExternalLink />,
+          variant: 'secondary'
+        }
+      : bundled
+        ? null
         : {
             key: 'repair',
             label: copy.repairInstall,
@@ -429,10 +439,10 @@ export function BootFailureOverlay() {
             icon: <Wrench />,
             variant: 'secondary',
             busy: 'repair'
-          },
-      { ...settingsAction, variant: 'ghost' }
-    ]
-    hint = bundled ? copy.bundledReinstallHint : copy.repairHint
+          }
+
+    actions = [retryAction, ...(fixAction ? [fixAction] : []), { ...settingsAction, variant: 'ghost' }]
+    hint = damagedPayload ? copy.bundledReinstallHint : bundled ? '' : copy.repairHint
   }
 
   if (view === 'connect') {
@@ -505,7 +515,7 @@ export function BootFailureOverlay() {
                 {copy.openLogs}
               </Button>
             </div>
-            <p className="text-xs text-muted-foreground">{hint}</p>
+            {hint ? <p className="text-xs text-muted-foreground">{hint}</p> : null}
           </div>
 
           {logs.length > 0 ? (

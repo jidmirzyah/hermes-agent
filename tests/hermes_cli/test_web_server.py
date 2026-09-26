@@ -917,24 +917,14 @@ CONFIG_SCHEMA = ProviderConfigSchema(
         import subprocess as _subprocess
 
         import hermes_cli.web_server as web_server
-        import pm
+        from hermes_cli import memory_setup
 
-        # Read the real declaration through the same candidate path as the CLI.
-        provider = tmp_path / "honcho-provider"
-        provider.mkdir()
-        (provider / "plugin.yaml").write_text("name: honcho\nextra: honcho\n")
-        monkeypatch.setattr("plugins.memory.find_provider_dir", lambda name: provider)
-        monkeypatch.setattr("hermes_cli.web_routers.memory_providers._discover_memory_provider_statuses", lambda: [])
-
-        installed = []
-
+        prepared = []
         monkeypatch.setattr(
-            pm, "sync_venv",
-            lambda extras=None, explicit=False: installed.append(tuple(extras or ())),
+            memory_setup,
+            "prepare_memory_provider_dependencies",
+            lambda name: (prepared.append(name) or ({}, "installed")),
         )
-        # The dashboard process is not the environment the sync just built; activation is a
-        # boot decision, so the row must tell the user to restart.
-        monkeypatch.setattr("pm.environments.running_from_selected_environment", lambda root: False)
 
         # Any direct pip/uv subprocess from the memory-provider pip path is
         # a regression; external-dep checks may still run subprocess, so only
@@ -953,9 +943,9 @@ CONFIG_SCHEMA = ProviderConfigSchema(
         assert resp.status_code == 200
         data = resp.json()
         pip_rows = [row for row in data["results"] if row["kind"] == "pip"]
-        assert pip_rows and pip_rows[0]["status"] == "restart_required"
+        assert pip_rows and pip_rows[0]["status"] == "installed"
         assert pip_rows[0]["command"] == "hermes pm install"
-        assert installed == [("honcho",)]
+        assert prepared == ["honcho"]
 
 
 
@@ -2080,7 +2070,7 @@ CONFIG_SCHEMA = ProviderConfigSchema(
     def test_numeric_yaml_provider_key_can_be_activated_and_deleted(self):
         """Hand-edited `providers: 2070:` (YAML int key) must still activate.
 
-        YAML loads unquoted 2070 as int; string lookup then 404ed, so
+        PyYAML loads unquoted 2070 as int; string lookup then 404ed, so
         Desktop could list the endpoint but not assign or delete it.
         """
         from hermes_cli.config import get_config_path, load_config
@@ -4956,6 +4946,7 @@ def test_resolve_chat_argv_injects_gateway_ws_url(monkeypatch):
     import hermes_cli.main_tui_launch as tui_launch
     import hermes_cli.web_server as ws
 
+    monkeypatch.setenv("PATH", "/run/current-system/sw/bin:/usr/bin")
     monkeypatch.setattr(
         tui_launch,
         "_make_tui_argv",

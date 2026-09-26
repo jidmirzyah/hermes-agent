@@ -51,35 +51,18 @@ def _cua_no_overlay() -> bool:
     Explicit ``True`` / ``False`` overrides auto-detection. See #28152, #47032.
     """
     val = _computer_use_cfg().get("no_overlay")
-    if val is not None:
-        return bool(val)
-    # Auto-detect: macOS overlay can peg a core indefinitely after a
-    # computer_use session (#47032). Prefer off until the driver teardown
-    # is solid; set computer_use.no_overlay: false to keep the cursor.
-    if sys.platform == "darwin":
-        return True
-    if sys.platform != "linux":
-        return False
-    if not os.environ.get("DISPLAY"):
-        return True
-    try:
-        with open("/proc/version", encoding="utf-8-sig") as f:
-            if "microsoft" in f.read().lower():
-                return True
-    except Exception:
-        pass
-    # Linux/X11: the cursor overlay is a fullscreen, always-on-top,
-    # all-workspaces X11 window (save-unders path). An unclean session end
-    # (agent interrupted mid-capture, stale target window) can leave it stuck
-    # above every app on every workspace, wedging desktop input until the app
-    # restarts — the same failure class as the HUD window on Mutter/X11
-    # (#83473). There is no compositor-owned surface to tear down with the
-    # client connection, so default the overlay off on X11 too; set
-    # computer_use.no_overlay: false to keep the cursor. Wayland keeps it: the
-    # compositor owns the overlay surface lifecycle there.
-    if os.environ.get("XDG_SESSION_TYPE") != "wayland" and not os.environ.get("WAYLAND_DISPLAY"):
-        return True
-    return False
+    if val is not None or sys.platform != "linux":
+        return bool(val) if val is not None else sys.platform == "darwin"
+    wsl = is_wsl()
+    return wsl or not os.environ.get("DISPLAY") or (
+        # Linux/X11: the cursor overlay is a fullscreen, always-on-top, all-workspaces X11 window
+        # (save-unders path). An unclean session end (agent interrupted mid-capture, stale target window)
+        # can leave it stuck above every app on every workspace, wedging desktop input until the app
+        # restarts — the same failure class as the HUD window on Mutter/X11 (#83473). There is no
+        # compositor-owned surface to tear down with the client connection, so default the overlay off on
+        # X11 too; set computer_use.no_overlay: false to keep the cursor. Wayland keeps it: the compositor
+        # owns the overlay surface lifecycle there.
+        os.environ.get("XDG_SESSION_TYPE") != "wayland" and not os.environ.get("WAYLAND_DISPLAY"))
 
 
 def _cua_telemetry_disabled() -> bool:

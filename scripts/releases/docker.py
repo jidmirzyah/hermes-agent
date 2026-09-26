@@ -5,20 +5,23 @@ import argparse
 import hashlib
 import json
 import re
+import subprocess
 import sys
+import time
 
 MANIFEST_SCHEMA = 1
 SHA256 = re.compile(r"[a-f0-9]{64}")
 GIT_SHA = re.compile(r"[a-f0-9]{40}")
-from scripts.releases.semver import STABLE_TAG
+from hermes_cli.update_channel import STABLE_TAG_RE
 ARCHES = ("amd64", "arm64")
+IMAGE = "nousresearch/hermes-agent"
 
 class DockerReleaseError(ValueError):
     """Raised when a phase/manifest violates the staged-release contract."""
 
 
 def require_stable_tag(tag: str) -> str:
-    if not isinstance(tag, str) or not STABLE_TAG.fullmatch(tag or ""):
+    if not isinstance(tag, str) or not STABLE_TAG_RE.fullmatch(tag or ""):
         raise DockerReleaseError(f"Not a stable release tag: {tag!r}")
     return tag
 
@@ -85,6 +88,46 @@ def sha256_file(path: str) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def output(argv: list[str]) -> str:
+    return subprocess.check_output(argv, text=True, encoding="utf-8").strip().strip('"')
+
+
+def _inspect(reference: str, run) -> str:
+    return run([
+        "docker", "buildx", "imagetools", "inspect", reference,
+        "--format", "{{json .Manifest.Digest}}",
+    ]).strip('"')
+
+
+def promote_stable(tag: str, digest: str, *, run=output, sleep=time.sleep) -> None:
+    """Move stable aliases from the immutable versioned registry receipt."""
+    require_stable_tag(tag)
+    if not re.fullmatch(r"sha256:[a-f0-9]{64}", digest):
+        raise DockerReleaseError("Invalid published manifest-list digest")
+    if _inspect(f"{IMAGE}:{tag}", run) != digest:
+        raise DockerReleaseError("Docker versioned tag differs from the final release receipt")
+    command = [
+        "docker", "buildx", "imagetools", "create", "-t", f"{IMAGE}:stable",
+        "-t", f"{IMAGE}:latest", f"{IMAGE}@{digest}",
+    ]
+    for attempt in range(3):
+        try:
+            run(command)
+            break
+        except subprocess.CalledProcessError:
+            if attempt == 2:
+                raise
+            sleep(20)
+    for alias in ("stable", "latest"):
+        for attempt in range(3):
+            if _inspect(f"{IMAGE}:{alias}", run) == digest:
+                break
+            if attempt < 2:
+                sleep(20)
+        else:
+            raise DockerReleaseError(f"Docker {alias} alias read-back mismatch")
 
 
 def main(argv: list[str] | None = None) -> int:

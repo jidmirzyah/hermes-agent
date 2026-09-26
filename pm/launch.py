@@ -9,6 +9,8 @@ truststore.inject_into_ssl()
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from pm.cli import main
+from pm.runtime import lease_current_runtime
 
 if __name__ == "__main__":
+    lease_current_runtime()
     raise SystemExit(main())

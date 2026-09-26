@@ -8,6 +8,7 @@ Document URL (CIMD) when the server supports it, else RFC 7591 DCR. ``mcp_server
 (all optional): client_id, client_secret, scope, redirect_port, redirect_uri (proxy callback),
 redirect_host, client_name, client_metadata_url, cimd, user_agent, timeout."""
 
+from pm import install_hint
 import asyncio
 import contextlib
 import contextvars
@@ -1227,7 +1228,7 @@ def build_oauth_auth(server_name: str, server_url: str, oauth_config: dict | Non
     global HermesOAuthClientProvider
     if not _OAUTH_AVAILABLE or _sdk_class("OAuthClientProvider") is None:
         logger.warning("MCP OAuth requested for '%s' but SDK auth types are not available. Run: "
-                       "python -c \"from pm import sync_venv; sync_venv(['mcp'], explicit=True)\"", server_name)
+                       f"{install_hint('mcp')}", server_name)
         return None
     from tools.mcp_oauth_provider import build_provider_kwargs, prepare_oauth_config
 

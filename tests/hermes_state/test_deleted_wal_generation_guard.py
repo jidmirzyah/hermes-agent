@@ -85,10 +85,7 @@ def test_delete_journal_two_writers_still_work(tmp_path, monkeypatch):
         a.close()
 
 
-@pytest.mark.skipif(
-    not sys.platform.startswith("linux"),
-    reason="deleted-WAL /proc scan is Linux-only",
-)
+@pytest.mark.platforms("linux")  # deleted-WAL /proc scan is Linux-only
 def test_iter_finds_self_after_wal_unlink(tmp_path, force_wal):
     path = tmp_path / "state.db"
     db = make_db(path, "s", "held")
@@ -158,10 +155,7 @@ def test_iter_finds_holder_when_db_file_itself_is_symlink(tmp_path):
         conn.close()
 
 
-@pytest.mark.skipif(
-    not sys.platform.startswith("linux"),
-    reason="deleted-WAL /proc scan is Linux-only",
-)
+@pytest.mark.platforms("linux")  # deleted-WAL /proc scan is Linux-only
 def test_second_sessiondb_open_refuses_and_does_not_mint_wal(tmp_path, force_wal):
     path = tmp_path / "state.db"
     writer = make_db(path, "s", "before-unlink")
@@ -180,10 +174,7 @@ def test_second_sessiondb_open_refuses_and_does_not_mint_wal(tmp_path, force_wal
     writer.close()
 
 
-@pytest.mark.skipif(
-    not sys.platform.startswith("linux"),
-    reason="deleted-WAL /proc scan is Linux-only",
-)
+@pytest.mark.platforms("linux")  # deleted-WAL /proc scan is Linux-only
 def test_iter_holders_ignores_live_unhashed_dentry(tmp_path, force_wal, monkeypatch):
     """OpenZFS can report a live, still-linked file's /proc fd target with the
     `` (deleted)`` suffix (dentry unhashed, nlink still 1) even though nothing
@@ -233,10 +224,7 @@ def test_iter_holders_ignores_descriptor_closed_during_scan(tmp_path, monkeypatc
     assert iter_deleted_sqlite_sidecar_holders(path) == []
 
 
-@pytest.mark.skipif(
-    not sys.platform.startswith("linux"),
-    reason="deleted-WAL write halt uses Linux unlink semantics",
-)
+@pytest.mark.platforms("linux")  # deleted-WAL write halt uses Linux unlink semantics
 def test_write_path_ignores_live_unhashed_dentry(tmp_path, force_wal, monkeypatch):
     """Same OpenZFS artifact as above, but on the sticky in-process write-path
     probe (_wal_generation_was_lost), which the open-path fix alone does not cover."""
@@ -263,10 +251,7 @@ def test_write_path_ignores_live_unhashed_dentry(tmp_path, force_wal, monkeypatc
         db.close()
 
 
-@pytest.mark.skipif(
-    not sys.platform.startswith("linux"),
-    reason="deleted-WAL /proc scan is Linux-only",
-)
+@pytest.mark.platforms("linux")  # deleted-WAL /proc scan is Linux-only
 def test_iter_holders_flags_orphan_kept_alive_by_hardlink(tmp_path, force_wal):
     """`st_nlink == 0` is not proof of an orphan either: a stale generation can keep a
     surviving hard link (a backup, an operator copy) after the watched path itself is
@@ -290,10 +275,7 @@ def test_iter_holders_flags_orphan_kept_alive_by_hardlink(tmp_path, force_wal):
         db.close()
 
 
-@pytest.mark.skipif(
-    not sys.platform.startswith("linux"),
-    reason="deleted-WAL write halt uses Linux unlink semantics",
-)
+@pytest.mark.platforms("linux")  # deleted-WAL write halt uses Linux unlink semantics
 def test_writer_halts_after_own_wal_unlinked(tmp_path, force_wal):
     path = tmp_path / "state.db"
     db = make_db(path, "s", "before")
@@ -505,10 +487,7 @@ def test_renamed_wal_generation_survives_close_and_clean_process_exit(tmp_path):
     _assert_new_generation_survives_retirement_and_exit(tmp_path, rename_sidecars=True)
 
 
-@pytest.mark.skipif(
-    not sys.platform.startswith("linux"),
-    reason="deleted-WAL /proc scan is Linux-only",
-)
+@pytest.mark.platforms("linux")  # deleted-WAL /proc scan is Linux-only
 def test_refuse_helper_raises_while_deleted_wal_held(tmp_path, force_wal):
     path = tmp_path / "state.db"
     raw = sqlite3.connect(str(path))

@@ -3,7 +3,7 @@
 # callPackage auto-wires nixpkgs args; flake inputs are passed explicitly.
 # Users override via:
 #   pkgs.hermes-agent.override { extraPythonPackages = [...]; }
-#   pkgs.hermes-agent.override { extraDependencyGroups = [ "honcho" ]; }
+#   pkgs.hermes-agent.override { extraDependencyGroups = [ "hindsight" ]; }
 {
   lib,
   stdenv,
@@ -33,11 +33,12 @@
   # check for updates without needing a local .git directory. Null for
   # impure / dirty builds where flakes can't determine a rev.
   rev ? null,
-  revCount ? null,
   branch ? null,
   dirty ? false,
   lastModified ? null,
   # Overridable parameters
+  version ? "0.0.0",
+  distance ? 0,
   extraPythonPackages ? [ ],
   extraDependencyGroups ? [ ],
 }:
@@ -47,28 +48,15 @@ let
   pythonLock = callPackage ./pythonLock.nix { };
   python = pythonLock.interpreter;
 
-  version = (fromTOML (builtins.readFile ../pyproject.toml)).project.version;
-  versionModule = builtins.readFile ../hermes_cli/__init__.py;
-  releaseRevCountLine = lib.findFirst (line: lib.hasPrefix "__release_rev_count__" line) null (
-    lib.splitString "\n" versionModule
-  );
-  releaseRevCountMatch =
-    if releaseRevCountLine == null then null else builtins.match ".*= ([0-9]+)" releaseRevCountLine;
-  releaseRevCount =
-    if releaseRevCountMatch == null then null else builtins.fromJSON (builtins.elemAt releaseRevCountMatch 0);
-
   # Install stamp values — written to install-stamp.json so the Python
   # runtime (CLI, TUI) reads one file instead of env vars or .git probes.
   stampDistance =
-    if revCount != null && releaseRevCount != null then
-      lib.trivial.max 0 (revCount - releaseRevCount)
-    else
-      null;
+    if builtins.isInt distance && distance >= 0 then distance else throw "distance must be a non-negative integer";
   stampDisplayVersion =
-    if stampDistance != null && stampDistance > 0 then
-      "${version}+${toString stampDistance}"
-    else if dirty && stampDistance == null then
-      "${version}+?"
+    if stampDistance > 0 && rev != null then
+      "${version}+${toString stampDistance}.g${builtins.substring 0 7 rev}"
+    else if stampDistance > 0 then
+      throw "a non-zero distance requires an exact revision"
     else
       version;
 

@@ -1,12 +1,12 @@
 """Native payload staging through PM's existing package authority."""
 from __future__ import annotations
 
+import argparse
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
-import argparse
 from dataclasses import asdict
 from pathlib import Path
 
@@ -52,7 +52,7 @@ def _arch_guard(store_dir: Path) -> list[str]:
 
 
 
-from pm.cache_lock import lock_package_names, prune_uv_cache_to_lock
+from pm.uv_cache_prune import lock_package_names, prune_uv_cache_to_lock
 
 __all__ = ["prune_uv_cache_to_lock", "lock_package_names", "stage_uv_cache"]
 
@@ -106,7 +106,7 @@ def stage_native(args) -> int:
     cache = Path(getattr(args, "cache", None) or os.environ.get("UV_CACHE_DIR") or uv_cache_dir()).resolve()
     base_env = dict(os.environ)
     if current_target() == "win32-arm64":
-        from scripts.build.windows_deps import prepare_windows_environment
+        from pm.native_build import prepare_windows_environment
 
         base_env = prepare_windows_environment(source=root, state=out.parent / ".build-deps", env=base_env)
     # Rustup resolves its installed toolchain under HOME unless these are explicit.
@@ -177,6 +177,7 @@ def _prepare_native(*, out: Path, ref: str, source: Path, cache: Path,
     # with a revision selecting different pins.
     if (repo_dir / "pm/lock.json").read_bytes() != paths.lockfile_path().read_bytes():
         raise ValueError("selected revision's PM lock differs from the builder; use a checkout at that revision")
+    build_env = os.environ if env is None else env
 
     names = [
         n for n in _bundle_package_names()
@@ -219,7 +220,7 @@ def _prepare_native(*, out: Path, ref: str, source: Path, cache: Path,
     venv_dir = out / "venv"
     if venv_dir.exists():
         shutil.rmtree(venv_dir)
-    env = dict(os.environ if env is None else env)
+    env = dict(build_env)
     from pm import build_environment
 
     # Cold native wheels need a larger budget than interactive installs.

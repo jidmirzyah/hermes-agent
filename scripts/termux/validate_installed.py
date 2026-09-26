@@ -1,16 +1,13 @@
 """Exercise a freshly installed Termux bundle with networking disabled."""
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 from pathlib import Path
-import pty
 import re
 import select
 import struct
 import subprocess
-import termios
 import tempfile
 import time
 
@@ -42,6 +39,10 @@ def stop_child_tree(child: subprocess.Popen) -> None:
 
 
 def tui_smoke(launcher: Path, env: dict[str, str], cwd: Path) -> None:
+    import fcntl
+    import pty
+    import termios
+
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
     child = subprocess.Popen(

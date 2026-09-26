@@ -438,6 +438,15 @@ publishing the new environment and configuration. A resolution failure preserves
 the previous selection. Restart Hermes when a new selected environment is not
 yet active in the running process.
 
+The enabled set is the union over the default home **and every profile** under
+`profiles/`, read from each `config.yaml` (`plugins.enabled`, `plugins.disabled`,
+`memory.provider`). PM refuses to guess at a home it cannot read: a
+`config.yaml` that is not valid YAML, is not a mapping, or has a non-list
+`plugins.enabled`/`plugins.disabled` or non-string `memory.provider` fails
+dependency preparation for **all** homes (`could not parse plugin selection:
+<path>`), rather than silently dropping that profile's plugins from the next
+environment. Fix or remove the offending file; an empty `config.yaml` is fine.
+
 Ordinary Hermes application updates preserve user plugin directories, including
 wrapper files and external sidecar links. Explicit plugin updates or removals
 can change those files. See [Package management](../../reference/package-management.md)

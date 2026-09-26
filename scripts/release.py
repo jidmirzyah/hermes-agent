@@ -1,23 +1,9 @@
-#!/usr/bin/env python3
-"""Hermes Agent Release Script
+#!/usr/bin/env -S bash -c 'exec "$BASH" "$(dirname "$0")/_hermes-python" "$0" "$@"'
+"""Hermes Agent release entrypoint.
 
-Generates changelogs and creates GitHub releases with SemVer tags.
-
-Usage:
-    # Preview changelog (dry run)
-    python scripts/release.py
-
-    # Preview with semver bump
-    python scripts/release.py --bump minor
-
-    # Create the release
-    python scripts/release.py --bump minor --publish
-
-    # First release (no previous tag)
-    python scripts/release.py --bump minor --publish --first-release
-
-    # Override release-date metadata (e.g. for a belated release)
-    python scripts/release.py --bump minor --publish --date 2026.3.15
+Stable releases use the ``release``, ``publish``, and ``abandon`` subcommands.
+Canary, commit, and dynamic-channel operations retain their top-level flags.
+See ``website/docs/developer-guide/stable-releases.md`` for the operator flow.
 """
 
 import argparse
@@ -36,14 +22,12 @@ from pathlib import Path
 # is import-light: only os/sys + version constants).
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from hermes_cli.update_channel import _CANARY_TAG_RE, canary_tag_for_date  # noqa: E402
+from hermes_cli.update_channel import (  # noqa: E402
+    _CANARY_TAG_RE, STABLE_TAG_RE, canary_tag_for_date, canary_timestamp,
+    is_canary_tag,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-VERSION_FILE = REPO_ROOT / "hermes_cli" / "__init__.py"
-PYPROJECT_FILE = REPO_ROOT / "pyproject.toml"
-UV_LOCK_FILE = REPO_ROOT / "uv.lock"
-DESKTOP_PKG_FILE = REPO_ROOT / "apps" / "desktop" / "package.json"
-PKG_LOCK_FILE = REPO_ROOT / "package-lock.json"
 
 # ──────────────────────────────────────────────────────────────────────
 # Git email → GitHub username mapping
@@ -2163,8 +2147,7 @@ def dispatch_desktop_build(tag: str, gh_repo: str | None) -> bool:
     Explicit dispatch also works for tags created by GITHUB_TOKEN.
     """
     canary = _CANARY_TAG_RE.fullmatch(tag) is not None
-    from scripts.releases.semver import STABLE_TAG
-    if not canary and not STABLE_TAG.fullmatch(tag):
+    if not canary and not STABLE_TAG_RE.fullmatch(tag):
         raise ValueError("Expected an exact stable or canary release tag")
     workflow = "desktop-bundled-release.yml" if canary else "stable-release.yml"
     cmd = ["gh", "workflow", "run", workflow, "--ref", "main" if canary else tag,
@@ -2249,211 +2232,20 @@ def remote_github_repo(remote: str) -> str | None:
     return match.group(1) if match else None
 
 
-# Cap the major at three digits, as in scripts/write_install_stamp.py.
-# The legacy CalVer tags (v2026.7.20) must never match as SemVer.
-_SEMVER_TAG_RE = re.compile(r"v(?:0|[1-9]\d{0,2})\.\d+\.\d+$")
-_LEGACY_CALVER_TAG_RE = re.compile(r"v20\d{2}\.\d+\.\d+(?:\.\d+)?$")
-# Canary prerelease tags are matched with _CANARY_TAG_RE, imported from
-# hermes_cli.update_channel — the single authority for the canary tag
-# shape (v<major>.<minor>.<any patch>-canary.<YYYYMMDDHHMMSS>, plus the
-# legacy date-only form). The suffix keeps them out of every stable
-# selector (all of which require the no-suffix SemVer shape above).
-# Second precision so manual fires can publish several canaries per day;
-# the identifier is pure numeric and fixed-length, so semver prerelease
-# comparison (numeric) and lexical sort both order it chronologically.
-
-
-def release_tag_for_version(semver: str) -> str:
-    """Return the canonical Git tag for a Hermes package version."""
-    return f"v{semver}"
-
-
-def get_last_tag():
-    """Get the latest SemVer tag, falling back to legacy CalVer history."""
-    tags = git("tag", "--list", "v[0-9]*", "--sort=-v:refname")
-    if tags:
-        tag_list = tags.split("\n")
-        for tag in tag_list:
-            if _SEMVER_TAG_RE.fullmatch(tag) and not _LEGACY_CALVER_TAG_RE.fullmatch(tag):
-                return tag
-
-    legacy_tags = git("tag", "--list", "v20*", "--sort=-v:refname")
-    if legacy_tags:
-        return legacy_tags.split("\n")[0]
-    return None
+# Stable tags are matched with STABLE_TAG_RE and canary tags
+# with _CANARY_TAG_RE, both imported from hermes_cli.update_channel — the
+# single authority for both tag shapes (the stable major is capped at three
+# digits so historical CalVer tags like v2026.7.20 never match; the canary
+# identity is the exact stable core plus full UTC build metadata.
+# Second precision allows several canaries per day; the fixed-width UTC stamp
+# sorts chronologically even though SemVer ignores it for precedence.
 
 
 def get_last_canary_tag():
-    """The newest canary tag, or None. Date order == version order within
-    one minor; across minors the -v:refname sort already ranks the newer
-    minor first."""
-    tags = git("tag", "--list", "v[0-9]*-canary.*", "--sort=-v:refname")
-    for tag in (tags.split("\n") if tags else []):
-        if _CANARY_TAG_RE.fullmatch(tag):
-            return tag
-    return None
-
-
-def get_current_version():
-    """Read current semver from __init__.py."""
-    content = VERSION_FILE.read_text(encoding="utf-8-sig")
-    match = re.search(r'__version__\s*=\s*"([^"]+)"', content)
-    return match.group(1) if match else "0.0.0"
-
-
-def bump_version(current: str, part: str) -> str:
-    """Bump a semver version string."""
-    parts = current.split(".")
-    if len(parts) != 3:
-        parts = ["0", "0", "0"]
-    major, minor, patch = int(parts[0]), int(parts[1]), int(parts[2])
-
-    if part == "major":
-        major += 1
-        minor = 0
-        patch = 0
-    elif part == "minor":
-        minor += 1
-        patch = 0
-    elif part == "patch":
-        patch += 1
-    else:
-        raise ValueError(f"Unknown bump part: {part}")
-
-    return f"{major}.{minor}.{patch}"
-
-
-def update_version_files(semver: str, calver_date: str) -> list[str]:
-    """Update version strings in source files. returns a list of updates files."""
-    # Update __init__.py
-    content = VERSION_FILE.read_text(encoding="utf-8-sig")
-    content = re.sub(
-        r'__version__\s*=\s*"[^"]+"',
-        f'__version__ = "{semver}"',
-        content,
-    )
-    content = re.sub(
-        r'__release_date__\s*=\s*"[^"]+"',
-        f'__release_date__ = "{calver_date}"',
-        content,
-    )
-    # This function runs before the release-bump commit is created. Record the
-    # count that commit will have so Nix store builds can derive ``+N`` without
-    # a .git directory. The corresponding SemVer tag is made at that commit.
-    parent_count = int(git("rev-list", "--count", "HEAD") or "0")
-    revision = f'__release_rev_count__ = {parent_count + 1}'
-    content, replacements = re.subn(
-        r'^__release_rev_count__\s*=\s*\d+', revision, content,
-        flags=re.MULTILINE,
-    )
-    if not replacements:
-        content = content.rstrip("\n") + f"\n{revision}\n"
-    VERSION_FILE.write_text(content, encoding="utf-8")
-
-    # Update pyproject.toml
-    pyproject = PYPROJECT_FILE.read_text(encoding="utf-8-sig")
-    pyproject = re.sub(
-        r'^version\s*=\s*"[^"]+"',
-        f'version = "{semver}"',
-        pyproject,
-        # Turn-end file-mutation verifier footer appended by run_agent.py
-        # (``_format_file_mutation_failure_footer``). It's a UI affordance — reading "warning file mutation
-        # verifier, 2 files were NOT modified..." aloud is noise (#40772). The footer is a ``⚠️
-        # File-mutation verifier:`` header line followed by indented ``•`` bullet lines; strip the whole
-        # block.
-        flags=re.MULTILINE,
-    )
-    PYPROJECT_FILE.write_text(pyproject, encoding="utf-8")
-
-    # Keep the desktop Electron app's package.json version in lockstep with the
-    # Python package version. The desktop About panel reads the live Hermes
-    # version at runtime, but app.getVersion()/packaging metadata still come
-    # from this field, so it must track pyproject to avoid drift.
-    pkg_text = DESKTOP_PKG_FILE.read_text(encoding="utf-8-sig")
-    pkg_text = re.sub(
-        r'("version"\s*:\s*)"[^"]+"',
-        rf'\g<1>"{semver}"',
-        pkg_text,
-        count=1,
-    )
-    DESKTOP_PKG_FILE.write_text(pkg_text, encoding="utf-8")
-
-    # npm mirrors each workspace package's version into the root lockfile.
-    # Update the apps/desktop entry so `npm ci`/`npm install` do not see the
-    # lockfile as out of date and rewrite it (or fail in CI) after a bump.
-    lock_text = PKG_LOCK_FILE.read_text(encoding="utf-8-sig")
-    lock_text = re.sub(
-        r'("apps/desktop"\s*:\s*\{\s*"name"\s*:\s*"[^"]+"\s*,\s*"version"\s*:\s*)"[^"]+"',
-        rf'\g<1>"{semver}"',
-        lock_text,
-        count=1,
-    )
-    PKG_LOCK_FILE.write_text(lock_text, encoding="utf-8")
-
-    # uv.lock records the editable root package's version from pyproject.
-    # Update it in place so a post-release `uv sync`/`uv lock` is a no-op.
-    uv_text = UV_LOCK_FILE.read_text(encoding="utf-8-sig")
-    uv_text = re.sub(
-        r'(name = "hermes-agent"\nversion = )"[^"]+"',
-        rf'\g<1>"{semver}"',
-        uv_text,
-        count=1,
-    )
-    UV_LOCK_FILE.write_text(uv_text, encoding="utf-8")
-
-    updated = [
-        str(VERSION_FILE),
-        str(PYPROJECT_FILE),
-        str(DESKTOP_PKG_FILE),
-        str(PKG_LOCK_FILE),
-        str(UV_LOCK_FILE),
-    ]
-
-    # Keep the bootstrap installer (Hermes-Setup.dmg CFBundleShortVersionString)
-    # in lockstep with the Python package version. Tauri reads `version` from
-    # package.json + tauri.conf.json; a hardcoded 0.0.1 ships in the DMG.
-    installer_pkg = REPO_ROOT / "apps" / "bootstrap-installer" / "package.json"
-    if installer_pkg.exists():
-        pkg_text = installer_pkg.read_text(encoding="utf-8-sig")
-        pkg_text = re.sub(
-            r'("version"\s*:\s*)"[^"]+"',
-            rf'\g<1>"{semver}"',
-            pkg_text,
-            count=1,
-        )
-        installer_pkg.write_text(pkg_text, encoding="utf-8")
-        updated.append(str(installer_pkg))
-
-    installer_tauri = (
-        REPO_ROOT / "apps" / "bootstrap-installer" / "src-tauri" / "tauri.conf.json"
-    )
-    if installer_tauri.exists():
-        pkg_text = installer_tauri.read_text(encoding="utf-8-sig")
-        pkg_text = re.sub(
-            r'("version"\s*:\s*)"[^"]+"',
-            rf'\g<1>"{semver}"',
-            pkg_text,
-            count=1,
-        )
-        installer_tauri.write_text(pkg_text, encoding="utf-8")
-        updated.append(str(installer_tauri))
-
-    installer_cargo = (
-        REPO_ROOT / "apps" / "bootstrap-installer" / "src-tauri" / "Cargo.toml"
-    )
-    if installer_cargo.exists():
-        cargo_text = installer_cargo.read_text(encoding="utf-8-sig")
-        cargo_text = re.sub(
-            r'^version\s*=\s*"[^"]+"',
-            f'version = "{semver}"',
-            cargo_text,
-            count=1,
-            flags=re.MULTILINE,
-        )
-        installer_cargo.write_text(cargo_text, encoding="utf-8")
-        updated.append(str(installer_cargo))
-
-    return updated
+    """The newest canonical canary receipt, by embedded build time."""
+    raw = git("tag", "--list", "v*+canary.*")
+    tags = [tag for tag in (raw.split("\n") if raw else []) if is_canary_tag(tag)]
+    return max(tags, key=lambda tag: canary_timestamp(tag) or "", default=None)
 
 
 def resolve_author(name: str, email: str) -> str:
@@ -2720,33 +2512,61 @@ def generate_changelog(commits, tag_name, semver, repo_url="https://github.com/N
     return "\n".join(lines)
 
 
-def _canary_timestamp(tag: str) -> str | None:
-    """The YYYYMMDD[HHMMSS] UTC stamp embedded in a canary tag, or None."""
-    if not _CANARY_TAG_RE.fullmatch(tag):
-        return None
-    return tag.split("-canary.", 1)[1]
+def _resume_canary(tag: str, remote: str, repository: str, *, notes_file: Path | None = None) -> None:
+    """Converge a tag-pushed canary through draft, dispatch, and protected head."""
+    ref = f"refs/tags/{tag}"
+    local_object = git("rev-parse", ref)
+    commit = git("rev-parse", f"{ref}^{{commit}}")
+    if git("cat-file", "-t", local_object) != "tag":
+        raise ValueError("Canary receipt must be an annotated tag")
+    remote_refs = dict(line.split()[::-1] for line in git(
+        "ls-remote", remote, ref, f"{ref}^{{}}",
+    ).splitlines())
+    if remote_refs.get(ref) != local_object or remote_refs.get(f"{ref}^{{}}") != commit:
+        raise ValueError("Canary receipt differs from its exact remote tag object")
 
+    view = subprocess.run(
+        ["gh", "release", "view", tag, "--repo", repository, "--json", "tagName,isDraft,isPrerelease"],
+        cwd=REPO_ROOT, capture_output=True, text=True, encoding="utf-8",
+    )
+    if view.returncode != 0:
+        create = [
+            "gh", "release", "create", tag, "--repo", repository,
+            "--verify-tag", "--draft", "--prerelease",
+            "--title", f"Hermes Agent canary {tag}",
+        ]
+        create.extend(["--notes-file", str(notes_file)] if notes_file else ["--generate-notes"])
+        created = subprocess.run(
+            create, cwd=REPO_ROOT, capture_output=True, text=True, encoding="utf-8",
+        )
+        if created.returncode != 0:
+            raise ValueError(created.stderr.strip() or "Canary draft could not be recovered")
+    else:
+        release = json.loads(view.stdout)
+        if (release.get("tagName") != tag or not isinstance(release.get("isDraft"), bool)
+                or release.get("isPrerelease") is not True):
+            raise ValueError("Canary release state differs from its receipt")
 
-def _stamp_epoch(stamp: str) -> int | None:
-    """Epoch seconds for a YYYYMMDD or YYYYMMDDHHMMSS UTC stamp."""
-    try:
-        if len(stamp) == 14:
-            return int(datetime.strptime(stamp, "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc).timestamp())
-        if len(stamp) == 8:
-            return int(datetime.strptime(stamp, "%Y%m%d").replace(tzinfo=timezone.utc).timestamp())
-    except ValueError:
-        pass
-    return None
+    from scripts.releases.versioning import published_channel_identity
+    published = published_channel_identity(repository, "canary")
+    if published is not None and published == (tag[1:], commit):
+        print(f"✓ {tag} is already published.")
+        return
+    if not dispatch_desktop_build(tag, repository):
+        raise SystemExit(1)
+    print(f"Resumed canary publication for {tag}.")
+    print(f"Workflow: https://github.com/{repository}/actions/workflows/desktop-bundled-release.yml")
+    print("Wait for that workflow to finish. It builds this canary and publishes the draft when the build is green.")
+    print(f"The draft is at https://github.com/{repository}/releases/tag/{tag}.")
 
 
 def cmd_canary(args) -> None:
-    """--canary: tag + draft today's canary prerelease.
+    """--canary: tag + draft a canary source identity.
 
-    Owns ALL the tag math (the workflow passes only --publish/--remote):
-    next-MINOR over the newest stable tag, dated suffix, changelog since
-    the last canary (or last stable for the first one). No version-file
-    bump, no commit — the tag points at HEAD as-is, and the stamp's
-    displayVersion carries the canary version from the tag.
+    The source identity is the newest stable version plus a full UTC timestamp
+    in SemVer build metadata. It therefore compares equal to that stable; only
+    the R2 canary head moves subscribers. No version-file bump or commit is
+    created — the receipt tag points at HEAD as-is.
 
     Created as a DRAFT prerelease, for the same reason the stable path
     drafts: a published release with no installers attached is a release
@@ -2760,66 +2580,40 @@ def cmd_canary(args) -> None:
     canary — the skip-if-no-new-commits gate lives HERE, not in workflow
     YAML.
     """
-    date_utc = args.date or datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
-    stable_tag = get_last_tag()
-    if stable_tag is None:
-        print("✗ No stable release tag exists; a canary needs a stable line to version over.")
-        sys.exit(1)
-    tag_name = canary_tag_for_date(stable_tag, date_utc)
-
+    date_utc = args.date or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    push_remote = resolve_push_remote(args.remote)
+    gh_repo = remote_github_repo(push_remote)
+    if not gh_repo:
+        raise ValueError("Canary publication requires a GitHub repository remote")
     prev_canary = get_last_canary_tag()
-    since = prev_canary or stable_tag
-
-    if git_result("rev-parse", "--verify", "--quiet", f"refs/tags/{tag_name}").returncode == 0:
-        print(f"✓ {tag_name} already exists — nothing to do.")
-        return
-
-    # The canary MSIX build number is minutes-since-the-last-stable (see
-    # msix-shared.mjs). Two canaries of the same LINE cut within the SAME
-    # minute would share a build number → identical MSIX version → App
-    # Installer refuses the second over the first. Refuse the second cut
-    # loudly instead of shipping an uninstallable equal-version package.
-    # (A same-minute cut on a NEW line — after a fresh stable — is fine: the
-    # patch bump already outversions the old line, so no collision.)
-    prev_ts = _canary_timestamp(prev_canary) if prev_canary else None
-    same_line = bool(prev_canary) and prev_canary.split("-canary.", 1)[0] == tag_name.split("-canary.", 1)[0]
-    prev_min = _stamp_epoch(prev_ts) // 60 if prev_ts and _stamp_epoch(prev_ts) is not None else None
-    cur_min = _stamp_epoch(date_utc) // 60 if _stamp_epoch(date_utc) is not None else None
-    if same_line and prev_min is not None and prev_min == cur_min:
-        print(
-            f"✗ {tag_name} is in the same minute as {prev_canary} — they would "
-            "share an MSIX build number (minutes since the last stable). Wait a "
-            "minute and re-run."
-        )
-        return
-
     if prev_canary:
         head = git("rev-parse", "HEAD")
         if head and head == git("rev-parse", f"{prev_canary}^{{commit}}"):
-            print(f"✓ No new commits since {prev_canary} — nothing to do.")
+            if args.publish:
+                _resume_canary(prev_canary, push_remote, gh_repo)
+            else:
+                print(f"✓ No new commits since {prev_canary} — nothing to do.")
             return
+    from scripts.releases.versioning import published_stable_identity
+    stable_version, stable_commit = published_stable_identity(gh_repo)
+    tag_name = canary_tag_for_date(stable_version, date_utc)
+
+    since = prev_canary or stable_commit
+
+    if git_result("rev-parse", "--verify", "--quiet", f"refs/tags/{tag_name}").returncode == 0:
+        if git("rev-parse", f"{tag_name}^{{commit}}") != git("rev-parse", "HEAD"):
+            raise ValueError(f"{tag_name} already receipts a different commit")
+        if args.publish:
+            _resume_canary(tag_name, push_remote, gh_repo)
+        else:
+            print(f"✓ {tag_name} already exists — nothing to do.")
+        return
+
 
     commits = get_commits(since_tag=since)
     if not commits:
         print(f"✓ No new commits since {since} — nothing to do.")
         return
-
-    # MSIX version components are 16-bit (makeappx rejects >65535). The
-    # canary build number is minutes-since-the-last-stable, which crosses
-    # the cap at 45.5 days. A canary cut on a stable base older than 45
-    # days cannot carry a legal build number — fail loudly, never clamp (a
-    # clamped number would break monotonicity and the update path).
-    stable_epoch = git("log", "-1", "--format=%ct", stable_tag)
-    canary_epoch = _stamp_epoch(date_utc)
-    if stable_epoch.isdigit() and canary_epoch is not None:
-        days_old = (canary_epoch - int(stable_epoch)) / 86400
-        if days_old > 45:
-            print(
-                f"✗ {stable_tag} is {days_old:.1f} days old — a canary cut now "
-                "would overflow the 16-bit MSIX build number (minutes since "
-                "this stable). Cut a stable release first."
-            )
-            sys.exit(1)
 
     version = tag_name.lstrip("v")
     print(f"Canary: {tag_name} ({len(commits)} commits since {since})")
@@ -2831,9 +2625,6 @@ def cmd_canary(args) -> None:
         print(changelog)
         print("\nDry run complete. To publish, add --publish")
         return
-
-    push_remote = resolve_push_remote(args.remote)
-    gh_repo = remote_github_repo(push_remote)
 
     tag_result = git_result(
         "tag", "-a", tag_name, "-m", f"Hermes Agent canary {date_utc}"
@@ -2849,32 +2640,8 @@ def cmd_canary(args) -> None:
 
     changelog_file = REPO_ROOT / ".release_notes.md"
     changelog_file.write_text(changelog, encoding="utf-8")
-    gh_cmd = [
-        "gh", "release", "create", tag_name,
-        "--draft",
-        "--prerelease",
-        # Abort rather than let gh invent a tag: without this it creates a
-        # missing tag from the default branch's tip, which would silently
-        # release a different commit than the one we tagged.
-        "--verify-tag",
-        "--title", f"Hermes Agent canary {date_utc} ({tag_name})",
-        "--notes-file", str(changelog_file),
-    ]
-    if gh_repo:
-        gh_cmd += ["--repo", gh_repo]
-    result = subprocess.run(
-        gh_cmd, capture_output=True, text=True, encoding="utf-8",
-        errors="replace", cwd=str(REPO_ROOT),
-    )
-    if result.returncode != 0:
-        print(f"✗ GitHub prerelease failed: {result.stderr.strip()}")
-        print(f"    Notes kept at {changelog_file}; tag {tag_name} is pushed.")
-        sys.exit(1)
+    _resume_canary(tag_name, push_remote, gh_repo, notes_file=changelog_file)
     changelog_file.unlink(missing_ok=True)
-    print(f"✓ Canary prerelease drafted: {result.stdout.strip()}")
-    # The build stages the installers to the R2 bucket and, for a canary
-    # tag, publishes it when the whole matrix is green.
-    dispatch_desktop_build(tag_name, gh_repo)
     # Record the tag for any workflow step that wants it. release.py
     # starts the build itself, so nothing consumes this today; it stays
     # because a step output is the cheap, conventional handle for "which
@@ -2885,28 +2652,29 @@ def cmd_canary(args) -> None:
             f.write(f"tag={tag_name}\n")
 
 
+def _canary_date(tag: str) -> str | None:
+    """The YYYYMMDD receipt date for a canonical canary tag."""
+    if not is_canary_tag(tag):
+        return None
+    return tag.split("+canary.", 1)[1][:8]
+
+
 def prune_old_canaries(args) -> None:
     """--prune-canaries: delete canary releases+tags older than 14 days.
 
     Keep-on-doubt: any parse failure keeps the release. The keep window is
-    dated by the tag's own YYYYMMDD suffix, not the release timestamp, so
-    a re-published old tag never resets its clock.
+    dated by the tag's own UTC suffix, not the release timestamp, so a
+    re-published old tag never resets its clock.
     """
     push_remote = resolve_push_remote(args.remote)
     gh_repo = remote_github_repo(push_remote)
     cutoff = (datetime.now(timezone.utc) - timedelta(days=14)).strftime("%Y%m%d")
 
-
-    tags = git("tag", "--list", "v[0-9]*-canary.*", "--sort=-v:refname")
+    tags = git("tag", "--list", "v*+canary.*", "--sort=-creatordate")
     doomed = []
     for tag in (tags.split("\n") if tags else []):
-        m = _CANARY_TAG_RE.fullmatch(tag)
-        # Compare on the DATE prefix only: the suffix may be 8 (legacy) or
-        # 14 (timestamped) digits, and a 14-digit string compared against
-        # an 8-digit cutoff would be decided by length, not by day.
-        # (_CANARY_TAG_RE carries no capture group, so slice the suffix
-        # out of the tag itself.)
-        if m and tag.split("-canary.", 1)[1][:8] < cutoff:
+        date = _canary_date(tag)
+        if date is not None and date < cutoff:
             doomed.append(tag)
     if not doomed:
         print("✓ No canaries older than 14 days.")
@@ -2927,16 +2695,15 @@ def prune_old_canaries(args) -> None:
         else:
             print(f"⚠ Could not delete {tag}: {result.stderr.strip()}")
     if not args.publish:
-        print("Dry run complete. To delete, add --publish")
+        print("Dry run complete. No release was deleted.")
+        print("Run the same command with --publish to delete the tags above.")
 
 
 def main():
     parser = argparse.ArgumentParser(description="Hermes Agent Release Tool")
-    parser.add_argument("--bump", choices=["major", "minor", "patch"],
-                        help="Which semver component to bump")
     parser.add_argument("--canary", action="store_true",
-                        help="Tag + publish today's canary prerelease "
-                             "(v<stable.minor+1>.0-canary.<YYYYMMDDHHMMSS>); no-op when "
+                        help="Tag + publish a stable-core canary "
+                             "(v<stable>+canary.<YYYYMMDDTHHMMSSZ>); no-op when "
                              "HEAD has no new commits since the last canary")
     parser.add_argument("--build-commit", type=str, metavar="REV",
                         help="Preview an exact-commit build into releases/commit/<sha>/ on R2. "
@@ -2959,206 +2726,61 @@ def main():
                              "is configured; the single remote is used when only one exists.")
     parser.add_argument("--date", type=str,
                         help="Override release date metadata (format: YYYY.M.D)")
-    parser.add_argument("--first-release", action="store_true",
-                        help="Mark as first release (no previous tag expected)")
-    parser.add_argument("--output", type=str,
-                        help="Write changelog to file instead of stdout")
+
     parser.add_argument("--no-changelog", action="store_true",
                         help="Skip changelog")
+    subcommands = parser.add_subparsers(dest="command")
+    release_cmd = subcommands.add_parser(
+        "release", help="Claim a version, cut a draft, and dispatch the gate")
+    release_cmd.add_argument("--commit", required=True, metavar="SHA",
+                             help="The main commit to release")
+    release_cmd.add_argument("--bump", choices=["major", "minor", "patch"], default="patch")
+    release_cmd.add_argument("--autopublish", action="store_true",
+                             help="Publish on green instead of leaving a draft")
+    release_cmd.add_argument("--remote", type=str)
+    publish_cmd = subcommands.add_parser(
+        "publish", help="Publish a green stable release through the ordered sequencer")
+    publish_cmd.add_argument("--version", required=True)
+    publish_cmd.add_argument("--remote", type=str)
+    abandon_cmd = subcommands.add_parser(
+        "abandon", help="Delete a stable draft while retaining its spent claim")
+    abandon_cmd.add_argument("--version", required=True)
+    abandon_cmd.add_argument("--remote", type=str)
     from scripts.releases.channel_build import add_arguments, validate_arguments, cmd_channel
 
     add_arguments(parser)
     args = parser.parse_args()
 
+    from scripts.releases.entrypoint import cmd_abandon, cmd_publish, cmd_release
+
+    stable_commands = {"release": cmd_release, "publish": cmd_publish, "abandon": cmd_abandon}
+    if args.command:
+        stable_commands[args.command](args)
+        return
     if validate_arguments(parser, args):
         cmd_channel(args)
         return
     if (args.bundle_env or args.bundle_unset) and args.build_commit is None:
         parser.error("--bundle-env and --bundle-unset require --build-commit")
-    if args.canary and args.bump:
-        parser.error("--canary and --bump are mutually exclusive")
     if args.build_commit is not None:
         conflicting = [name for name, supplied in (
-            ("--bump", args.bump), ("--canary", args.canary),
-            ("--prune-canaries", args.prune_canaries), ("--first-release", args.first_release),
-            ("--date", args.date), ("--output", args.output), ("--no-changelog", args.no_changelog),
+            ("--canary", args.canary), ("--prune-canaries", args.prune_canaries),
+            ("--date", args.date), ("--no-changelog", args.no_changelog),
         ) if supplied]
         if conflicting:
             parser.error("--build-commit cannot be combined with " + ", ".join(conflicting))
-        from scripts.releases.commit_build import cmd_build_commit
+    from scripts.releases.commit_build import cmd_build_commit
 
-        cmd_build_commit(args)
-        return
-    if args.canary:
-        cmd_canary(args)
-        return
-    if args.prune_canaries:
-        prune_old_canaries(args)
-        return
-
-    # Determine release-date metadata.
-    if args.date:
-        calver_date = args.date
-    else:
-        now = datetime.now()
-        calver_date = f"{now.year}.{now.month}.{now.day}"
-
-    # Determine semver
-    current_version = get_current_version()
-    if args.bump:
-        new_version = bump_version(current_version, args.bump)
-    else:
-        new_version = current_version
-    tag_name = release_tag_for_version(new_version)
-
-    # Get previous tag
-    prev_tag = get_last_tag()
-    if not prev_tag and not args.first_release:
-        print("No previous tags found. Use --first-release for the initial release.")
-        print(f"Would create tag: {tag_name}")
-        print(f"Would set version: {new_version}")
-        return
-
-    # Get commits
-    commits = get_commits(since_tag=prev_tag)
-    if not commits:
-        print("No new commits since last tag.")
-        if not args.first_release:
-            return
-
-    print(f"{'='*60}")
-    print("  Hermes Agent Release Preview")
-    print(f"{'='*60}")
-    print(f"  Release tag:     {tag_name}")
-    print(f"  SemVer:          v{current_version} → v{new_version}")
-    print(f"  Previous tag:    {prev_tag or '(none — first release)'}")
-    print(f"  Commits:         {len(commits)}")
-    print(f"  Unique authors:  {len({c['github_author'] for c in commits})}")
-    print(f"  Mode:            {'PUBLISH' if args.publish else 'DRY RUN'}")
-    print(f"{'='*60}")
-    print()
-
-    # Generate changelog
-    changelog = generate_changelog(
-        commits, tag_name, new_version,
-        prev_tag=prev_tag,
-        first_release=args.first_release,
+    modes = (
+        (args.build_commit is not None, cmd_build_commit),
+        (args.canary, cmd_canary),
+        (args.prune_canaries, prune_old_canaries),
     )
-
-    if args.output:
-        Path(args.output).write_text(changelog, encoding="utf-8")
-        print(f"Changelog written to {args.output}")
-    else:
-        print(changelog)
-
-    if args.publish:
-        # Resolve the destination FIRST: a wrong or ambiguous remote must
-        # fail before any commit or tag exists, not after.
-        push_remote = resolve_push_remote(args.remote)
-        gh_repo = remote_github_repo(push_remote)
-
-        print(f"\n{'='*60}")
-        print("  Publishing release...")
-        print(f"  Remote: {push_remote}" + (f" ({gh_repo})" if gh_repo else ""))
-        print(f"{'='*60}")
-
-        # Update version files
-        if args.bump:
-            add_files = update_version_files(new_version, calver_date)
-            print(f"  ✓ Updated version files to v{new_version} ({calver_date})")
-
-            # Commit version bump
-            add_result = git_result("add", *add_files)
-            if add_result.returncode != 0:
-                print(f"  ✗ Failed to stage version files: {add_result.stderr.strip()}")
-                return
-
-            commit_result = git_result(
-                "commit", "-m", f"chore: bump version to v{new_version} ({calver_date})"
-            )
-            if commit_result.returncode != 0:
-                print(f"  ✗ Failed to commit version bump: {commit_result.stderr.strip()}")
-                return
-            print("  ✓ Committed version bump")
-
-        # Create annotated tag
-        tag_result = git_result(
-            "tag", "-a", tag_name, "-m",
-            f"Hermes Agent v{new_version} ({calver_date})\n\nWeekly release"
-        )
-        if tag_result.returncode != 0:
-            print(f"  ✗ Failed to create tag {tag_name}: {tag_result.stderr.strip()}")
+    for selected, handler in modes:
+        if selected:
+            handler(args)
             return
-        print(f"  ✓ Created tag {tag_name}")
-
-        # Push the tag WITH the branch. gh auto-creates a missing tag
-        # "from the latest state of the default branch", so the tag must
-        # exist on the remote before the release is created (--verify-tag
-        # below turns a failed push into a hard error rather than a
-        # release pinned to the wrong commit).
-        push_result = git_result("push", push_remote, "HEAD", "--tags")
-        if push_result.returncode == 0:
-            print(f"  ✓ Pushed to {push_remote}")
-        else:
-            print(f"  ✗ Failed to push to {push_remote}: {push_result.stderr.strip()}")
-            print("    Continue manually after fixing access:")
-            print(f"    git push {push_remote} HEAD --tags")
-
-        # Keep the release hidden until the stable pipeline completes all
-        # validation, artifact publication and channel promotion.
-        changelog_file = REPO_ROOT / ".release_notes.md"
-        changelog_file.write_text(changelog, encoding="utf-8")
-
-        gh_cmd = [
-            "gh", "release", "create", tag_name,
-            "--draft",
-            # Abort rather than let gh invent a tag: without this it creates
-            # a missing tag from the default branch's tip, so a failed tag
-            # push above would silently release a different commit.
-            "--verify-tag",
-            "--title", f"Hermes Agent v{new_version} ({calver_date})",
-            "--notes-file", str(changelog_file),
-        ]
-        # Pin gh to the pushed remote's repo: gh's own default resolution
-        # can pick a different remote than the one the tag just landed on.
-        if gh_repo:
-            gh_cmd += ["--repo", gh_repo]
-
-        gh_bin = shutil.which("gh")
-        if gh_bin:
-            result = subprocess.run(
-                gh_cmd,
-                capture_output=True, text=True, encoding="utf-8", errors="replace",
-                cwd=str(REPO_ROOT),
-            )
-        else:
-            result = None
-
-        if result and result.returncode == 0:
-            changelog_file.unlink(missing_ok=True)
-            print(f"  ✓ GitHub draft release created: {result.stdout.strip()}")
-            dispatch_desktop_build(tag_name, gh_repo)
-            print(f"\n  🎉 Release v{new_version} ({tag_name}) drafted!")
-            print("     Stable Release runs full CI, Docker and package acceptance.")
-            print("     It publishes artifacts and advances stable only after the required gates pass.")
-        else:
-            if result is None:
-                print("  ✗ GitHub release skipped: `gh` CLI not found.")
-            else:
-                print(f"  ✗ GitHub release failed: {result.stderr.strip()}")
-            print(f"    Release notes kept at: {changelog_file}")
-            print("    Tag was created locally. Create the draft release manually:")
-            repo_flag = f" --repo {gh_repo}" if gh_repo else ""
-            print(
-                f"    gh release create {tag_name}{repo_flag} --draft --title 'Hermes Agent v{new_version} ({calver_date})' "
-                f"--notes-file .release_notes.md"
-            )
-            print(f"\n  ✓ Release v{new_version} ({tag_name}) prepared for manual publish.")
-    else:
-        print(f"\n{'='*60}")
-        print("  Dry run complete. To publish, add --publish")
-        print("  Example: python scripts/release.py --bump minor --publish")
-        print(f"{'='*60}")
+    parser.error("select release, publish, abandon, --canary, --build-commit, or a channel operation")
 
 
 if __name__ == "__main__":

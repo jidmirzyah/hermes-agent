@@ -51,7 +51,7 @@ Si tu habilidad es especializada, contribuida por la comunidad o de nicho, es me
 
 ## Proveedores de Memoria: Publicar como Plugin Independiente
 
-**Ya no aceptamos nuevos proveedores de memoria en este repositorio.** El conjunto de proveedores integrados en `plugins/memory/` (honcho, mem0, supermemory, byterover, holographic, openviking, retaindb) está cerrado. Si quieres añadir un nuevo backend de memoria, publícalo como un **repositorio de plugin independiente** que los usuarios instalen en `~/.hermes/plugins/` (o a través de un entry point de pip).
+**Ya no aceptamos nuevos proveedores de memoria en este repositorio.** El conjunto de proveedores integrados en `plugins/memory/` (honcho, mem0, supermemory, byterover, hindsight, holographic, openviking, retaindb) está cerrado. Si quieres añadir un nuevo backend de memoria, publícalo como un **repositorio de plugin independiente** que los usuarios instalen en `~/.hermes/plugins/` (o a través de un entry point de pip).
 
 Los plugins de memoria independientes:
 
@@ -79,14 +79,14 @@ En Bash, desde la raíz del repositorio:
 
 ```bash
 source ./activate
-python hermes --version
+hermes --version
 ```
 
 En PowerShell:
 
 ```powershell
 . .\activate.ps1
-python hermes --version
+hermes --version
 ```
 
 ### Entorno independiente de pruebas
@@ -94,7 +94,7 @@ python hermes --version
 Usa el Python preparado por PM para crear un entorno nuevo:
 
 ```bash
-python -m pm.build_env --source . --out .venv --extra dev --group test
+python -m pm.build_env --source . --out .venv --group dev --group test
 scripts/run_tests.sh tests/agent/ -v
 ```
 

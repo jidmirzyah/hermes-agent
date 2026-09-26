@@ -33,6 +33,9 @@ def test_stage_result_matches_the_actual_exit(tmp_path, case):
         repo = tmp_path / "install"
         repo.mkdir()
         subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True, capture_output=True)
+        # A commit makes it a real checkout; an empty one is an interrupted clone that gets re-cloned.
+        subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q",
+                        "--allow-empty", "-m", "fixture"], check=True, capture_output=True)
         subprocess.run(["git", "-C", str(repo), "remote", "add", "origin", str(tmp_path / "missing")],
                        check=True, capture_output=True)
     elif case == "write-failure":

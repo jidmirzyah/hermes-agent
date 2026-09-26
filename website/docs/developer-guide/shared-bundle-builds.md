@@ -2,7 +2,7 @@
 
 Hermes separates dependency preparation, product builds, and distribution
 packaging. The compiler and agent-assembly interfaces live in
-[`scripts/build/README.md`](../scripts/build/README.md). These are current
+[`scripts/build/README.md`](https://github.com/NousResearch/hermes-agent/blob/main/scripts/build/README.md). These are current
 interfaces, not proof that every distribution passed native acceptance.
 
 ## Providers, products, and distributions
@@ -289,7 +289,7 @@ format on a fresh native runner, then runs the same composer/provider/reply
 check as install-e2e. Windows universal assembly stages bytes before the smoke;
 its canary feed is published separately only after both native smoke matrices
 pass. macOS feed publication and stable candidate acceptance are likewise gated.
-See [install and chat acceptance](../tests/install/README.md#post-build-artifact-smoke)
+See [install and chat acceptance](https://github.com/NousResearch/hermes-agent/blob/main/tests/install/README.md#post-build-artifact-smoke)
 for covered formats, checkpoint evidence and the Store/Linux/no-upload limits.
 
 `scripts.releases.handoff fetch --public-base URL` downloads a staged artifact

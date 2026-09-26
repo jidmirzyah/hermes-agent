@@ -8,6 +8,7 @@ import pytest
 from hermes_cli import banner, source_check
 from hermes_cli.source_releases import SourceTarget
 from hermes_cli.update_channel import install_id
+from hermes_cli.version_info import get_version_info
 
 
 @pytest.mark.parametrize("channel", ["stable", "canary", "preview-from-r2"])
@@ -27,7 +28,8 @@ def test_release_channel_never_compares_main_or_reuses_main_cache(tmp_path, monk
         "update": {"installs": {install_id(root): {"path": str(root), "channel": channel}}}
     }))
     (get_hermes_home() / ".update_check").write_text(json.dumps({
-        "rev": None, "ver": banner.VERSION, "head": head, "behind": 99, "ts": 10**12,
+        "rev": None, "ver": get_version_info().derived_version,
+        "head": head, "behind": 99, "ts": 10**12,
     }))
     resolve = Mock(return_value=SourceTarget(channel, channel, "example/fork", commit=target, version="1.2.3"))
     monkeypatch.setattr(source_check, "resolve_source_target", resolve)

@@ -33,7 +33,6 @@ def _isolate_venv_holders(monkeypatch):
 @pytest.fixture(autouse=True)
 def _isolate_update(monkeypatch):
     from hermes_cli import update_cmd
-
     monkeypatch.setattr(update_cmd, "_post_update_sqlite_runtime_status", lambda: (True, None))
 
 

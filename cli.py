@@ -4,8 +4,9 @@
 # Must be the very first import (UTF-8 stdio on Windows). Missing only mid-``hermes update``.
 try:
     import hermes_bootstrap  # noqa: F401
-except ModuleNotFoundError:
-    pass
+except ModuleNotFoundError as exc:
+    if exc.name != "hermes_bootstrap":
+        raise  # the bootstrap exists but cannot load: skipping it would skip PM activation
 
 import logging
 import os

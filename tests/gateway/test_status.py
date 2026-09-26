@@ -609,7 +609,7 @@ class TestTerminatePid:
             (["taskkill", "/PID", "123", "/T", "/F"], True, True, 10, windows_hide_flags())
         ]
 
-    @pytest.mark.windows_only
+    @pytest.mark.platforms("windows")
     def test_windows_force_refuses_pid_without_start_time_guard(self, monkeypatch):
         calls = []
         monkeypatch.setattr(status.subprocess, "run", lambda *args, **kwargs: calls.append(args))
@@ -619,7 +619,7 @@ class TestTerminatePid:
 
         assert calls == []
 
-    @pytest.mark.windows_only
+    @pytest.mark.platforms("windows")
     def test_windows_force_refuses_reused_pid(self, monkeypatch):
         monkeypatch.setattr(status, "_get_process_start_time", lambda pid: 999)
         calls = []

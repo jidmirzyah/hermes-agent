@@ -1061,7 +1061,6 @@ def test_restore_rejects_probe_termination(monkeypatch, tmp_path, capsys):
     assert "exit code 7" in output
     assert "gateway was not restarted" in output
 
-
 def test_restore_stays_parked_when_untracked_baseline_is_unknown(
     monkeypatch, tmp_path, capsys
 ):
@@ -1116,7 +1115,7 @@ def test_gateway_restore_prompt_defaults_to_keep_stash(tmp_path, capsys):
     )
 
     assert restored is False
-    assert [default for _prompt, default in prompts] == ["n"]
+    assert prompts == [("Restore local changes now? [y/N]", "n")]
     assert "still preserved in git stash" in capsys.readouterr().out
 
 

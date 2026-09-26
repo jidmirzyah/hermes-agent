@@ -146,23 +146,24 @@ def _assert_forwarded(
         inherited_home=inherited_home,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert len(calls) == 2, calls
     expected_args = ["update", "--yes", "--gateway"]
     if windows:
         expected_args += ["--force"]
     expected_args += expected
-    assert (
-        calls
-        == [
-            {
-                "argv": expected_args,
-                "home": str(home),
-                "cwd": str(install),
-                "install_root": str(install),
-            }
-        ]
-        * 2
-    )
+    expected_argvs = [expected_args] * 2
+    if windows:
+        # Desktop stopped the local gateways before handing off; a verified
+        # update restores the whole fleet in the same home and install.
+        expected_argvs.append(["gateway", "start", "--all"])
+    assert calls == [
+        {
+            "argv": argv,
+            "home": str(home),
+            "cwd": str(install),
+            "install_root": str(install),
+        }
+        for argv in expected_argvs
+    ], calls
     receipt = json.loads(
         (home / ".hermes-update-result.json").read_text(encoding="utf-8-sig")
     )

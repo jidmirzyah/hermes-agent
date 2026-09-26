@@ -4,7 +4,8 @@ from __future__ import annotations
 import atexit
 import errno
 import base64
-from contextlib import contextmanager
+from collections.abc import Callable
+from contextlib import contextmanager, suppress
 import hashlib
 import json
 import logging
@@ -182,25 +183,40 @@ def finish_publication(project: Path) -> None:
     recover_publication(project)
 
 
-def lease_generation(environment: Path) -> None:
-    """Hold a kernel lock until process exit.
+def lease_generation(environment: Path) -> Callable[[], None]:
+    """Hold a kernel lock until process exit; the returned callable releases it early.
 
-    Call under ``runtime_lock`` at boot; when that lock times out it is still safe to lease
-    without it, because the collector only removes generations that are NOT selected and are
-    older than a day — the generation being leased here is the selected one.
+    Call under ``runtime_lock`` at boot. Without the lock (``runtime_lock`` timed out) the
+    caller must re-read the selection after leasing: an installer may have moved it in between,
+    and an unselected, unleased generation is exactly what the collector removes.
     """
-    generation = environment.parent
+    return lease_directory(environment.parent)
+
+
+def lease_directory(generation: Path) -> Callable[[], None]:
+    """Pin a lease-managed generation directory for this process's lifetime."""
     if not (generation / ".lease-managed").is_file():
-        return  # Generations produced before leases stay conservatively retained.
+        return lambda: None  # Generations produced before leases stay conservatively retained.
     leases = generation / ".leases"
     leases.mkdir(exist_ok=True)
-    fd = os.open(leases / uuid.uuid4().hex, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+    lease = leases / uuid.uuid4().hex
+    fd = os.open(lease, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
     try:
         _lock(fd, wait=True)
     except BaseException:
         os.close(fd)
         raise
-    atexit.register(os.close, fd)
+
+    def release() -> None:
+        atexit.unregister(release)
+        os.close(fd)
+        # Best effort: the collector ignores unlocked lease files, but one per
+        # invocation would otherwise accumulate for the life of the generation.
+        with suppress(OSError):
+            lease.unlink()
+
+    atexit.register(release)
+    return release
 
 
 def collect_generations(project: Path, *, min_age_seconds: float = 86400) -> list[Path]:
@@ -224,16 +240,19 @@ def collect_generations(project: Path, *, min_age_seconds: float = 86400) -> lis
             marker = generation / ".lease-managed"
             if not marker.is_file() or time.time() - marker.stat().st_mtime < min_age_seconds:
                 continue
-            active = False
-            for lease in (generation / ".leases").glob("*"):
-                fd = os.open(lease, os.O_RDWR)
-                try:
-                    if not _lock(fd, wait=False):
-                        active = True
-                        break
-                finally:
-                    os.close(fd)
-            if not active:
+            if not leases_held(generation):
                 shutil.rmtree(generation)
                 removed.append(generation)
     return removed
+
+
+def leases_held(generation: Path) -> bool:
+    """True while any process still holds a lease taken by ``lease_directory``."""
+    for lease in (generation / ".leases").glob("*"):
+        fd = os.open(lease, os.O_RDWR)
+        try:
+            if not _lock(fd, wait=False):
+                return True
+        finally:
+            os.close(fd)
+    return False

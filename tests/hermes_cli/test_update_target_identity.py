@@ -266,26 +266,28 @@ def test_stable_git_uses_remote_identity_without_moving_local_tags(update_tree, 
 
 
 @pytest.mark.platforms('windows')
-@pytest.mark.parametrize('transport', ['gitless', 'no-git', 'missing-release', 'missing-sha',
-                                     'git-error', 'moved-git-error', 'dirty'])
+@pytest.mark.parametrize('transport', ['gitless', 'no-git', 'git-error', 'dirty'])
 def test_stable_zip_consumes_the_same_commit_through_the_real_swap(update_tree, monkeypatch, tmp_path, transport):
+    from hermes_cli import source_releases
+    from hermes_cli.release_channels import ChannelResolution
+
     t = update_tree
+    monkeypatch.setattr(cli_main, '_pause_windows_gateways_for_update',
+                        lambda: {"resume_needed": True})
     archive = tmp_path / 'source.zip'
     git(t.origin, 'archive', '--format=zip', '--prefix=hermes-agent-source/', f'--output={archive}', t.wanted)
     archive_bytes = archive.read_bytes()
-    latest = {'tag_name': 'v1.1.0', 'draft': False, 'prerelease': False}
+    record = {"schema": 1, "name": "stable", "repository": "NousResearch/hermes-agent",
+              "policy": "stable-release", "state": "active", "identity": {}, "nextSequence": 2,
+              "head": {"buildId": "build-fixture", "sequence": 1}}
+    manifest = {"schema": 1, "request": {"buildId": "build-fixture", "channel": "stable", "sequence": 1,
+                "repository": "NousResearch/hermes-agent", "commit": t.wanted, "sourceVersion": "1.1.0",
+                "version": "0.0.1", "identity": {}, "bundleEnv": {}}, "packages": []}
+    monkeypatch.setattr(source_releases, '_resolve_channel',
+                        lambda name, repository: ChannelResolution(record, record, manifest))
     routes = {
-        '/repos/NousResearch/hermes-agent/releases/latest': latest,
-        '/repos/NousResearch/hermes-agent/releases/tags/v1.1.0': latest,
-        '/repos/NousResearch/hermes-agent/commits/v1.1.0': {'sha': t.wanted},
-        '/repos/NousResearch/hermes-agent/tags?per_page=100': [{'name': 'v1.1.0', 'commit': {'sha': t.wanted}}],
         f'/NousResearch/hermes-agent/archive/{t.wanted}.zip': archive_bytes,
     }
-    if transport == 'missing-release':
-        routes.pop('/repos/NousResearch/hermes-agent/releases/latest')
-    if transport == 'missing-sha':
-        routes['/repos/NousResearch/hermes-agent/commits/v1.1.0'] = {'sha': 'not-a-commit'}
-        routes.pop('/repos/NousResearch/hermes-agent/tags?per_page=100')
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
@@ -333,14 +335,11 @@ def test_stable_zip_consumes_the_same_commit_through_the_real_swap(update_tree, 
             failed = True
             raise subprocess.CalledProcessError(128, command, '', 'fixture: Git file I/O failed')
         result = real_run(command, *args, **kwargs)
-        if 'ls-remote' in command and transport == 'moved-git-error':
-            real_run(['git', '-c', 'tag.gpgSign=false', 'tag', '-fa', 'v1.1.0', t.newer, '-m', 'moved'],
-                     cwd=t.origin, check=True, capture_output=True)
         if 'fetch' in command:
             fetched = True
         return result
 
-    if transport in {'gitless', 'no-git', 'missing-release', 'missing-sha'}:
+    if transport in {'gitless', 'no-git'}:
         (t.clone / '.git').rename(tmp_path / 'git-state')
     if transport == 'dirty':
         (t.clone / 'content.txt').write_text('local work\n', encoding='utf-8')
@@ -348,7 +347,7 @@ def test_stable_zip_consumes_the_same_commit_through_the_real_swap(update_tree, 
     monkeypatch.setattr(urllib.request, 'urlopen', local_open)
     monkeypatch.setattr(subprocess, 'run', guarded_run)
     try:
-        if transport in {'missing-sha', 'missing-release', 'dirty'}:
+        if transport == 'dirty':
             with pytest.raises(SystemExit) as error:
                 cli_main.cmd_update(t.args)
             assert error.value.code == 1
@@ -368,10 +367,9 @@ def test_stable_zip_consumes_the_same_commit_through_the_real_swap(update_tree, 
             assert [url for url in urls if '/archive/' in url] == [
                 f'https://github.com/NousResearch/hermes-agent/archive/{t.wanted}.zip']
         assert t.resumed
-        if transport in {'git-error', 'moved-git-error', 'dirty'}:
+        if transport in {'git-error', 'dirty'}:
             assert failed and fetched
-            assert len([cmd for cmd in git_calls if 'ls-remote' in cmd]) == 1
-            assert sum('/commits/' in url for url in urls) == 1
+            assert not any('ls-remote' in cmd for cmd in git_calls)
     finally:
         server.shutdown()
         thread.join(timeout=5)

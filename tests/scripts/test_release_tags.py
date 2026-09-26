@@ -1,4 +1,4 @@
-"""Release-tag policy: new releases use semver, old CalVer tags remain readable."""
+"""Release-tag policy accepts only the current stable and canary grammars."""
 
 import importlib.util
 from pathlib import Path
@@ -14,8 +14,21 @@ release = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(release)
 
 
-def test_release_tag_uses_the_semver_version():
-    assert release.release_tag_for_version("0.20.0") == "v0.20.0"
+def test_every_stable_selector_rejects_legacy_calver_tags():
+    """One shared stable grammar: a CalVer tag (v2026.9.21) must be refused by
+    every stable admission path, or a workflow_call carrying the old GitHub
+    'latest' tag would be admitted for docker/stable publication."""
+    from hermes_cli.source_releases import _valid_tag
+    from scripts.releases.docker import DockerReleaseError, require_stable_tag
+    from scripts.releases.semver import compare
+
+    for tag in ("v2026.9.21", "v1000.0.0", "v1.01.0", "v1.0.0-canary.20260921000000"):
+        assert not _valid_tag(tag, "stable")
+        with pytest.raises(DockerReleaseError):
+            require_stable_tag(tag)
+    assert _valid_tag("v1.0.0", "stable") and require_stable_tag("v999.0.0") == "v999.0.0"
+    with pytest.raises(ValueError):
+        compare("1.0.0", "2026.9.21")
 
 
 @pytest.fixture
@@ -32,17 +45,15 @@ def release_repo(tmp_path, monkeypatch):
     return lambda *args: git(tmp_path, *args)
 
 
-def test_real_tag_order_and_remote_selection(release_repo):
+def test_canary_tag_order_and_remote_selection(release_repo):
     git = release_repo
-    assert release.get_last_tag() is None and release.get_last_canary_tag() is None
+    assert release.get_last_canary_tag() is None
     for tag in ('v2026.7.7', 'v2026.7.20'):
         git('tag', tag)
-    assert release.get_last_tag() == 'v2026.7.20'
-    for tag in ('v0.9.0', 'v0.20.0', 'v0.19.0', 'v0.21.0-canary.20260818090000',
-                'v0.21.0-canary.20260818171500', 'v0.21.0-canary.20260818'):
+    for tag in ('v0.9.0', 'v0.20.0', 'v0.19.0', 'v0.20.0+canary.20260818T090000Z',
+                'v0.20.0+canary.20260818T171500Z'):
         git('tag', tag)
-    assert release.get_last_tag() == 'v0.20.0'
-    assert release.get_last_canary_tag() == 'v0.21.0-canary.20260818171500'
+    assert release.get_last_canary_tag() == 'v0.20.0+canary.20260818T171500Z'
     with pytest.raises(SystemExit, match='no git remotes'):
         release.resolve_push_remote(None)
     git('remote', 'add', 'origin', 'https://github.com/o/r')

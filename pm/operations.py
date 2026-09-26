@@ -5,7 +5,7 @@ Only the private environment engine knows how to obtain or invoke uv.
 """
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 import hashlib
 import json
 import os
@@ -40,6 +40,7 @@ def build_environment(
     Sealed builds prune only the .pth files that refer to build-time state.
     """
     from pm.environment import _fresh_build, managed_environment
+    from pm.native_build import source_build_environment
 
     source, out = Path(source).absolute(), Path(out).absolute()
     if not (source / "pyproject.toml").is_file():
@@ -49,6 +50,10 @@ def build_environment(
     if out.exists() or out.is_symlink():
         raise FileExistsError(f"environment destination already exists: {out}")
     _require_install_allowed(explicit)
+    # A caller-supplied env is already the build environment (bundle staging
+    # prepares its own, shared with its Node builds).
+    if env is None:
+        env = source_build_environment(source)
     environment = managed_environment(
         out, python=Path(python) if python is not None else None,
         cache=Path(cache) if cache is not None else None, env=env,
@@ -184,9 +189,69 @@ def ensure_environment(
 ) -> Path:
     """Make an isolated dependency set current, then atomically select it.
 
+    An optional tool entrypoint is validated before publication, not afterwards.
+    """
+    root = _environment_root(name, root)
+    requirements = _requirements(requirements)
+    if executable is not None:
+        _tool(Path("unused/python"), executable)  # Validate before any write.
+
+    def build(generation: Path) -> Path:
+        (generation / "pyproject.toml").write_text(
+            '[project]\nname = "hermes-side-environment"\nversion = "0"\n'
+            'requires-python = ">=3.11"\ndependencies = '
+            + json.dumps(requirements) + '\n[tool.uv]\npackage = false\n', encoding="utf-8",
+        )
+        previous = _selection(root)
+        if previous:
+            seed = root / previous["generation"] / "uv.lock"
+            if seed.is_file():
+                shutil.copyfile(seed, generation / "uv.lock")
+        return build_environment(source=generation, out=generation / "venv", frozen=False,
+                                 explicit=explicit, timeout=timeout)
+
+    return _ensure_generation(name, root, {"requirements": requirements}, build,
+                              record={"requirements": requirements}, explicit=explicit,
+                              executable=executable)
+
+
+def ensure_project_environment(
+    name: str, project: Path, *, extras: Sequence[str] = (), groups: Sequence[str] = (),
+    root: Path | None = None, explicit: bool = False, timeout: int = 1800,
+) -> Path:
+    """Make an isolated environment of a project's LOCKED dependencies current.
+
+    The project itself is not installed, and nothing reaches PM facts or the
+    selected application generation: this serves side environments such as the
+    test suite's. The identity covers the lock and manifest bytes, so any edit
+    that can change the resolved set selects a fresh generation.
+    """
+    root = _environment_root(name, root)
+    project = Path(project).absolute()
+    extras, groups = sorted(set(extras)), sorted(set(groups))
+    manifests = {}
+    for manifest in ("pyproject.toml", "uv.lock"):
+        try:
+            manifests[manifest] = hashlib.sha256((project / manifest).read_bytes()).hexdigest()
+        except FileNotFoundError as exc:
+            raise InstallError("venv", f"locked project environment needs {project / manifest}") from exc
+
+    def build(generation: Path) -> Path:
+        return build_environment(source=project, out=generation / "venv", extras=extras, groups=groups,
+                                 no_install_project=True, frozen=True, explicit=explicit, timeout=timeout)
+
+    return _ensure_generation(name, root, {"manifests": manifests, "extras": extras, "groups": groups},
+                              build, record={"extras": extras, "groups": groups}, explicit=explicit)
+
+
+def _ensure_generation(
+    name: str, root: Path, inputs: dict, build: Callable[[Path], Path], *, record: dict, explicit: bool,
+    executable: str | None = None,
+) -> Path:
+    """Select the generation whose inputs match, building one only when none does.
+
     Build at the final path: Windows launchers and scripts embed that path.
     The prior generation survives both successful replacement and failed builds.
-    An optional tool entrypoint is validated before publication, not afterwards.
     """
     from hermes_cli.runtime_state import _lock
     from pm.install import _refuse_lazy, lazy_installs_allowed
@@ -194,20 +259,16 @@ def ensure_environment(
     from pm import paths
     from pm.store import current_target
 
-    root = _environment_root(name, root)
-    requirements = _requirements(requirements)
-    if executable is not None:
-        _tool(Path("unused/python"), executable)  # Validate before any write.
     lock = Lockfile(paths.lockfile_path())
     target = current_target()
-    inputs = {"requirements": requirements, "python": lock.version("python"), "target": target,
+    inputs = {**inputs, "python": lock.version("python"), "target": target,
               "artifacts": [item["sha256"] for item in lock.artifacts("python", target)]}
     identity = hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
 
     def current() -> Path | None:
-        record = _selection(root)
+        selected = _selection(root)
         python = environment_python(name, root=root)
-        if (record.get("inputs") == identity and python is not None
+        if (selected.get("inputs") == identity and python is not None
                 and (executable is None or _tool(python, executable) is not None)):
             return python
         return None
@@ -226,22 +287,10 @@ def ensure_environment(
         generation = root / f"gen-{uuid.uuid4().hex}"
         generation.mkdir()
         try:
-            (generation / "pyproject.toml").write_text(
-                '[project]\nname = "hermes-side-environment"\nversion = "0"\n'
-                'requires-python = ">=3.11"\ndependencies = '
-                + json.dumps(requirements) + '\n[tool.uv]\npackage = false\n', encoding="utf-8",
-            )
-            previous = _selection(root)
-            if previous:
-                seed = root / previous["generation"] / "uv.lock"
-                if seed.is_file():
-                    shutil.copyfile(seed, generation / "uv.lock")
-            python = build_environment(source=generation, out=generation / "venv", frozen=False,
-                                       explicit=explicit, timeout=timeout)
+            python = build(generation)
             if executable is not None and _tool(python, executable) is None:
                 raise InstallError(name, f"installed requirements do not provide {executable!r}")
-            _write(root / "active.json", {"generation": generation.name, "inputs": identity,
-                                        "requirements": requirements})
+            _write(root / "active.json", {"generation": generation.name, "inputs": identity, **record})
         except BaseException:
             shutil.rmtree(generation, ignore_errors=True)
             raise

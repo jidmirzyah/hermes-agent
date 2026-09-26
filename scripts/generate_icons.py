@@ -109,7 +109,10 @@ except ImportError:
 # Copy of hermes_cli.update_channel._CANARY_TAG_RE: this renderer runs in an
 # isolated icon-build venv (Nix, Docker, PM) where the application package is
 # absent. tests/scripts/test_icon_flavors.py pins it to the canonical one.
-_CANARY_TAG_RE = re.compile(r"^v(?:0|[1-9]\d*)\.\d+\.\d+-canary\.20\d{6}(?:\d{6})?$")
+_CANARY_TAG_RE = re.compile(
+    r"^v(?:0|[1-9]\d{0,2})\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)"
+    r"\+canary\.20\d{6}T\d{6}Z$"
+)
 
 # The nous dark background (#0d1117) — fixed dark tile/background everywhere.
 DARK_HEX = "#0d1117"

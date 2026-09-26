@@ -47,8 +47,9 @@ def assemble(request: dict, native: dict, root: Path, *, artifact_prefix: str) -
     if all(row.get("receiverProtocol") == 1 for row in rows):
         manifest["receiverProtocol"] = 1
     tag = request.get("releaseTag", "")
+    from hermes_cli.update_channel import is_canary_tag
     record = {"name": request["channel"], "repository": request["repository"], "identity": request["identity"],
-              "policy": ("canary-release" if "-canary." in tag else "stable-release") if tag else "preview", "head": None}
+              "policy": ("canary-release" if is_canary_tag(tag) else "stable-release") if tag else "preview", "head": None}
     validate_manifest(manifest, record, base)
     descriptor = root / "win32" / "stable.appinstaller"
     write_appinstaller(descriptor, identity=windows[0]["identity"], publisher=windows[0]["publisher"],

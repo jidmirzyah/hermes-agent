@@ -57,6 +57,8 @@ class R2ChannelStore:
             # Lost success responses and conditional retries are settled by exact bytes.
             current = self.get(key)
             if current is not None and current[0] == body:
+                from scripts.releases.upload_summary import note
+                note(self.scope.key(key))
                 return
             if isinstance(exc, r2.R2RequestError) and exc.status == 412:
                 raise ChannelConflict(f"Channel write conflict: {key}") from exc
@@ -64,6 +66,8 @@ class R2ChannelStore:
         current = self.get(key)
         if current is None or current[0] != body:
             raise ChannelConflict(f"Channel changed before authenticated readback: {key}")
+        from scripts.releases.upload_summary import note
+        note(self.scope.key(key))
 
     def keys(self, prefix: str) -> list[str]:
         keys, seen = [], set()
@@ -204,9 +208,9 @@ class ChannelPublisher:
             raise ChannelError("Protected release policy mismatch")
         if record["state"] != "active":
             raise ChannelError("Retired channel is permanently closed to publication")
-        from scripts.releases.semver import is_valid_version
+        from scripts.releases.semver import is_canary_version, is_release_version
         version = request["version"]
-        if not is_valid_version(version) or ("-canary." in version) != (policy == "canary-release"):
+        if not is_release_version(version) or is_canary_version(version) != (policy == "canary-release"):
             raise ChannelError("Release version does not match protected policy")
         self.authorize(action, record)
         if release_gate(request) is not True:
@@ -349,12 +353,23 @@ class ChannelPublisher:
             if policy is not None and record["head"] is not None:
                 from scripts.releases.semver import compare
                 from scripts.releases.stable import windows_version
+                from hermes_cli.update_channel import canary_timestamp
                 previous_head = record["head"]
                 previous = self.store.get(previous_head["manifestKey"])
                 if previous is None or hashlib.sha256(previous[0]).hexdigest() != previous_head["sha256"]:
                     raise ChannelError("Previous protected manifest is unavailable or changed")
                 previous_request = validate_manifest(decode_json(previous[0]), record, self.public_base)["request"]
-                if (compare(request["version"], previous_request["version"]) <= 0
+                if policy == "canary-release":
+                    current_stamp = canary_timestamp(request["releaseTag"])
+                    previous_stamp = canary_timestamp(previous_request["releaseTag"])
+                    source_increases = (
+                        current_stamp is not None
+                        and previous_stamp is not None
+                        and current_stamp > previous_stamp
+                    )
+                else:
+                    source_increases = compare(request["version"], previous_request["version"]) > 0
+                if (not source_increases
                         or windows_version(request["windowsVersion"]) <= windows_version(previous_request["windowsVersion"])):
                     raise ChannelError("Protected native versions must increase; stale completion refused")
             if self.verify_build is None or self.verify_build(request, manifest) is not True:

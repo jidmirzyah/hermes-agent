@@ -92,6 +92,13 @@ def _probe_interpreter(python: Path, timeout: float = _PROBE_TIMEOUT) -> tuple[b
     return False, reason[-500:] if reason else f"probe exited {result.returncode}"
 
 
+#: Probe verdict per side interpreter, for this process. The probe imports torch via
+#: sentence_transformers — seconds of cold start — and is_available() /
+#: unavailable_reason() / initialize() each ask it per session. A reinstall publishes a new
+#: PM generation (a different interpreter path), so the key misses and the env is re-probed.
+_probe_verdicts: dict[Path, tuple[bool, str | None]] = {}
+
+
 def check_local_runtime() -> tuple[bool, str | None]:
     """(available, reason) for local_embedded — probes the side env, never the
     boot-selected main environment."""
@@ -102,7 +109,10 @@ def check_local_runtime() -> tuple[bool, str | None]:
                   "run 'hermes memory setup' and choose Local Embedded")
         logger.debug("Hindsight local runtime unavailable: %s", reason)
         return False, reason
-    available, reason = _probe_interpreter(python)
+    verdict = _probe_verdicts.get(python)
+    if verdict is None:
+        verdict = _probe_verdicts[python] = _probe_interpreter(python)
+    available, reason = verdict
     if available:
         logger.debug("Hindsight side runtime probe OK (%s)", python)
     else:
@@ -128,8 +138,16 @@ def _daemon_subprocess_env(config: dict[str, Any]) -> dict[str, str]:
     """Env for the side-env bridge/manager process. daemon_embed_manager reads
     the health-grace window AT IMPORT TIME of that process, so it rides here —
     not in Hermes' own environment. Main-env interpreter markers are stripped so
-    the side python resolves only its own environment."""
-    env = dict(os.environ)
+    the side python resolves only its own environment.
+
+    Built for the SERVED profile, never ``dict(os.environ)``: under multiplex the
+    process env is the launch profile's, so profile X's daemon would have started
+    with the default profile's HERMES_HOME and credentials. Credentials are not
+    inherited at all — the manager reads the LLM keys from the profile's own 0600
+    env file (see the bridge), so the child needs none from us."""
+    from tools.environments.local import served_profile_child_env
+
+    env = served_profile_child_env(inherit_credentials=False)
     env["PYTHONUTF8"] = "1"
     for key in ("VIRTUAL_ENV", "PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PYTHONEXECUTABLE"):
         env.pop(key, None)

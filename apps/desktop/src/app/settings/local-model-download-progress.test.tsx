@@ -123,6 +123,27 @@ describe('LocalModelDownloadActions', () => {
     })
   })
 
+  it('pause and resume failures name the action that failed, not a generic download failure', async () => {
+    const { notifyError } = await import('@/store/notifications')
+
+    vi.mocked(pauseLocalDownload).mockRejectedValue(new Error('offline'))
+    renderActions(job({ can_pause: true }))
+    fireEvent.click(screen.getByRole('button', { name: /pause/i }))
+    await waitFor(() => expect(notifyError).toHaveBeenCalledTimes(1))
+    const pauseTitle: string = vi.mocked(notifyError).mock.calls[0]?.[1] as string
+    cleanup()
+
+    vi.mocked(resumeLocalDownload).mockRejectedValue(new Error('offline'))
+    renderActions(job({ can_resume: true, status: 'paused' }))
+    fireEvent.click(screen.getByRole('button', { name: /resume/i }))
+    await waitFor(() => expect(notifyError).toHaveBeenCalledTimes(2))
+    const resumeTitle: string = vi.mocked(notifyError).mock.calls[1]?.[1] as string
+
+    expect(pauseTitle).toMatch(/pause/i)
+    expect(resumeTitle).toMatch(/resume/i)
+    expect(pauseTitle).not.toBe(resumeTitle)
+  })
+
   it('no control on settled jobs', () => {
     renderActions(job({ can_pause: true, status: 'done' }))
 
@@ -143,6 +164,9 @@ describe('isDownloadPhase', () => {
 // The status copy as a locale supplies it; the composer only assembles it.
 const statusCopy = {
   downloadEta: (time: string) => `~${time} left`,
+  downloadEtaHours: (hours: number, minutes: number) => (minutes ? `${hours} h ${minutes} min` : `${hours} h`),
+  downloadEtaMinutes: (count: number) => `${count} min`,
+  downloadEtaSeconds: (count: number) => `${count} sec`,
   downloadPausedLabel: 'Paused',
   downloadProgress: (done: string, total: string) => `${done} of ${total}`,
   downloadSpeed: (rate: string) => `${rate}`,
@@ -195,16 +219,28 @@ describe('speed and ETA formatting', () => {
   it('reports nothing for an unknown or stalled rate', () => {
     expect(formatSpeed(undefined)).toBe('')
     expect(formatSpeed(0)).toBe('')
-    expect(formatEta(null)).toBe('')
-    expect(formatEta(0.4)).toBe('')
+    expect(formatEta(null, statusCopy)).toBe('')
+    expect(formatEta(0.4, statusCopy)).toBe('')
   })
 
   it('scales the rate unit and the ETA magnitude', () => {
     expect(formatSpeed(24 * (1 << 20))).toBe('24 MB/s')
     expect(formatSpeed(512 * (1 << 10))).toBe('0.5 MB/s')
     expect(formatSpeed(2 * (1 << 30))).toBe('2.0 GB/s')
-    expect(formatEta(45)).toBe('45 sec')
-    expect(formatEta(120)).toBe('2 min')
-    expect(formatEta(3_900)).toBe('1 h 5 min')
+    expect(formatEta(45, statusCopy)).toBe('45 sec')
+    expect(formatEta(120, statusCopy)).toBe('2 min')
+    expect(formatEta(3_900, statusCopy)).toBe('1 h 5 min')
+    expect(formatEta(7_200, statusCopy)).toBe('2 h')
+  })
+
+  it('spells the ETA in the locale’s words, not a hardcoded unit', () => {
+    const ja = {
+      downloadEtaHours: (hours: number, minutes: number) => `${hours}時間${minutes ? `${minutes}分` : ''}`,
+      downloadEtaMinutes: (count: number) => `${count}分`,
+      downloadEtaSeconds: (count: number) => `${count}秒`
+    }
+
+    expect(formatEta(45, ja)).toBe('45秒')
+    expect(formatEta(3_900, ja)).toBe('1時間5分')
   })
 })

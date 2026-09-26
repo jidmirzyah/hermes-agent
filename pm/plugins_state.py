@@ -88,8 +88,14 @@ def _is_directory(path: Path) -> bool:
 
 
 def dependency_homes() -> list[Path]:
-    """Every home whose selection feeds the shared venv: the default home plus each profile.
-    Enumerates the complete union or refuses; a partial scan cannot remove members."""
+    """Every home whose selection feeds the shared venv: the default home plus each LIVE profile.
+    Enumerates the complete union or refuses; a partial scan cannot remove members.
+
+    Live means what ``hermes profile`` lists (hermes_constants): a valid id carrying an identity
+    marker and no tombstone. Staging dirs (``.work.staging-*``), deleted profiles and stray
+    marker-less dirs must not put plugins into the shared environment.
+    """
+    from hermes_constants import PROFILE_ID_RE, named_profile_is_live
     from pm.environments import dependency_home_root
 
     homes = [dependency_home_root()]
@@ -100,7 +106,9 @@ def dependency_homes() -> list[Path]:
         return homes
     except OSError as exc:
         raise ValueError(f"could not enumerate profiles: {root}") from exc
-    homes.extend(profile for profile in profiles if _is_directory(profile))
+    homes.extend(profile for profile in profiles
+                 if _is_directory(profile) and profile.name != "default"
+                 and PROFILE_ID_RE.match(profile.name) and named_profile_is_live(profile))
     return homes
 
 

@@ -183,28 +183,30 @@ def install(args) -> None:
 
 
 def dependencies(args) -> None:
-    if args.extras is None:
+    if args.extras is None and not args.test_environment:
         return
     import tomllib
 
     from pm.environments import selected_venv
-    from pm import build_environment, check_project_lock, sync_venv
+    from pm import check_project_lock, sync_venv
     from pm.paths import repo_root
 
     project = repo_root()
     metadata = tomllib.loads((project / "pyproject.toml").read_text(encoding="utf-8-sig"))
-    unknown = set(args.extras) - metadata["project"]["optional-dependencies"].keys()
+    extras = args.extras or []
+    unknown = set(extras) - metadata["project"].get("optional-dependencies", {}).keys()
     if unknown:
         raise ValueError(f"unknown project extras: {sorted(unknown)}")
     # Frozen sync must not turn a stale project lock into a green job.
     check_project_lock(project, explicit=True)
-    if "dev" in args.extras:
-        # Test-only groups must not enter PM facts or a shipped generation.
-        venv = args.home.resolve() / "test-environment"
-        build_environment(source=project, out=venv, extras=args.extras,
-                          groups=["test"], no_install_project=True, explicit=True)
+    if args.test_environment:
+        from pm.testenv import ensure_testenv
+
+        # CI and activation select the same side environment, never PM facts.
+        python = ensure_testenv(project, extras)
+        venv = python.parent.parent
     else:
-        sync_venv(args.extras, explicit=True, plugin_dirs=[])
+        sync_venv(extras, explicit=True, plugin_dirs=[])
         venv = selected_venv(project)
     bindir = venv / ("Scripts" if os.name == "nt" else "bin")
     python = bindir / ("python.exe" if os.name == "nt" else "python")
@@ -226,10 +228,11 @@ def main() -> None:
     parser.add_argument("--toolchain", choices=["python", "node", "all"], default="python")
     parser.add_argument("--home", type=Path, required=True)
     parser.add_argument("--extras", type=parse_extras, default="")
+    parser.add_argument("--test-environment", action="store_true")
     parser.add_argument("--packages", type=parse_package_list, default=[], help="extra PM tools beyond the toolchain roots (e.g. ffmpeg)")
     args = parser.parse_args()
-    if args.toolchain == "node" and args.extras is not None:
-        parser.error("extras require the python or all toolchain")
+    if args.toolchain == "node" and (args.extras is not None or args.test_environment):
+        parser.error("Python dependencies require the python or all toolchain")
     os.environ["HERMES_HOME"] = str(args.home.resolve())
     os.environ["HERMES_RUNTIME_DIR"] = str(args.home.resolve() / "tools")
     phases[args.phase](args)

@@ -346,6 +346,7 @@ def test_env_probe_run_hides_console_window(monkeypatch):
     assert kwargs["stdin"] == subprocess.DEVNULL
 
 
+@pytest.mark.platforms("windows")
 def test_suppress_platform_ver_console_stubs_syscmd_ver(monkeypatch):
     """``_syscmd_ver`` is replaced by an in-process echo stub so win32_ver()
     takes its ValueError fallback instead of shelling out to `cmd /c ver`.

@@ -13,11 +13,9 @@ import pytest
 
 from hermes_cli.auth import AuthError
 
-
 # =============================================================================
 # _resolve_verify: CA bundle path validation
 # =============================================================================
-
 
 class TestResolveVerifyFallback:
     """Verify _resolve_verify falls back to default trust when the CA bundle
@@ -60,7 +58,6 @@ class TestResolveVerifyFallback:
         assert not type(result).__module__.startswith("truststore")
         assert result.verify_mode == ssl.CERT_REQUIRED
 
-
     def test_insecure_takes_precedence_over_missing_ca(self):
         from hermes_cli.auth import _resolve_verify
 
@@ -83,7 +80,6 @@ class TestResolveVerifyFallback:
 
         result = _resolve_verify(auth_state={"tls": {"insecure": "true"}})
         assert result is False
-
 
 def _setup_nous_auth(
     hermes_home: Path,
@@ -124,7 +120,6 @@ def _setup_nous_auth(
     }
     (hermes_home / "auth.json").write_text(json.dumps(auth_store, indent=2))
 
-
 def _jwt_with_claims(claims: dict) -> str:
     def _part(payload: dict) -> str:
         raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
@@ -132,10 +127,8 @@ def _jwt_with_claims(claims: dict) -> str:
 
     return f"{_part({'alg': 'none', 'typ': 'JWT'})}.{_part(claims)}.sig"
 
-
 def _future_iso(seconds: int = 3600) -> str:
     return datetime.fromtimestamp(time.time() + seconds, tz=timezone.utc).isoformat()
-
 
 def _invoke_jwt(*, seconds: int = 3600, scope: object = "inference:invoke") -> str:
     return _jwt_with_claims({
@@ -143,7 +136,6 @@ def _invoke_jwt(*, seconds: int = 3600, scope: object = "inference:invoke") -> s
         "scope": scope,
         "exp": int(time.time() + seconds),
     })
-
 
 def test_resolve_nous_runtime_credentials_prefers_invoke_jwt_and_mirrors(
     tmp_path,
@@ -177,7 +169,6 @@ def test_resolve_nous_runtime_credentials_prefers_invoke_jwt_and_mirrors(
     assert len(pool_entries) == 1
     assert pool_entries[0]["agent_key"] == token
     assert pool_entries[0]["source"] == auth_mod.NOUS_DEVICE_CODE_SOURCE
-
 
 def test_resolve_nous_runtime_credentials_invoke_jwt_is_idempotent(
     tmp_path,
@@ -258,7 +249,6 @@ def test_resolve_nous_runtime_credentials_invoke_jwt_is_idempotent(
         == original_obtained_at
     )
 
-
 def test_resolve_nous_runtime_credentials_reauths_when_invoke_scope_missing(
     tmp_path,
     monkeypatch,
@@ -291,7 +281,6 @@ def test_resolve_nous_runtime_credentials_reauths_when_invoke_scope_missing(
     payload = json.loads((hermes_home / "auth.json").read_text())
     assert payload["providers"]["nous"]["agent_key"] is None
     assert "credential_pool" not in payload or not payload["credential_pool"].get("nous")
-
 
 def test_nous_inference_auth_logs_do_not_include_secret_values(
     tmp_path,
@@ -344,7 +333,6 @@ def test_nous_inference_auth_logs_do_not_include_secret_values(
     assert refreshed_token not in logged
     assert refresh_token not in logged
 
-
 def test_get_nous_auth_status_checks_credential_pool(tmp_path, monkeypatch):
     """get_nous_auth_status() should find Nous credentials in the pool
     even when the auth store has no Nous provider entry — this is the
@@ -385,7 +373,6 @@ def test_get_nous_auth_status_checks_credential_pool(tmp_path, monkeypatch):
     assert status["logged_in"] is True
     assert "example.com" in str(status.get("portal_base_url", ""))
 
-
 def test_get_nous_auth_status_empty_returns_not_logged_in(tmp_path, monkeypatch):
     """get_nous_auth_status() returns logged_in=False when both pool
     and auth store are empty.
@@ -402,11 +389,9 @@ def test_get_nous_auth_status_empty_returns_not_logged_in(tmp_path, monkeypatch)
     status = get_nous_auth_status()
     assert status["logged_in"] is False
 
-
 # =============================================================================
 # _login_nous: "Skip (keep current)" must preserve prior provider + model
 # =============================================================================
-
 
 class TestLoginNousSkipKeepsCurrent:
     """When a user runs `hermes model` → Nous Portal → Skip (keep current) after
@@ -570,11 +555,9 @@ class TestLoginNousSkipKeepsCurrent:
         # But Nous creds are still saved
         assert "nous" in auth_after.get("providers", {})
 
-
 # =============================================================================
 # persist_nous_credentials: shared helper for CLI + web dashboard login paths
 # =============================================================================
-
 
 def _full_state_fixture() -> dict:
     """Shape of the dict returned by _nous_device_code_login /
@@ -600,7 +583,6 @@ def _full_state_fixture() -> dict:
         "agent_key_obtained_at": "2026-04-17T22:00:10+00:00",
         "tls": {"insecure": False, "ca_bundle": None},
     }
-
 
 def test_persist_nous_credentials_idempotent_no_duplicate_pool_entries(tmp_path, monkeypatch):
     """Re-running persist must upsert — not accumulate duplicate device_code rows.
@@ -647,7 +629,6 @@ def test_persist_nous_credentials_idempotent_no_duplicate_pool_entries(tmp_path,
         e["source"].startswith("manual:") for e in pool_entries
     )
 
-
 def test_refresh_token_reuse_detection_surfaces_actionable_message():
     """Regression for #15099.
 
@@ -685,7 +666,6 @@ def test_refresh_token_reuse_detection_surfaces_actionable_message():
     # Must still be classified as invalid_grant + relogin_required.
     assert exc_info.value.code == "invalid_grant"
     assert exc_info.value.relogin_required is True
-
 
 def test_refresh_token_exchange_sends_refresh_token_header():
     """Nous refresh tokens must be sent in a header so sandbox proxies can
@@ -726,11 +706,9 @@ def test_refresh_token_exchange_sends_refresh_token_header():
         "client_id": "hermes-cli",
     }
 
-
 # =============================================================================
 # Shared Nous token store — cross-profile persistence (Codex-style auto-import)
 # =============================================================================
-
 
 @pytest.fixture
 def shared_store_env(tmp_path, monkeypatch):
@@ -745,7 +723,6 @@ def shared_store_env(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_SHARED_AUTH_DIR", str(shared_dir))
     return shared_dir
 
-
 def test_shared_store_seat_belt_refuses_real_home_under_pytest(monkeypatch):
     """Without HERMES_SHARED_AUTH_DIR override, the seat belt must trip.
 
@@ -759,7 +736,6 @@ def test_shared_store_seat_belt_refuses_real_home_under_pytest(monkeypatch):
 
     with pytest.raises(RuntimeError, match="shared Nous auth store"):
         _nous_shared_store_path()
-
 
 @pytest.mark.platforms("linux")
 def test_shared_store_write_and_read_roundtrip(shared_store_env):
@@ -790,7 +766,6 @@ def test_shared_store_write_and_read_roundtrip(shared_store_env):
     # (24h TTL, profile-specific — only long-lived OAuth tokens are
     # cross-profile useful).
     assert "agent_key" not in loaded
-
 
 def test_persist_nous_credentials_mirrors_to_shared_store(
     tmp_path, monkeypatch, shared_store_env,
@@ -825,7 +800,6 @@ def test_persist_nous_credentials_mirrors_to_shared_store(
 
     # Shared file path lives under the tmp override, NOT the real home
     assert str(_nous_shared_store_path()).startswith(str(shared_store_env))
-
 
 def test_try_import_shared_rehydrates_on_success(shared_store_env, monkeypatch):
     """Happy path: stored refresh_token is accepted, forced refresh
@@ -862,7 +836,6 @@ def test_try_import_shared_rehydrates_on_success(shared_store_env, monkeypatch):
     assert result["portal_base_url"] == "https://portal.example.com"
     assert result["client_id"] == "hermes-cli"
 
-
 class TestStalePortalBaseUrlMigration:
     """_migrate_stale_nous_portal_url auto-corrects stale portal_base_url on load."""
 
@@ -886,7 +859,6 @@ class TestStalePortalBaseUrlMigration:
         store = _load_auth_store(auth_file)
         nous = store["providers"]["nous"]
         assert nous["portal_base_url"] == DEFAULT_NOUS_PORTAL_URL
-
 
     def test_runtime_credentials_rejects_http_for_production_portal(
         self, tmp_path, monkeypatch,
@@ -935,11 +907,9 @@ class TestStalePortalBaseUrlMigration:
         auth_mod.resolve_nous_runtime_credentials()
         assert refresh_calls == [auth_mod.DEFAULT_NOUS_PORTAL_URL]
 
-
 # =============================================================================
 # Device-auth timeout guidance (#20605 kernel from PR #75290)
 # =============================================================================
-
 
 def test_poll_for_token_timeout_raises_actionable_message():
     """The poll deadline must raise the CAPTCHA-aware guidance at the SOURCE,
@@ -969,5 +939,3 @@ def test_poll_for_token_timeout_raises_actionable_message():
             expires_in=1,
             poll_interval=1,
         )
-
-

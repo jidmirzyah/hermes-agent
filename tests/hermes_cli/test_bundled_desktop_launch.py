@@ -107,11 +107,7 @@ def _host_bundle(tmp_path: Path) -> tuple[Path, Path]:
 
 
 class TestResolveBundleLayout:
-    @pytest.mark.skipif(
-        sys.platform == "win32",
-        reason="POSIX-only: the Linux launcher rule reads execute bits, "
-        "which os.access reports as always-set on Windows",
-    )
+    @pytest.mark.platforms("posix")  # POSIX-only: the Linux launcher rule reads execute bits, which os.access reports as always-set on Windows
     def test_linux_launcher_is_the_one_non_helper_executable(self, tmp_path):
         repo = _linux_bundle(tmp_path)
         layout = resolve_bundle_layout(repo, platform="linux")

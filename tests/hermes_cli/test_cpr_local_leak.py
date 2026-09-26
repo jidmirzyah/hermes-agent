@@ -12,15 +12,12 @@ from cli import (
     _terminal_may_leak_cpr,
 )
 
-
 @pytest.fixture(autouse=True)
 def _clear_cpr_env(monkeypatch):
     for var in ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY", "PROMPT_TOOLKIT_NO_CPR"):
         monkeypatch.delenv(var, raising=False)
 
-
 class TestClassicCliOutputSelection:
-
 
     @pytest.mark.platforms("windows")
     def test_windows_preserves_default_output_selection(self):
@@ -35,5 +32,3 @@ class TestClassicCliOutputSelection:
         # Build may return None if stdout is not a real tty in CI; if it
         # succeeds it must be CPR-disabled.
         assert out is None or out.enable_cpr is False
-
-

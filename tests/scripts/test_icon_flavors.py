@@ -148,16 +148,14 @@ def test_renderer_canary_rule_is_the_canonical_one(monkeypatch):
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    for tag in ("v1.2.3-canary.20260911", "v1.2.3-canary.20260911010203", "v2026.9.15-canary.20260916120000",
-                "v1.2.3", "v1.2.3-canary.2026091101", "v1.2.3-canary.20260911010203123", "01.2.3-canary.20260911", ""):
+    for tag in ("v1.2.3+canary.20260911T010203Z", "v2026.9.15+canary.20260916T120000Z",
+                "v1.2.3", "v1.2.3-canary.20260911010203", "v1.2.3+canary.20260911010203", ""):
         assert bool(module._CANARY_TAG_RE.match(tag)) == is_canary_tag(tag), tag
 
 
 def test_canary_changes_only_desktop_background_preserving_art_and_native_geometry(generate):
     stable = generate("v1.2.3")
-    canary = generate("v1.2.3-canary.20260911010203")
-    legacy = generate("v1.2.3-canary.20260911")
-    assert (canary / "apps/desktop/assets/icon.png").read_bytes() == (legacy / "apps/desktop/assets/icon.png").read_bytes()
+    canary = generate("v1.2.3+canary.20260911T010203Z")
     for path in (stable / "apps/desktop").rglob("*"):
         if not path.is_file():
             continue

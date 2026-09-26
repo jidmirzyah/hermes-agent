@@ -7,6 +7,8 @@ import yaml from 'js-yaml'
 import { expect, test } from 'vitest'
 
 import { candidateSmokeHermesHomes, predictSmokeHermesHome, resolveSmokeLaunch, runInstalledDesktopSmoke, smokeEnvironment } from '../../tests/install/e2e-assets/desktop-smoke.ts'
+import { sourceRuntimeSettleCommand } from '../../tests/install/e2e-assets/source-runtime-settle.mjs'
+import { assertUpdateWindowBackendOrigin, assertUpdateWindowProcess } from '../../tests/install/e2e-assets/update-window-chat.mjs'
 
 import { assertChatCommit, newCompletedPair, readMockPrompts, type TranscriptMessage } from './desktop-chat-smoke.ts'
 import { assertBackendOrigin, localBackendProcess, readBundledBundleEnv, readInstallationCommit } from './desktop-smoke-process.ts'
@@ -199,6 +201,24 @@ test('a platform that cannot read the backend environment proves ownership by th
   } finally { fs.rmSync(home, { recursive: true, force: true }) }
 })
 
+test('OLD update-window source provenance carries its verified app identity to the listener check', (): void => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'smoke-old-owner-origin-'))
+  try {
+    const root = path.join(home, 'hermes-agent')
+    const other = path.join(home, 'other-tree')
+    fs.mkdirSync(root, { recursive: true })
+    fs.mkdirSync(other, { recursive: true })
+    const backend = { pid: 2, parentPid: 1, executable: path.join(home, 'python.exe'),
+      command: `"${path.join(home, 'python.exe')}" -m hermes_cli.main dashboard --port 0` }
+    expect((): void => {
+      assertUpdateWindowBackendOrigin(backend, { hermesRoot: root }, root, 'source')
+    }).not.toThrow()
+    expect((): void => {
+      assertUpdateWindowBackendOrigin(backend, { hermesRoot: other }, root, 'source')
+    }).toThrow('resolved another source installation')
+  } finally { fs.rmSync(home, { recursive: true, force: true }) }
+})
+
 test('source launch restores only an explicitly captured exact editable root', (): void => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'smoke-source-'))
   const specPath = path.join(home, 'launch.json')
@@ -300,6 +320,132 @@ test('driver strips caller secrets and records missing executables as failure wi
   } finally { fs.rmSync(home, { recursive: true, force: true }) }
 })
 
+test.runIf(process.platform !== 'win32')('NEW source smoke settles the clean runtime before Electron launch', async (): Promise<void> => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'smoke-source-settle-'))
+  const root = path.join(workspace, 'source')
+  const home = path.join(workspace, 'home')
+  const out = path.join(workspace, 'out')
+  const userData = path.join(workspace, 'user-data')
+  const exe = path.join(root, 'fake-desktop')
+  const launcher = path.join(root, '.hermes', 'bin', 'hermes')
+  const witness = path.join(workspace, 'settled')
+
+  try {
+    fs.mkdirSync(path.dirname(launcher), { recursive: true })
+    fs.writeFileSync(exe, '#!/bin/sh\nexit 1\n')
+    fs.chmodSync(exe, 0o755)
+    fs.writeFileSync(launcher, `#!/bin/sh
+set -eu
+[ "$1" = status ]
+[ "$HERMES_HOME" = ${JSON.stringify(home)} ]
+[ "$HOME" = ${JSON.stringify(path.join(home, '.desktop-smoke-home'))} ]
+[ -z "\${PM_E2E_LEAK-}" ]
+printf 'clean source runtime settled\\n'
+: > ${JSON.stringify(witness)}
+`)
+    fs.chmodSync(launcher, 0o755)
+
+    const refuseLaunch = async (): Promise<never> => {
+      expect(fs.existsSync(witness)).toBe(true)
+      throw new Error('launch observed settled runtime')
+    }
+
+    const prior = process.env.PM_E2E_LEAK
+    process.env.PM_E2E_LEAK = 'must be stripped'
+
+    try {
+      await expect(runInstalledDesktopSmoke({ exe, root, origin: 'source', home, 'user-data': userData,
+        out, phase: 'new', 'expect-commit': 'a'.repeat(40) }, refuseLaunch)).rejects.toThrow('launch observed settled runtime')
+    } finally {
+      if (prior === undefined) { delete process.env.PM_E2E_LEAK } else { process.env.PM_E2E_LEAK = prior }
+    }
+
+    expect(fs.readFileSync(path.join(out, 'desktop-source-settle-new.log'), 'utf8')).toContain('clean source runtime settled')
+  } finally { fs.rmSync(workspace, { recursive: true, force: true }) }
+})
+
+test('Windows source settle bypasses the current cmd launcher beside a stale historical exe', (): void => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'smoke-windows-settle-'))
+  try {
+    const bin = path.join(root, '.hermes', 'bin')
+    fs.mkdirSync(bin, { recursive: true })
+    const current = path.join(bin, 'hermes.cmd')
+    const python = path.join(root, 'managed python', 'python.exe')
+    fs.mkdirSync(path.dirname(python), { recursive: true })
+    fs.writeFileSync(python, '')
+    const prepareLaunch = path.join(root, 'hermes_cli', 'venv_sync.py')
+    fs.mkdirSync(path.dirname(prepareLaunch), { recursive: true })
+    fs.writeFileSync(prepareLaunch, '')
+    fs.writeFileSync(current, `@"${python}" -I -c "import base64; exec(base64.b64decode('eA=='))" %*\r\n`)
+    fs.writeFileSync(path.join(bin, 'hermes.exe'), 'locked historical launcher')
+    const invocation = sourceRuntimeSettleCommand(root, { ComSpec: 'C:\\Windows\\System32\\cmd.exe' }, 'win32')
+    expect(invocation).toEqual({
+      launcher: current,
+      command: python,
+      args: ['-I', '-B', '-c', `import pathlib, sys; sys.path.insert(0, ${JSON.stringify(root)}); from hermes_cli.venv_sync import prepare_launch; prepare_launch(pathlib.Path(${JSON.stringify(root)}), ['status'])`],
+      windowsVerbatimArguments: false,
+    })
+  } finally { fs.rmSync(root, { recursive: true, force: true }) }
+})
+
+test('Windows source settle bypasses the generated cmd command line', (): void => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'smoke-windows-settle-live-'))
+  const root = path.join(workspace, 'source with spaces')
+  try {
+    const bin = path.join(root, '.hermes', 'bin')
+    const witness = path.join(workspace, 'settled.txt')
+    fs.mkdirSync(bin, { recursive: true })
+    const pythonProbe = spawnSync('python', ['-c', 'import sys; print(sys.executable)'], { encoding: 'utf8' })
+    expect(pythonProbe.status, pythonProbe.stderr || String(pythonProbe.error)).toBe(0)
+    const python = pythonProbe.stdout.trim()
+    fs.writeFileSync(path.join(bin, 'hermes.cmd'), `@"${python}" -I -c "import base64; exec(base64.b64decode('eA=='))" %*\r\n`)
+    const prepareLaunch = path.join(root, 'hermes_cli', 'venv_sync.py')
+    fs.mkdirSync(path.dirname(prepareLaunch), { recursive: true })
+    fs.writeFileSync(prepareLaunch, `from pathlib import Path\ndef prepare_launch(root, args):\n    Path(${JSON.stringify(witness)}).write_text(str(root) + '\\n' + '\\n'.join(args))\n`)
+    fs.writeFileSync(path.join(bin, 'hermes.exe'), 'locked historical launcher')
+    const invocation = sourceRuntimeSettleCommand(root, process.env, 'win32')
+    const result = spawnSync(invocation.command, invocation.args, {
+      cwd: root, env: process.env, encoding: 'utf8', windowsHide: true,
+      windowsVerbatimArguments: invocation.windowsVerbatimArguments,
+    })
+    expect(result.status, result.stderr || String(result.error)).toBe(0)
+    expect(fs.readFileSync(witness, 'utf8').split(/\r?\n/)).toEqual([
+      root,
+      'status',
+    ])
+  } finally { fs.rmSync(workspace, { recursive: true, force: true }) }
+})
+
+test('update-window process checks use the isolated launch environment, not the driver environment', (): void => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'smoke-update-window-process-'))
+  try {
+    const executable = path.join(root, 'Hermes')
+    const isolated = path.join(root, 'isolated-user-data')
+    const driver = path.join(root, 'driver-user-data')
+    fs.writeFileSync(executable, '')
+    fs.mkdirSync(isolated)
+    fs.mkdirSync(driver)
+    const prior = process.env.HERMES_DESKTOP_USER_DATA_DIR
+    process.env.HERMES_DESKTOP_USER_DATA_DIR = driver
+    try {
+      expect(() => assertUpdateWindowProcess(
+        { executable, resources: root, userData: isolated },
+        { executable, root, origin: 'source', userData: isolated },
+      )).not.toThrow()
+      expect(() => assertUpdateWindowProcess(
+        { executable, resources: root, userData: isolated },
+        { executable, root, origin: 'source', userData: driver },
+      )).toThrow('OLD update window did not honor isolated userData')
+    } finally {
+      if (prior === undefined) {
+        delete process.env.HERMES_DESKTOP_USER_DATA_DIR
+      } else {
+        process.env.HERMES_DESKTOP_USER_DATA_DIR = prior
+      }
+    }
+  } finally { fs.rmSync(root, { recursive: true, force: true }) }
+})
+
 test('predictSmokeHermesHome replays the bundle banner through the shared resolver', (): void => {
   const launchEnv = { HERMES_HOME: '/pinned/home', HERMES_DESKTOP_USER_DATA_DIR: '/pinned/userdata', LOCALAPPDATA: 'C:/Users/runner/AppData/Local' }
   // No baked env: the driver's own HERMES_HOME pin wins.
@@ -343,7 +489,10 @@ test('a bundle-env HERMES_HOME clear cannot strand the mock config outside the r
         'user-data': userData, out: root, phase: 'installed', 'expect-commit': 'a'.repeat(40) }, refuseLaunch)).rejects.toThrow('launch refused by test')
       for (const candidate of candidateSmokeHermesHomes(home, userData)) {
         expect(yaml.load(fs.readFileSync(path.join(candidate, 'config.yaml'), 'utf8'))).toMatchObject({ model: { provider: 'custom' } })
-        expect(fs.readFileSync(path.join(candidate, '.env'), 'utf8')).toMatch(/MOCK_API_KEY=/)
+        const env = fs.readFileSync(path.join(candidate, '.env'), 'utf8')
+        expect(env).toMatch(/MOCK_API_KEY=/)
+        expect(env).toMatch(/OPENAI_API_KEY=/)
+        expect(env).toMatch(/OPENAI_BASE_URL=http:\/\/127\.0\.0\.1:\d+\/v1/)
       }
       // Electron resolves shell folders before 'ready'; the sandboxed AppData/XDG
       // dirs must exist or Windows applyDesktopIdentity crashes at launch.

@@ -51,7 +51,7 @@ exit /b 0
     # cmd's `echo %* >> file` keeps the space before `>>` in the recorded line.
     $recorded = @(Get-Content -LiteralPath $argsFile | ForEach-Object { $_.Trim() })
     Assert-True ($recorded.Count -eq 2) 'uv only installs and locates bootstrap Python'
-    Assert-True ($recorded[0] -eq 'python install --no-bin 3.13') 'Python minor comes from the lockfile'
+    Assert-True ($recorded[0] -eq 'python install --no-bin --no-registry 3.13') 'Python minor comes from the lockfile'
     Assert-True ($recorded[1] -eq 'python find --managed-python --no-project 3.13') 'lookup ignores ambient project discovery'
     Assert-True ((Get-Content -LiteralPath $pythonArgsFile -Raw).Trim() -eq '-m pm.cli install') 'Python launches PM without a uv parent'
 

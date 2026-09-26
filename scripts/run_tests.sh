@@ -11,7 +11,7 @@
 #   * Env vars blanked (conftest.py also does this, but this
 #     is belt-and-suspenders for anyone running pytest outside our
 #     conftest path — e.g. on a single file)
-#   * Proper venv activation (probes .venv, venv, then ~/.hermes/...)
+#   * The activated checkout's test environment (activates when needed)
 #
 # Usage:
 #   scripts/run_tests.sh                            # full suite
@@ -38,64 +38,45 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # ── Locate python ───────────────────────────────────────────────────────────
-# Probe local venvs first; fall back to the Nix devShell's editable venv
-# (HERMES_PYTHON is exported by the devShell hook and ships [dev] extras:
-# pytest, pytest-asyncio, pytest-timeout, ruff, ty).
+# The suite runs under the activated checkout's isolated test environment
+# (pm.testenv: `activate` builds it beside the checkout's install state, and CI
+# activates the same way). An inherited activation is re-checked against its
+# inputs (scripts/_activation.sh) and re-sourced when stale, so a branch switch
+# or lock edit never runs the suite against the previous dependency set.
 #
-# A candidate must have pytest INSTALLED, not merely exist. The release venv
-# at ~/.hermes/hermes-agent/venv has bin/activate but no pytest, so an
-# existence-only probe selected it in checkouts/worktrees without a local
-# .venv — every file then died with "No module named pytest" and the run
-# reported "0 tests passed" (which reads green at a glance even though the
-# exit code is 1). Skip such a venv and keep probing instead.
-VENV=""
-VENV_PYTHON=""
-SKIPPED_VENVS=""
-for candidate in "$REPO_ROOT/.venv" "$REPO_ROOT/venv" "$HOME/.hermes/hermes-agent/venv"; do
-  if [ -f "$candidate/bin/activate" ]; then
-    if "$candidate/bin/python" -c 'import pytest' 2>/dev/null; then
-      VENV="$candidate"
-      VENV_PYTHON="$candidate/bin/python"
-      break
-    fi
-    SKIPPED_VENVS="$SKIPPED_VENVS $candidate"
-  fi
-  # Native Windows venv layout: python.exe and activate live under
-  # Scripts/, and there is no bin/. Anyone running this script from
-  # Git Bash / MSYS with a `python -m venv`- or uv-created venv hits
-  # this branch — without it the canonical runner refuses to start.
-  if [ -f "$candidate/Scripts/activate" ]; then
-    if "$candidate/Scripts/python.exe" -c 'import pytest' 2>/dev/null; then
-      VENV="$candidate"
-      VENV_PYTHON="$candidate/Scripts/python.exe"
-      break
-    fi
-    SKIPPED_VENVS="$SKIPPED_VENVS $candidate"
-  fi
-done
-
-if [ -n "$SKIPPED_VENVS" ]; then
-  for skipped in $SKIPPED_VENVS; do
-    echo "▶ skipping venv without pytest: $skipped" >&2
-  done
-fi
-
-if [ -n "$VENV" ]; then
-  PYTHON="$VENV_PYTHON"
-elif [ -n "${HERMES_PYTHON:-}" ] && [ -x "$HERMES_PYTHON" ] \
-    && "$HERMES_PYTHON" -c 'import pytest' 2>/dev/null; then
-  # Guard with an import check: HERMES_PYTHON may point at the RELEASE
-  # venv (no pytest) when inherited from a wrapped `hermes` binary rather
-  # than the devShell hook.
+# Without an activation, an explicit HERMES_PYTHON that has pytest is honored:
+# the Nix devShell's editable venv and CI's minimal installer lanes provide
+# one on purpose. The import check matters: a wrapped `hermes` binary exports
+# HERMES_PYTHON pointing at a release venv without pytest.
+_has_pytest() { [ -n "$1" ] && [ -x "$1" ] && "$1" -c 'import pytest' 2>/dev/null; }
+# shellcheck source=scripts/_activation.sh
+. "$SCRIPT_DIR/_activation.sh"
+if [ -z "${__HERMES_ACTIVATED:-}" ] && _has_pytest "${HERMES_PYTHON:-}"; then
   PYTHON="$HERMES_PYTHON"
-  echo "▶ no local venv — using Nix dev venv via HERMES_PYTHON: $PYTHON"
+  echo "▶ not activated — using HERMES_PYTHON: $PYTHON"
 else
-  echo "error: no virtualenv with pytest found in $REPO_ROOT/.venv or $REPO_ROOT/venv," >&2
-  echo "       and HERMES_PYTHON is not a python with pytest (enter the Nix devShell or create a venv)" >&2
-  if [ -n "$SKIPPED_VENVS" ]; then
-    echo "       (skipped for missing pytest:$SKIPPED_VENVS — install dev extras there, or create $REPO_ROOT/.venv)" >&2
+  test_stamp="${__HERMES_ACTIVATED:-}"
+  test_stamp="${test_stamp//\\//}"
+  if ! hermes_activation_current "$REPO_ROOT" ||
+     [ ! -f "${test_stamp%/*}/inputs/.test-environment" ] ||
+     ! _has_pytest "${__HERMES_TEST_PYTHON:-}"; then
+    echo "▶ activating $REPO_ROOT (environment missing or stale)" >&2
+    # activate is written for interactive shells, not errexit/nounset.
+    set +euo pipefail
+    # shellcheck source=/dev/null
+    . "$REPO_ROOT/activate" --
+    activated=$?
+    set -euo pipefail
+    if [ "$activated" != 0 ]; then
+      echo "error: activation failed (see above)" >&2
+      exit 1
+    fi
   fi
-  exit 1
+  PYTHON="${__HERMES_TEST_PYTHON:-}"
+  if ! _has_pytest "$PYTHON"; then
+    echo "error: activation provided no test interpreter with pytest (__HERMES_TEST_PYTHON=${PYTHON:-unset})" >&2
+    exit 1
+  fi
 fi
 
 

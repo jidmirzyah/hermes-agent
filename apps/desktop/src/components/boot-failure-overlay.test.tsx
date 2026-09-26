@@ -267,27 +267,27 @@ describe('BootFailureOverlay', () => {
     }
   })
 
-  it('swaps Repair for "Reinstall the app" on a bundled install', async () => {
-    const openExternal = vi.fn().mockResolvedValue(undefined)
+  const bundledState = {
+    active: false,
+    manifest: null,
+    stages: {},
+    error: null,
+    log: [],
+    startedAt: null,
+    completedAt: null,
+    setupChoice: null,
+    unsupportedPlatform: null,
+    bundled: true
+  }
 
-    const restore = stubDesktop(
-      { mode: 'local' },
-      {
-        getBootstrapState: async () => ({
-          active: false,
-          manifest: null,
-          stages: {},
-          error: null,
-          log: [],
-          startedAt: null,
-          completedAt: null,
-          setupChoice: null,
-          unsupportedPlatform: null,
-          bundled: true
-        }),
-        openExternal
-      }
-    )
+  it('offers "Reinstall the app" on a bundled install only when the payload itself is damaged', async () => {
+    const openExternal = vi.fn().mockResolvedValue(undefined)
+    const restore = stubDesktop({ mode: 'local' }, { getBootstrapState: async () => bundledState, openExternal })
+    $desktopBoot.set({
+      ...$desktopBoot.get(),
+      error:
+        'This app bundles its own Hermes runtime, but the runtime files are missing or damaged. Reinstall Hermes Desktop to restore it.'
+    })
 
     try {
       render(<BootFailureOverlay />)
@@ -302,6 +302,23 @@ describe('BootFailureOverlay', () => {
       await waitFor(() =>
         expect(openExternal).toHaveBeenCalledWith('https://hermes-agent.nousresearch.com/docs/user-guide/desktop')
       )
+    } finally {
+      restore()
+    }
+  })
+
+  it('a bundled install with an unrelated failure gets neither Repair nor Reinstall', async () => {
+    const restore = stubDesktop({ mode: 'local' }, { getBootstrapState: async () => bundledState })
+    $desktopBoot.set({ ...$desktopBoot.get(), error: 'listen EADDRINUSE: address already in use 127.0.0.1:8642' })
+
+    try {
+      render(<BootFailureOverlay />)
+
+      expect(await screen.findByRole('button', { name: /retry/i })).toBeTruthy()
+      // Wait for the bundled snapshot to land before asserting the negatives.
+      await waitFor(() => expect(screen.queryByRole('button', { name: /repair install/i })).toBeNull())
+      expect(screen.queryByRole('button', { name: /reinstall the app/i })).toBeNull()
+      expect(screen.queryByText(/reinstall the app to restore/i)).toBeNull()
     } finally {
       restore()
     }
@@ -336,7 +353,7 @@ describe('BootFailureOverlay', () => {
         failure === 'thrown'
           ? 'installer permission denied'
           : failure === 'refused'
-            ? 'bundled-immutable'
+            ? en.boot.failure.bundledReinstallHint
             : en.boot.errors.ipcBridgeUnavailable
 
       await waitFor(() =>

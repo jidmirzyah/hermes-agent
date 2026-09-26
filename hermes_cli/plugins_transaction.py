@@ -35,12 +35,60 @@ def publish_plugin(staged: Path, target: Path, old_metadata: dict, new_metadata:
     })
 
 
-def update_plugin(target: Path, *, catalog_entry=None) -> str:
-    """Prepare a catalog re-pin or custom Git pull without changing the live tree."""
+def _refresh_declared_dependencies(target: Path, staged: Path, manifest: dict, *, interactive: bool) -> None:
+    """Dependency changes carried by an update clear the same gates as an install.
+
+    New Python requirements install packages into the shared environment: install and
+    reinstall prompt for that, so an update prompts too, and an unattended one (dashboard,
+    ``plugins.auto_apply`` from the gateway) is REFUSED rather than consented on the user's
+    behalf. Publication replaces the whole tree, so a Node sidecar the user accepted earlier is
+    rebuilt in the staged copy when its package.json/lock moved (custom pulls copy a stale
+    node_modules; catalog re-pins clone without one).
+    """
+    from hermes_cli import plugins_cmd as pc
+    from hermes_cli.runtime_state import _bytes
+    from pm.plugin_declarations import read_python_declaration
+    from pm.workspace import enabled_plugin_dirs, install_node_sidecar
+
+    if (target / "node_modules").is_dir() and (staged / "package.json").is_file() and (
+            not (staged / "node_modules").is_dir()
+            or any(_bytes(target / name) != _bytes(staged / name) for name in ("package.json", "package-lock.json"))):
+        reason = install_node_sidecar(staged, explicit=True)
+        if reason:
+            raise pc.PluginOperationError(
+                f"Node dependencies could not be refreshed: {reason}. "
+                "The installed plugin and active environment are unchanged.")
+    if target.resolve() not in enabled_plugin_dirs(installing=target):
+        return  # a disabled plugin's deps are admitted (and consented) by `hermes plugins enable`
+    before, after = read_python_declaration(target), read_python_declaration(staged)
+    added = tuple(spec for spec in after.install_requirements if spec not in before.install_requirements)
+    if not added and not (after.is_member and not before.is_member):
+        return
+    if not interactive:
+        raise pc.PluginOperationError(
+            f"The update declares new Python dependencies ({', '.join(added) or 'in its pyproject.toml'}); "
+            f"run `hermes plugins update {target.name}` in a terminal to review them.")
+    consented, reason = pc._consent_python_deps(manifest.get("name", target.name), added, pc._console())
+    if not consented:
+        raise pc.PluginOperationError(
+            f"Update declined: {reason}. The installed plugin and active environment are unchanged.")
+
+
+def update_plugin(
+    target: Path,
+    *,
+    catalog_entry=None,
+    interactive: bool = False,
+    preserved_files: Path | None = None,
+) -> str:
+    """Prepare a catalog re-pin or custom Git pull without changing the live tree.
+
+    *interactive*: a terminal user is present to consent to newly declared dependencies;
+    the dashboard and the gateway's auto-apply pass False and get a refusal instead."""
     import tempfile
 
     from hermes_cli import plugins_cmd as pc
-    from hermes_cli.plugins_cmd_catalog import raise_if_removed
+    from hermes_cli.plugins_cmd_catalog import refuse_if_installed_removed
     from pm.store import tree_digest
 
     target = target.resolve()
@@ -68,7 +116,7 @@ def update_plugin(target: Path, *, catalog_entry=None) -> str:
                 raise pc.PluginOperationError("Update feed must select a commit or the recorded Git source.")
             if feed.get("min_hermes"):
                 pc._check_manifest_version({"requires_hermes": feed["min_hermes"]}, target.name)
-    raise_if_removed(target.name, source.split("#", 1)[0])
+    refuse_if_installed_removed(target.name, target)
     before = tree_digest(target)
     with tempfile.TemporaryDirectory(prefix=".update-", dir=target.parent) as directory:
         staged = Path(directory) / "plugin"
@@ -77,16 +125,23 @@ def update_plugin(target: Path, *, catalog_entry=None) -> str:
                 git_url, subdir = pc._resolve_git_url(source)
                 revision = pc._clone_plugin_repo(staged, git_url, catalog_entry.sha)
                 staged = pc._resolve_subdir_within(staged, subdir) if subdir else staged
-                # Catalog re-pins cannot discard edits to a currently installed tree.
-                if (target / ".git").is_dir():
-                    git = pc._resolve_git_executable()
-                    changed = pc._git_or_raise(git, target, "status", "--porcelain", "--untracked-files=normal",
-                                               failure_prefix="Could not inspect plugin edits: ")
-                    if changed.stdout.strip():
-                        raise pc.PluginOperationError("Catalog plugin has local changes; save them before updating.")
                 output = f"Updated to catalog pin {revision}"
-                record.update(catalog_name=catalog_entry.name, catalog_tier=catalog_entry.tier,
-                              pinned=True, source=pc._canonical_source(git_url, subdir))
+                catalog_record = {
+                    "name": catalog_entry.name,
+                    "repo": catalog_entry.repo,
+                    "tier": catalog_entry.tier,
+                    "pin": catalog_entry.sha,
+                    "sha": revision,
+                }
+                record.update(
+                    catalog=catalog_record,
+                    pinned=True,
+                    source=pc._canonical_source(git_url, subdir),
+                )
+                record.pop("catalog_name", None)
+                record.pop("catalog_tier", None)
+                from hermes_cli.plugins_cmd_catalog import write_catalog_sidecar_record
+                write_catalog_sidecar_record(staged, catalog_record, revision)
             else:
                 # Copy Git metadata and local changes. Autostash only ever touches the copy.
                 shutil.copytree(target, staged, symlinks=True, ignore=shutil.ignore_patterns("__pycache__"))
@@ -102,18 +157,35 @@ def update_plugin(target: Path, *, catalog_entry=None) -> str:
                     if not ok:
                         raise pc.PluginOperationError(output)
                 revision = pc._git_head_revision(staged, pc._resolve_git_executable())
+            if preserved_files is not None and preserved_files.exists():
+                shutil.copytree(preserved_files, staged, dirs_exist_ok=True)
             manifest = pc._read_manifest_for_install(staged)
-            if manifest.get("name", target.name) != target.name:
+            installed_name = str(manifest.get("name") or target.name)
+            if catalog_entry is None and installed_name != target.name:
                 raise pc.PluginOperationError("The updated plugin changed its installed name; reinstall it explicitly.")
-            pc._check_manifest_version(manifest, target.name)
+            try:
+                new_target = pc._sanitize_plugin_name(installed_name, target.parent)
+            except ValueError as exc:
+                raise pc.PluginOperationError(str(exc)) from exc
+            if new_target != target and new_target.exists():
+                raise pc.PluginOperationError(
+                    f"The updated plugin renamed itself to '{installed_name}', but that plugin already exists.")
+            pc._check_manifest_version(manifest, installed_name)
             pc._scan_plugin_tree(staged, source, force=False)
             pc._copy_example_files(staged, pc._console())
+            _refresh_declared_dependencies(target, staged, manifest, interactive=interactive)
             if tree_digest(target) != before:
                 raise pc.PluginOperationError("Plugin files changed while preparing the update; retry.")
             record["revision"] = revision
-            if tree_digest(staged) == before:
+            if new_target == target and tree_digest(staged) == before:
                 return output
-            publish_plugin(staged, target, metadata, {**metadata, target.name: record}, target_digest=before)
+            publish_plugin(
+                staged,
+                new_target,
+                metadata,
+                {**metadata, installed_name: record},
+                target_digest=before if new_target == target else None,
+            )
             return output
         except pc.PluginOperationError:
             raise

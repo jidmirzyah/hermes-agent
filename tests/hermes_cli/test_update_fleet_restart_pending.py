@@ -916,9 +916,7 @@ def test_obligation_discharges_when_gateway_serves_descendant_of_expected_sha(mo
         "hermes_cli.update_receipt.collect_fleet_versions",
         lambda **kwargs: [{"profile": "default", "pid": 42, "code_sha": head, "code_version": "0.21.4", "state": "current"}],
     )
-    monkeypatch.setattr(update_cmd, "_run_pending_fleet_restart", lambda: pytest.fail("nothing to restart"))
-
-    update_cmd._apply_pending_fleet_restart_catchup()  # must not sys.exit(1)
+    assert update_cmd._pending_fleet_restart_needed() is False
     update_cmd._warn_pending_fleet_restart_on_startup()
 
     assert capsys.readouterr().err == ""
@@ -1113,25 +1111,100 @@ def test_empty_inventory_does_not_arm_marker():
 
 def test_pending_fleet_restart_cleared_instead_of_exit_1(monkeypatch, tmp_path):
     """Repro: an already-up-to-date host carrying an empty-inventory marker must exit 0 with
-    no restart run — not print 'Fleet restart incomplete' and exit 1 (#115311)."""
+    no restart obligation — not print 'Fleet restart incomplete' and exit 1 (#115311)."""
     args = _update_args()
     _patch_update_deps(monkeypatch, tmp_path, _make_up_to_date_side_effect())
     marker = _write_marker_with_inventory("abc123", [])
 
-    seen = {"ran": False}
     monkeypatch.setattr(update_cmd_fleet, "_current_checkout_sha", lambda: "abc123")
-    monkeypatch.setattr(
-        update_cmd,
-        "_run_pending_fleet_restart",
-        lambda: seen.__setitem__("ran", True) or True,
-    )
-    monkeypatch.setattr(
-        update_cmd_fleet,
-        "_run_pending_fleet_restart",
-        lambda: seen.__setitem__("ran", True) or True,
-    )
 
     hermes_main.cmd_update(args)
 
-    assert seen["ran"] is False
     assert not marker.exists()
+
+
+# ── Completion tail guards (#117051 / #95294): a no-op update must not re-kill the fleet ──
+
+
+def _current_row(sha):
+    return [{"profile": "default", "pid": 42, "code_sha": sha, "code_version": "0.21.0", "state": "current"}]
+
+
+def _plan_with_current_gateway(monkeypatch, sha):
+    """Pre-update inventory: one gateway already stamped with the checkout code."""
+    import hermes_cli.update_inventory as ui
+
+    plan = ui.UpdatePlan()
+    plan.runtimes = [ui.RuntimeRecord(kind="gateway", profile="default", pid=42, supervisor="systemd",
+                                      code_sha=sha, restart_via=ui._restart_mechanism("systemd", "default"))]
+    monkeypatch.setattr(ui, "collect_runtime_inventory", lambda: plan)
+
+
+def _spy_fleet_restart(monkeypatch):
+    """Record restart-phase entries; the phase itself (drain waits, unit restarts) is not under test."""
+    calls = []
+
+    def _spy(plan, gateway_mode):
+        calls.append(plan)
+        raise SystemExit(3)
+
+    monkeypatch.setattr(update_cmd, "_restart_gateway_fleet_after_update", _spy)
+    return calls
+
+
+def test_up_to_date_update_leaves_current_fleet_alone(monkeypatch, tmp_path, capsys):
+    """Every live gateway already serves the checkout code: `hermes update` (cron, a second
+    profile) must not drain and restart the shared multiplexer again, and must still discharge
+    the obligation it armed and finish clean."""
+    args = _update_args()
+    _patch_update_deps(monkeypatch, tmp_path, _make_up_to_date_side_effect("abc123"))
+    _patch_marker_sha(monkeypatch, "abc123")
+    _plan_with_current_gateway(monkeypatch, "abc123")
+    monkeypatch.setattr("hermes_cli.update_receipt.collect_fleet_versions", lambda **k: _current_row("abc123"))
+    restarts = _spy_fleet_restart(monkeypatch)
+
+    hermes_main.cmd_update(args)
+
+    assert restarts == []
+    assert not update_cmd_fleet._fleet_restart_obligation_armed()
+    assert "Gateway restart skipped" in capsys.readouterr().out
+    from hermes_cli.update_receipt import read_latest_receipt
+    receipt = read_latest_receipt()
+    assert receipt["outcome"] == "success"
+    assert any(skip.get("name") == "gateway_restart" for skip in receipt.get("skips", []))
+
+
+def test_up_to_date_update_still_restarts_a_stale_gateway(monkeypatch, tmp_path):
+    """The guard is evidence-based: one gateway still on pre-update code means the restart runs."""
+    args = _update_args()
+    _patch_update_deps(monkeypatch, tmp_path, _make_up_to_date_side_effect("abc123"))
+    _patch_marker_sha(monkeypatch, "abc123")
+    _plan_with_current_gateway(monkeypatch, "abc123")
+    monkeypatch.setattr(
+        "hermes_cli.update_receipt.collect_fleet_versions",
+        lambda **k: _current_row("abc123") + [
+            {"profile": "work", "pid": 43, "code_sha": "0" * 40, "code_version": "0.20.0", "state": "stale"}],
+    )
+    restarts = _spy_fleet_restart(monkeypatch)
+
+    with pytest.raises(SystemExit) as error:
+        hermes_main.cmd_update(args)
+
+    assert error.value.code == 3
+    assert len(restarts) == 1
+
+
+def test_second_profile_attaches_to_completed_host_restart(monkeypatch):
+    """One host process serves every profile: once its restart is stamped for this checkout,
+    another profile's completion skips the restart instead of killing the multiplexer again."""
+    _patch_marker_sha(monkeypatch, "abc123")
+    monkeypatch.setattr("hermes_cli.update_receipt.collect_fleet_versions", lambda **k: [])
+    update_cmd._write_fleet_restart_pending_marker(expected_sha="abc123")
+    assert update_cmd_fleet._fleet_restart_skip_reason(None) is None
+
+    host_obligation.mark_host_restart_completed("abc123")
+    assert update_cmd_fleet._fleet_restart_skip_reason(None)
+
+    # A stamp for other code proves nothing about this checkout.
+    host_obligation.mark_host_restart_completed("def456")
+    assert update_cmd_fleet._fleet_restart_skip_reason(None) is None

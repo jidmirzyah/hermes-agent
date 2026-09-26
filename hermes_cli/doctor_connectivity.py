@@ -6,6 +6,7 @@ print and issue strings to append. No printing inside workers — the caller pri
 
 from __future__ import annotations
 
+from pm import install_hint
 import concurrent.futures
 import errno
 import functools
@@ -279,7 +280,7 @@ def _probe_bedrock() -> ProbeResult:
         return _row(name, "ok", f"({auth_var}, {region}, {n} models)", label=label)
     except ImportError:
         hint = ("From the Hermes environment, run: "
-                "python -c \"from pm import sync_venv; sync_venv(['bedrock'], explicit=True)\". "
+                f"{install_hint('bedrock')}. "
                 "Then restart Hermes.")
         return _row(name, "warn", "(boto3 not installed)", [hint], label=label)
     except Exception as e:
@@ -313,7 +314,7 @@ def _probe_azure_entra() -> ProbeResult:
         return _row(name, "warn", f"(adapter import failed: {exc})", [f"Azure Foundry adapter import failed: {exc}"], label=label)
     if not has_azure_identity_installed():
         return _row(name, "warn", "(azure-identity not installed)", ["From the Hermes environment, run: "
-                     "python -c \"from pm import sync_venv; sync_venv(['azure-identity'], explicit=True)\". "
+                     f"{install_hint('azure-identity')}. "
                      "Then restart Hermes."], label=label)
     entra_cfg = model_cfg.get("entra") or {}
     scope = (str(entra_cfg.get("scope") or "").strip() if isinstance(entra_cfg, dict) else "") or SCOPE_AI_AZURE_DEFAULT

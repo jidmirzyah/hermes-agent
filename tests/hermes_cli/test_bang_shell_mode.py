@@ -21,7 +21,6 @@ from hermes_cli.bang_shell import (
     run_bang_command,
 )
 
-
 # ── detection / parsing ────────────────────────────────────────────────────
 
 class TestBangDetection:
@@ -64,7 +63,6 @@ class TestBangDetection:
     def test_parse_strips_exactly_one_bang(self, text, expected):
         assert parse_bang_command(text) == expected
 
-
 class TestBangContextGating:
     """Bang mode is CLI-only — gateway/cron users have their own shells."""
 
@@ -85,7 +83,6 @@ class TestBangContextGating:
             monkeypatch.delenv(v, raising=False)
         monkeypatch.setenv(var, value)
         assert bang_shell_enabled() is False
-
 
 # ── execution ──────────────────────────────────────────────────────────────
 
@@ -142,7 +139,6 @@ class TestBangExecution:
         popen.assert_not_called()
         assert any("failed to run command" in line for line in lines)
 
-
 # ── CLI handler: approval gate, usage hint, exit codes ─────────────────────
 
 def _make_cli(history=None):
@@ -158,7 +154,6 @@ def _make_cli(history=None):
     cli._app = None
     return cli
 
-
 def _printed(cli):
     """All text the CLI printed, flattened to plain strings."""
     out = []
@@ -168,7 +163,6 @@ def _printed(cli):
         arg = call.args[0]
         out.append(getattr(arg, "plain", None) or str(arg))
     return out
-
 
 class TestBangHandlerDispatch:
     def test_non_bang_text_is_not_handled(self):
@@ -193,7 +187,6 @@ class TestBangHandlerDispatch:
         assert cli.handle_bang_shell("!exit 3") is True
         assert any("exited 3" in line for line in _printed(cli))
 
-
     def test_disabled_context_falls_through(self, monkeypatch):
         """Gateway sessions must not execute bang commands."""
         cli = _make_cli()
@@ -201,7 +194,6 @@ class TestBangHandlerDispatch:
         with patch("hermes_cli.bang_shell.run_bang_command") as runner:
             assert cli.handle_bang_shell("!echo nope") is False
         runner.assert_not_called()
-
 
 class TestBangApprovalGate:
     """A user-typed command still goes through the terminal tool's gate."""
@@ -244,7 +236,6 @@ class TestBangApprovalGate:
             assert cli.handle_bang_shell("!rm -rf /") is True
         runner.assert_not_called()
 
-
 # ── THE load-bearing invariant ─────────────────────────────────────────────
 
 _SEED_HISTORY = [
@@ -263,7 +254,6 @@ _SEED_HISTORY = [
     },
     {"role": "tool", "tool_call_id": "call_1", "content": "a.py b.py"},
 ]
-
 
 class TestBangLeavesHistoryByteIdentical:
     """Nothing about a bang command may enter conversation history.
@@ -314,7 +304,3 @@ class TestBangLeavesHistoryByteIdentical:
         assert json.dumps(cli.conversation_history, sort_keys=True) == json.dumps(
             _SEED_HISTORY, sort_keys=True
         )
-
-
-
-

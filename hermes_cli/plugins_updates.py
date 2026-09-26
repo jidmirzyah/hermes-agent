@@ -137,16 +137,22 @@ def check_provenanced(
     ls_remote: Callable[[str], str],
 ) -> CheckResult:
     """Check local provenance before contacting its approved update source."""
-    if (prov.row or {}).get("catalog_name"):
+    row = prov.row or {}
+    catalog_value = row.get("catalog")
+    catalog: dict = catalog_value if isinstance(catalog_value, dict) else {}
+    catalog_name = catalog.get("name") or row.get("catalog_name")
+    if catalog_name:
         from hermes_cli.plugin_catalog import find_removed, get_live_catalog_entry
 
-        row = prov.row
         result = CheckResult(name=prov.name, klass="catalog", current=row.get("revision"))
-        removed = find_removed(row["catalog_name"]) or find_removed(str(row.get("source", "")).split("#", 1)[0])
+        removed = None if row.get("allow_removed") is True else (
+            find_removed(str(catalog_name))
+            or find_removed(str(catalog.get("repo") or row.get("source", "")).split("#", 1)[0])
+        )
         if removed:
             result.reason = f"removed from catalog: {removed.reason}"
             return result
-        entry = get_live_catalog_entry(row["catalog_name"])
+        entry = get_live_catalog_entry(str(catalog_name))
         if entry is None:
             result.reason = "catalog entry is unavailable; installed pin retained"
             return result
@@ -339,6 +345,20 @@ def check_pip_plugins(
     return results
 
 
+def https_update_url(url: object) -> str:
+    """Normalize a manifest ``update_url``; raises ValueError unless it is ``https://``.
+
+    The feed picks which commit of the trusted origin gets installed and the gateway fetches
+    it unattended every check interval, so a plaintext ``http://`` (MITM → an old vulnerable
+    commit), ``file://`` or ``ftp://`` feed is refused at install, at trust-update-url AND at
+    the fetch itself (rows saved before this rule existed).
+    """
+    text = str(url or "").strip()
+    if not text.lower().startswith("https://"):
+        raise ValueError(f"update_url must be an https:// URL, got {text!r}")
+    return text
+
+
 def default_fetch(url: str) -> str:
     """The real feed fetcher: url -> text (raises on failure).
 
@@ -347,7 +367,7 @@ def default_fetch(url: str) -> str:
     """
     import urllib.request
 
-    with urllib.request.urlopen(url, timeout=_FETCH_TIMEOUT) as resp:
+    with urllib.request.urlopen(https_update_url(url), timeout=_FETCH_TIMEOUT) as resp:
         data = resp.read(_MAX_FEED_BYTES)
     return data.decode("utf-8", errors="replace")
 

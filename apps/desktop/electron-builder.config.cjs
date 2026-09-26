@@ -35,6 +35,7 @@ const {
 // invariant lives in product-identity.cjs:33-34/58-68.
 /** @type {NonNullable<typeof storeMsix> | undefined} */
 const storeMsixWhenStore = storeMsix
+const releaseBuild = Boolean(process.env.HERMES_PAYLOAD_TAG)
 
 /**
  * The store MSIX packaging identity. Callers must only invoke this when
@@ -64,7 +65,7 @@ if (!/^\d+\.\d+\.\d+$/.test(electronVersion)) {
 }
 
 const macFeed = channelRequest ? null : feedContract.darwinFeed(channel === 'canary' || channel === 'light-canary' ? 'canary' : 'stable', light)
-const publicUrl = process.env.CLOUDFLARE_R2_PUBLIC_URL?.replace(/\/+$/, '')
+const publicUrl = feedContract.feedBaseUrl(process.env.CLOUDFLARE_R2_PUBLIC_URL)
 
 /** @satisfies {Configuration} */
 module.exports = {
@@ -93,8 +94,8 @@ module.exports = {
   publish: channelRequest ? null : !channel
     ? null
     : [
-        process.env.CLOUDFLARE_R2_PUBLIC_URL
-          ? { provider: 'generic', url: process.env.CLOUDFLARE_R2_PUBLIC_URL.replace(/\/+$/, ''), channel }
+        publicUrl
+          ? { provider: 'generic', url: publicUrl, channel }
           : { provider: 'github', owner, repo, channel }
       ],
   extraMetadata: {
@@ -235,13 +236,10 @@ module.exports = {
     displayName,
     publisher: store ? mustStoreMsix(storeMsixWhenStore).publisher : OUT_OF_STORE_PUBLISHER,
     publisherDisplayName: store ? mustStoreMsix(storeMsixWhenStore).publisherDisplayName : 'Nous Research',
-    // Sideload canary MSIX versions are `X.Y.Z.<minutes-since-stable>` (see
-    // scripts/msix-shared.mjs). setBuildNumber makes getVersionInWeirdWindowsForm
-    // use the BUILD_NUMBER env (4th component) instead of hardcoding ".0" — a
-    // stable build sets no BUILD_NUMBER and stays X.Y.Z.0, a canary build sets
-    // it via scripts/bundles/desktop.py so App Installer updates over equal
-    // canary-over-canary versions instead of refusing them.
-    setBuildNumber: !store && !channelRequest,
+    // The native quad is the build time (scripts/msix-shared.mjs::nativeQuad),
+    // baked into the manifest template, so the builder's own build-number
+    // override would stamp a second, conflicting version.
+    setBuildNumber: false,
     // Store versions are baked into a build-time template. App semver and
     // artifact filenames stay unchanged; the Store reserves revision zero.
     // Floor Windows 11 22H2. Below build 18307 the manifest schema caps
@@ -257,7 +255,8 @@ module.exports = {
     // time, so typecheck/test imports don't touch the filesystem.
     customExtensionsPath: 'build/msix-extensions.xml',
     customManifestPath: store ? 'build/store-msix-manifest.xml'
-      : channelRequest || appNamePascal !== artifactNamePascal ? 'build/msix-manifest.xml' : 'assets/msix-manifest.xml',
+      : releaseBuild || channelRequest || appNamePascal !== artifactNamePascal
+        ? 'build/msix-manifest.xml' : 'assets/msix-manifest.xml',
     // Hermes state is deliberately shared with unpackaged CLI/gateway
     // processes. Pair the manifest's disabled virtualization properties with
     // the restricted capability that permits unvirtualized AppData/HKCU writes.

@@ -59,7 +59,13 @@ from concurrent.futures import ThreadPoolExecutor, Future
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-def _rmtree_force(path) -> None:
+# The CI lane selector owns the platforms() spec resolver; share it so the
+# "skipped on this host" note and the lanes can never disagree.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from scripts.ci.list_os_marked_tests import gated_specs, spec_hosts  # noqa: E402
+
+
+def _rmtree_force(path: str) -> None:
     """shutil.rmtree that retries a read-only leftover instead of silently skipping it the way
     ``ignore_errors=True`` would (some fixtures chmod their tmp_path tree read-only and never
     restore it, leaking it forever)."""
@@ -183,35 +189,35 @@ def _read_files_from(spec: str) -> List[str]:
     return [line.strip() for line in text.splitlines() if line.strip()]
 
 
-_OS_MARKERS = {
-    "linux_only": ("linux", "the main Linux CI lane"),
-    "macos_only": ("darwin", "the macOS Python-tests lane"),
-    "windows_only": ("win32", "the Windows Python-tests lane"),
+# Lane names keyed the way platforms() specs resolve (scripts/ci/list_os_marked_tests.py
+# shares the resolver with the CI selector so the note and the lanes never disagree).
+_HOST_LANE = {"linux": "linux", "darwin": "macos", "win32": "windows"}
+_LANES = {
+    "linux": "the main Linux CI lane",
+    "macos": "the macOS Python-tests lane",
+    "windows": "the Windows Python-tests lane",
 }
 
 
 def _off_host_marker_files(files: List[Path]) -> dict[str, int]:
-    """Count discovered files referencing each marker for an OS we are not on.
+    """Count discovered files carrying a platforms() spec that excludes this host.
 
-    Whole-word text match, same approach as scripts/ci/list_os_marked_tests.py:
+    Text-level scan, same resolver as scripts/ci/list_os_marked_tests.py:
     over-counting a prose mention is harmless here (the note is informational);
     what matters is never reporting 0 while gated tests exist.
     """
-    off_host = {
-        marker: re.compile(rf"\b{marker}\b")
-        for marker, (host_prefix, _) in _OS_MARKERS.items()
-        if not sys.platform.startswith(host_prefix)
-    }
-    counts = {marker: 0 for marker in off_host}
+    host = _HOST_LANE.get(sys.platform, sys.platform)
+    counts: dict[str, int] = {}
     for path in files:
         try:
             text = path.read_text(encoding="utf-8-sig", errors="replace")
         except OSError:
             continue
-        for marker, pattern in off_host.items():
-            if pattern.search(text):
-                counts[marker] += 1
-    return {marker: n for marker, n in counts.items() if n}
+        for spec in gated_specs(text):
+            hosts = spec_hosts(spec)
+            if hosts and host not in hosts:
+                counts[spec] = counts.get(spec, 0) + 1
+    return counts
 
 
 def _approximately_count_tests(
@@ -1421,16 +1427,16 @@ def main() -> int:
 
     # Host-OS gating note: tests marked for another OS were skipped by the
     # conftest hook, not run. Say so explicitly — a green local run on Linux
-    # proves nothing about the macos_only/windows_only tests, and the reader
+    # proves nothing about the platforms("windows") tests, and the reader
     # should know where they DO run rather than misreading skips as coverage.
     off_host = _off_host_marker_files(files)
     if off_host:
         print()
-        for marker, n in sorted(off_host.items()):
-            _, lane = _OS_MARKERS[marker]
+        for spec, n in sorted(off_host.items()):
+            lanes = ", ".join(_LANES[lane] for lane in sorted(spec_hosts(spec)))
             print(
-                f"  note: {marker} tests (in {n} file{'s' if n != 1 else ''}) were "
-                f"SKIPPED on this host ({sys.platform}); they run on {lane}."
+                f"  note: platforms({spec!r}) tests (in {n} file{'s' if n != 1 else ''}) were "
+                f"SKIPPED on this host ({sys.platform}); they run on {lanes}."
             )
 
     # Zero tests collected across the WHOLE run is NOT a pass. Per-file rc=5

@@ -77,9 +77,12 @@ package. See [Updating & Uninstalling](../getting-started/updating.md).
 
 ### Dependency bootstrap
 
-PM owns managed tools. `hermes_cli/dep_ensure.py` maps feature requirements to
-PM packages instead of invoking `install.ps1 -Ensure`. Already installed tools
-come from PM facts; missing optional tools follow the lazy-install policy.
+PM owns managed tools. Feature code asks PM for the package it needs
+(`pm.ensure("<package>")`, e.g. `cua-driver` for Computer Use) instead of
+re-running the installer. Already installed tools are reused from PM's
+recorded state; a missing optional tool is fetched on demand only when
+[`security.allow_lazy_installs`](../reference/package-management.md#lazy-install-policy)
+permits it. `install.ps1` has no `-Ensure` mode.
 
 ```powershell
 hermes pm doctor

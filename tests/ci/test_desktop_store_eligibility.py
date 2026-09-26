@@ -13,7 +13,7 @@ from tests.ci.test_desktop_release_tag_admission import _BASH, _child_env, _work
 
 @pytest.mark.parametrize('tag,commit,store', [
     ('v0.28.0', '', True),
-    ('v0.28.0-canary.20260818', '', False),
+    ('v0.28.0+canary.20260818T000000Z', '', False),
     ('', 'a' * 40, False),
 ])
 def test_bundle_only_requests_store_for_stable(tmp_path, tag, commit, store):
@@ -50,25 +50,45 @@ def test_bundle_only_requests_store_for_stable(tmp_path, tag, commit, store):
 
 
 @pytest.mark.platforms('windows')
-@pytest.mark.parametrize('tag,commit,store', [
-    ('v0.28.0', '', True), ('v0.28.0-canary.20260818', '', False), ('', 'a' * 40, False),
-])
-def test_native_windows_build_selects_store_only_for_stable(tmp_path, tag, commit, store):
+def test_native_windows_build_selects_store_only_for_stable(tmp_path):
     jobs = _workflow()['jobs']
-    selected = 'build-win32-commit' if commit else 'build-win32-release'
-    script = next(step['run'] for step in jobs[selected]['steps'] if step.get('name') == 'Build and package')
+    scripts = {
+        kind: next(step['run'] for step in jobs[job]['steps'] if step.get('name') == 'Build and package')
+        for kind, job in [('release', 'build-win32-release'), ('commit', 'build-win32-commit')]
+    }
+    cases = [
+        ('v0.28.0', '', True, 'release'),
+        ('v0.28.0+canary.20260818T000000Z', '', False, 'release'),
+        ('', 'a' * 40, False, 'commit'),
+    ]
     wrapper = tmp_path / 'run.ps1'
-    # Only the build boundary is substituted; execute the actual PowerShell
-    # branch and native-exit handling instead of interpreting it as Bash.
-    wrapper.write_text('function python { $args -join " " | Add-Content $env:CALL_LOG -Encoding UTF8; $global:LASTEXITCODE = 0 }\n' + script, encoding='utf-8')
-    log = tmp_path / 'calls.txt'
+    # Substitute only the build boundary, then execute both workflow scripts
+    # as real PowerShell in one session. Cold starts contend heavily in the
+    # native OS lane; charging one to every parameter made startup latency part
+    # of the assertion.
+    body = [
+        'function python { $args -join " " | Add-Content $env:CALL_LOG -Encoding UTF8; $global:LASTEXITCODE = 0 }',
+        f'$releaseBuild = {{\n{scripts["release"]}\n}}',
+        f'$commitBuild = {{\n{scripts["commit"]}\n}}',
+    ]
+    for index, (tag, commit, _, kind) in enumerate(cases):
+        body.extend([
+            f'$env:HERMES_PAYLOAD_TAG = \'{tag}\'',
+            f'$env:HERMES_BUILD_COMMIT = \'{commit}\'',
+            f'$env:CALL_LOG = Join-Path $env:RUNNER_TEMP \'calls-{index}.txt\'',
+            f'& ${kind}Build',
+        ])
+    wrapper.write_text('\n'.join(body) + '\n', encoding='utf-8')
     powershell = shutil.which('powershell')
     assert powershell
-    result = subprocess.run([powershell, '-NoProfile', '-File', str(wrapper)],
-                            env=_child_env(HERMES_PAYLOAD_TAG=tag, HERMES_BUILD_COMMIT=commit,
-                                           RUNNER_TEMP=str(tmp_path), CALL_LOG=str(log)),
-                            capture_output=True, text=True, timeout=15)
+    # The canonical per-file runner remains the deadlock guard; a nested
+    # startup deadline only measures scheduler contention on the Windows host.
+    result = subprocess.run(
+        [powershell, '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', str(wrapper)],
+        env=_child_env(RUNNER_TEMP=str(tmp_path)), capture_output=True, text=True,
+    )
     assert result.returncode == 0, result.stdout + result.stderr
-    calls = log.read_text(encoding='utf-8-sig')
-    assert '--variant bundled' in calls
-    assert ('--variant store' in calls) is store
+    for index, (_, _, store, _) in enumerate(cases):
+        calls = (tmp_path / f'calls-{index}.txt').read_text(encoding='utf-8-sig')
+        assert '--variant bundled' in calls
+        assert ('--variant store' in calls) is store

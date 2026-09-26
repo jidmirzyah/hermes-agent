@@ -33,24 +33,25 @@ def test_ci_dependency_phase_uses_isolated_runtime(tmp_path, monkeypatch):
 
     project = tmp_path / "source"
     project.mkdir()
-    (project / "pyproject.toml").write_text('[project]\nname="ci-proof"\nversion="1"\n[project.optional-dependencies]\ndev=[]\n')
+    (project / "pyproject.toml").write_text('[project]\nname="ci-proof"\nversion="1"\n'
+                                            '[dependency-groups]\ndev=[]\ntest=[]\n')
     monkeypatch.setattr(paths, "repo_root", lambda: project)
     monkeypatch.setattr(client, "is_runtime", lambda: False)
     calls = []
 
     def request(operation, arguments, **kwargs):
         calls.append((operation, arguments))
-        return str(tmp_path / "test-environment/bin/python") if operation == "build_environment" else None
+        return str(tmp_path / "test-environment/bin/python") if operation == "ensure_project_environment" else None
 
     monkeypatch.setattr(client, "_request", request)
     monkeypatch.setattr(setup_toolchain, "python3_alias", lambda _: None)
     monkeypatch.setattr(setup_toolchain, "file_commands", lambda *args: None)
     monkeypatch.setattr(setup_toolchain, "add_path", lambda *args: None)
-    setup_toolchain.dependencies(SimpleNamespace(home=tmp_path, extras=["dev"], toolchain="all"))
-    assert [operation for operation, _ in calls] == ["check_project_lock", "build_environment"]
+    setup_toolchain.dependencies(SimpleNamespace(home=tmp_path, extras=[], test_environment=True, toolchain="all"))
+    assert [operation for operation, _ in calls] == ["check_project_lock", "ensure_project_environment"]
     assert calls[0][1]["source"] == str(project)
-    assert calls[1][1]["extras"] == ["dev"]
-    assert calls[1][1]["groups"] == ["test"]
+    assert calls[1][1]["extras"] == []
+    assert calls[1][1]["groups"] == ["dev", "test"]
     assert all(arguments["explicit"] for _, arguments in calls)
 
 

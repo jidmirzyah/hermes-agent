@@ -66,9 +66,10 @@ def _child_env() -> dict:
 def _spawnable_python() -> Path:
     """An interpreter this process can actually CreateProcess. The hermetic
     runner's venv python can be an emulated x64 binary on an arm64 host
-    (WinError 5 on every spawn); the native pm-store python under
-    WindowsApps works when invoked by full path. Prefer whichever python
-    can run a trivial child; last resort is sys.executable."""
+    (WinError 5 on every spawn), or a macOS venv shim that stops working
+    after activation sanitizes its parent environment. Prefer the venv's
+    base interpreter, then whichever python can run a trivial child; last
+    resort is sys.executable."""
     candidates: list[Path] = []
     for env_name in ("HERMES_TEST_PYTHON",):
         val = os.environ.get(env_name)
@@ -78,8 +79,10 @@ def _spawnable_python() -> Path:
     if "windowsapps" in str(exe).lower():
         candidates.append(exe)  # native packaged python — spawnable by path
     else:
-        candidates.insert(0, exe)
-    candidates.append(exe)
+        base = Path(getattr(sys, "_base_executable", "") or exe)
+        if base != exe:
+            candidates.append(base)
+        candidates.append(exe)
     for cand in candidates:
         if _can_spawn(cand):
             return cand

@@ -26,6 +26,7 @@ def main(argv: list[str] | None = None) -> int:
     identity = parser.add_mutually_exclusive_group(required=True)
     identity.add_argument("--tag")
     identity.add_argument("--commit")
+    parser.add_argument("--release-commit")
     args = parser.parse_args(argv)
 
     try:
@@ -33,6 +34,10 @@ def main(argv: list[str] | None = None) -> int:
             deb_version_for_tag(args.tag)
         else:
             require_commit(args.commit)
+        if args.release_commit is not None:
+            if args.tag is None:
+                parser.error("--release-commit requires --tag")
+            require_commit(args.release_commit)
     except ValueError as exc:
         parser.error(str(exc))
 
@@ -42,6 +47,8 @@ def main(argv: list[str] | None = None) -> int:
             parser.error(f"{option} must name an existing directory: {path}")
     product = repo / ".build/termux/tui"
     revision = ["--tag", args.tag] if args.tag is not None else ["--commit", args.commit]
+    if args.release_commit is not None:
+        revision.extend(["--release-commit", args.release_commit])
     commands = [
         ["node", str(repo / "scripts/build/node-deps.mjs"),
          "--source", str(repo), "--workspace", "ui-tui"],

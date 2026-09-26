@@ -59,20 +59,25 @@ def _git_origin_url(plugin_dir: Path) -> Optional[str]:
     """origin's URL from the installed .git — remote get-url on a real
     repo, config-file parse as the fallback (works for partial/copy
     installs where git refuses)."""
-    # fast path: real git repo
-    try:
-        proc = subprocess.run(
-            ["git", "-C", str(plugin_dir), "remote", "get-url", "origin"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if proc.returncode == 0:
-            url = (proc.stdout or "").strip()
-            if url:
-                return url
-    except (OSError, subprocess.TimeoutExpired):
-        pass
+    # fast path: real git repo. Same resolver as install/update: PATH may be minimal
+    # (gateway service, Windows without Git on PATH); no git → straight to the config parse.
+    from hermes_cli.plugins_cmd import _resolve_git_executable
+
+    git = _resolve_git_executable()
+    if git is not None:
+        try:
+            proc = subprocess.run(
+                [git, "-C", str(plugin_dir), "remote", "get-url", "origin"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if proc.returncode == 0:
+                url = (proc.stdout or "").strip()
+                if url:
+                    return url
+        except (OSError, subprocess.TimeoutExpired):
+            pass
     # fallback: parse .git/config directly (a .git dir with a config
     # file is all the adopt path needs)
     config = plugin_dir / ".git" / "config"

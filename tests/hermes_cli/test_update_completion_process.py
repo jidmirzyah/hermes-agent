@@ -77,6 +77,10 @@ def transition(tmp_path):
         "from hermes_cli.probe import event\n"
         "def build_update_products(root, *, desktop): event('build', desktop=desktop)\n"
     )
+    (package / "source_stamp.py").write_text(
+        "from hermes_cli.probe import event\n"
+        "write_source_stamp = lambda root: event('stamp')\n"
+    )
     # The shared completion tail is part of the NEW tree the child runs from.
     shutil.copy2(Path(update_completion.__file__).with_name("source_completion.py"),
                  package / "source_completion.py")
@@ -98,6 +102,7 @@ def transition(tmp_path):
         "_sweep_bytecode_after_update = lambda branch: event('bytecode')\n"
         "_write_fleet_restart_pending_marker = lambda **kw: event('pending')\n"
         "_write_gateway_update_exit_code = lambda ok: event('exit_marker', ok=ok)\n"
+        "_fleet_restart_skip_reason = lambda plan: None\n"
         "def _restart_gateway_fleet_after_update(plan, gateway_mode):\n"
         "    event('restart', profiles=[r.profile for r in plan.runtimes])\n"
         "    return object()\n"

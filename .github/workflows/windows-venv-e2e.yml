@@ -51,7 +51,8 @@ jobs:
       - name: Set up locked Python and test dependencies
         uses: ./.github/actions/setup-pm
         with:
-          extras: '["dev", "messaging"]'
+          extras: '["messaging"]'
+          test-environment: 'true'
           prune-python-cache: true
 
       - name: Run venv-holder live E2E

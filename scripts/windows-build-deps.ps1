@@ -1,7 +1,14 @@
 # Native build dependencies are separate from PM's application environment.
 function Invoke-HermesBuildCommand {
     param([string]$Command, [string[]]$Arguments)
-    $executable = (Get-Command $Command -CommandType Application -ErrorAction Stop).Source
+    # Windows PowerShell 5.1 returns every match from Get-Command even without
+    # -All. .Source on that array is every path joined by a space, and the call
+    # operator then treats the joined string as one program name. Git for
+    # Windows puts git.exe in both cmd\ and bin\, so a bare lookup is that bug.
+    $executable = @(Get-Command $Command -CommandType Application -ErrorAction Stop | Select-Object -First 1)[0].Source
+    if ($executable -isnot [string] -or -not (Test-Path -LiteralPath $executable -PathType Leaf)) {
+        throw "Could not resolve a single executable for $Command (got: $executable)"
+    }
     $previousPreference = $ErrorActionPreference
     try {
         $ErrorActionPreference = 'Continue'
@@ -115,9 +122,13 @@ function Initialize-HermesArm64BuildTools {
     if (-not (Get-Command cl.exe -ErrorAction SilentlyContinue)) { throw 'ARM64 C++ compiler is unavailable after environment setup' }
     # With VSCMD_ARG_TGT_ARCH exported, rustc's cc crate takes link.exe from PATH
     # instead of asking vswhere. Under Git Bash that is coreutils' link.exe, so
-    # pin the MSVC linker explicitly.
-    $linker = (Get-Command link.exe -ErrorAction Stop).Source
-    if ($linker -notlike '*\MSVC\*') { throw "MSVC link.exe is shadowed by $linker" }
+    # pin the MSVC linker explicitly. PATH order is the caller's (a reused
+    # environment keeps Git Bash's order), so take it from the developer
+    # environment's own tools directory instead.
+    $linker = if ($env:VCToolsInstallDir) { Join-Path $env:VCToolsInstallDir 'bin\HostARM64\ARM64\link.exe' }
+    if (-not $linker -or -not (Test-Path -LiteralPath $linker)) {
+        throw "MSVC link.exe is missing from VCToolsInstallDir '$env:VCToolsInstallDir'"
+    }
     $env:CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_LINKER = $linker
 
     # Child builds isolate HOME/USERPROFILE. Keep Rust anchored to the homes

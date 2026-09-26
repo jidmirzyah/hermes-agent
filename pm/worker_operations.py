@@ -30,6 +30,7 @@ OPERATIONS = {
     "build_environment": Operation("pm.operations", ("uv",), "policy"),
     "lock_project": Operation("pm.operations", ("uv",), "policy"),
     "ensure_environment": Operation("pm.operations", ("uv",), "policy"),
+    "ensure_project_environment": Operation("pm.operations", ("uv",), "policy"),
     "ensure_python_tool": Operation("pm.operations", ("uv",), "policy"),
     "check_project_lock": Operation("pm.build_operations", ("uv",), "policy"),
     "export_requirements": Operation("pm.build_operations", ("uv",), "policy"),

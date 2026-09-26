@@ -36,7 +36,7 @@ def artifact(tmp_path, request):
     (root / "install-stamp.json").write_text(json.dumps({
         "source": request.param,
         "distribution": "apt-termux",
-        "payload": "bundled",
+        "payload": "runtime",
         "updateMechanism": "external",
         "commit": "a" * 40,
         "tag": None if request.param == "commit-build" else "v1.2.3",

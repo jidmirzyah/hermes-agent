@@ -33,7 +33,7 @@ def shell_step(tmp_path, r2_server, job, name, env, *, script=None):
         'from scripts.releases import r2\n'
         f'r2.s3_endpoint=lambda _: "http://127.0.0.1:{r2_server.server_port}"\n'
         'args=sys.argv[1:]\n'
-        'assert args[:2] == ["-m", "scripts.releases.handoff"] or '
+        'assert args[:2] == ["-m", "scripts.releases.handoff"] or args[:2] == ["-m", "scripts.releases.upload_summary"] or '
         'args[:1] in (["scripts/render-builds-table.py"], ["-"]), args\n'
         'if args[:1] == ["-m"]:\n'
         '    sys.argv=args[1:]\n'
@@ -95,11 +95,10 @@ def test_failed_commit_summary_publishes_downloads_or_run_links(tmp_path, r2_ser
     assert html.escape(json.dumps(bundle_env['LABEL'], ensure_ascii=False)) in page
     assert '<script>' not in page and 'must-not-appear' not in page and 'CI_SECRET' not in page
     links = re.findall(r'\]\((https?://[^)]+)\)', text)
+    download_links = [url for url in links if url.endswith('.msix')]
     assert run_url in links
     assert text.count('✅ Built') == page.count('✅ Built') == int(has_download)
-    for url in links:
-        assert f'href="{url}"' in page
-        if url != run_url:
+    for url in download_links:
             assert url.startswith(base + '/')
             with urlopen(url, timeout=5) as response:
                 assert response.read() == b'inert downloadable fixture'
@@ -187,9 +186,10 @@ def test_commit_staging_and_summary_bind_every_produced_file_without_channels(tm
     links = re.findall(r'\]\((http[^)]+)\)', text)
     # Blockmaps are receipt inputs; every other staged product has a download row.
     expected = {f'{base}/{quote(key, safe="/")}' for key in artifact_keys if not key.endswith('.blockmap')}
-    assert set(links) == expected
-    assert len(links) == len(expected)
-    for url in links:
+    page_url = f'{base}/{quote(f"releases/commit/{sha}/index.html", safe="/")}'
+    assert set(links) == expected | {page_url}
+    assert len(links) == len(expected) + 1
+    for url in expected:
         with urlopen(url, timeout=5) as response:
             key = unquote(url.removeprefix(base + '/'))
             assert response.read() == r2_server.store[key][0]

@@ -118,7 +118,8 @@ def test_bundle_stages_git_tree_and_runs_native_children_before_manifest(tmp_pat
                      digest=tree_digest(entry))
     canonical_before = {name: tree_digest(canonical / facts.get(name)["entry"]) for name in selected}
     canonical_facts = (canonical / "facts.json").read_bytes()
-    env = {**os.environ, "UV_OFFLINE": "1", "UV_PYTHON_DOWNLOADS": "never", "UV_CACHE_DIR": str(tmp_path / "cache")}
+    env = {**os.environ, "UV_OFFLINE": "1", "UV_PYTHON_DOWNLOADS": "never",
+           "UV_CACHE_DIR": str(tmp_path / "cache"), "HERMES_PAYLOAD_VERSION": "9.9.9"}
     subprocess.run([uv, "lock", "--python", sys.executable], cwd=repo, env=env, check=True, capture_output=True)
     subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
     subprocess.run(["git", "add", "."], cwd=repo, check=True)
@@ -244,6 +245,8 @@ def test_bundle_stages_git_tree_and_runs_native_children_before_manifest(tmp_pat
     assert calls[0]["all_extras"] is True
     assert calls[0]["cache"] == tmp_path / "cache"
     assert (output / "hermes-agent/pyproject.toml").is_file()
+    assert 'version="1.0.0"' in (output / "hermes-agent/pyproject.toml").read_text()
+    assert not (output / "hermes-agent/hermes_cli/_version.py").exists()
     assert not (output / "hermes-agent/untracked").exists()
     assert not (output / "hermes-agent/.git").exists()
     facts = Facts(output / "tools/facts.json")
@@ -549,7 +552,7 @@ def test_staged_cache_ships_full_wheel_set_and_rebuilds_offline(tmp_path):
 def test_native_dispatch_isolates_process_state_on_real_child_failure(tmp_path, monkeypatch):
     # Compiler provisioning has its own native test; this probe must stop
     # at the invalid revision without installing tools on a developer host.
-    monkeypatch.setattr("scripts.build.windows_deps.prepare_windows_environment", lambda **kwargs: dict(kwargs["env"]))
+    monkeypatch.setattr("pm.native_build.prepare_windows_environment", lambda **kwargs: dict(kwargs["env"]))
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "user-home"))
     monkeypatch.setenv("HERMES_RUNTIME_DIR", str(tmp_path / "user-tools"))
     before = dict(os.environ)
@@ -584,7 +587,7 @@ def test_native_dispatch_child_environment(tmp_path, monkeypatch, cache_source, 
     from pm.packages import uv_cache_dir
 
     monkeypatch.setattr(Path, "home", lambda: tmp_path / "host")
-    monkeypatch.setattr("scripts.build.windows_deps.prepare_windows_environment", lambda **kwargs: dict(kwargs["env"]))
+    monkeypatch.setattr("pm.native_build.prepare_windows_environment", lambda **kwargs: dict(kwargs["env"]))
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "user"))
     monkeypatch.delenv("UV_CACHE_DIR", raising=False)
     ambient = tmp_path / "ambient"

@@ -33,7 +33,6 @@ PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from hermes_cli import __version__
 from hermes_cli.config import detect_install_method, get_hermes_home, load_config
 from hermes_cli.web_server_memory import _field_is_set, _field_value
 from plugins.memory.config_schema import ProviderField
@@ -46,6 +45,7 @@ from hermes_cli.web_server_sessions import _open_session_db_for_profile
 from hermes_cli.web_routers.ops import _dashboard_backup_dir
 from hermes_cli.web_routers.tools import _terminal_backend_rows
 from hermes_cli.web_server_chat import _ws_host_origin_reason, _ws_client_reason
+from hermes_cli.version_info import get_version_info
 
 try:
     from fastapi import FastAPI, HTTPException, Request, WebSocket
@@ -86,10 +86,6 @@ from hermes_cli.web_server_lifecycle import (  # noqa: E402
     _write_dashboard_ready_file,
     _write_machine_sentinel_line,
 )
-
-# MERGE-CHECK: upstream moved the parent-start-marker helpers into web_server_lifecycle.py
-# (imported above); our branch's in-file copies were dropped with the rest of the
-# pre-refactor block below. Parent re-verify no desktop caller needed the old in-file copies.
 
 
 def _start_desktop_cron_ticker(stop_event: "threading.Event", interval: int = 60) -> None:
@@ -339,7 +335,7 @@ def _get_pty_active_session_files(app: "FastAPI") -> dict[str, Path]:
     return _app_state_default(app, "pty_active_session_files", dict)
 
 
-app = FastAPI(title="Hermes Agent", version=__version__, lifespan=_lifespan)
+app = FastAPI(title="Hermes Agent", version=get_version_info().base_version, lifespan=_lifespan)
 
 
 # Memory-provider OAuth connect routes live in the memory layer, not here.
@@ -1569,9 +1565,6 @@ def _voice_list_error_logged_once(signature: Optional[str]) -> bool:
     return True
 
 
-# MERGE-CHECK: ours-side of this conflict was ~13k lines of pre-#102117 endpoints
-# (elevenlabs voices, themes, plugin discovery, model/config routers) now decomposed by
-# upstream into web_routers/*, web_server_dashboard.py and audio.py; ours dropped, upstream kept.
 _ACTION_LOG_FILES.setdefault("computer-use-grant", "action-computer-use-grant.log")
 
 # Cache discovered plugins per-process (refresh on explicit re-scan).

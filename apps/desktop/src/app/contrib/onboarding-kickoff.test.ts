@@ -1,7 +1,7 @@
 import { afterEach, expect, it, vi } from 'vitest'
 
 import type { ClientSessionState } from '@/app/types'
-import { $setupSession, SETUP_PROFILE } from '@/components/onboarding-chat/setup-profile'
+import { $setupSession } from '@/components/onboarding-chat/setup-profile'
 import { assistantTextPart } from '@/lib/chat-messages'
 import { $activeGatewayProfile } from '@/store/profile'
 import { $activeSessionId, $messages, $selectedStoredSessionId } from '@/store/session'
@@ -10,6 +10,7 @@ import { $sessionStates } from '@/store/session-states'
 import { adoptGuideSession } from './onboarding-kickoff'
 
 const messages = [{ id: 'greeting', role: 'assistant' as const, parts: [assistantTextPart('Welcome back')] }]
+const setupProfile = 'setup-provisioned'
 
 function publishGuide(storedSessionId: string, visible = true) {
   const state: ClientSessionState = {
@@ -41,7 +42,7 @@ function publishGuide(storedSessionId: string, visible = true) {
   $sessionStates.set({ 'runtime-guide': state })
   $activeSessionId.set('runtime-guide')
   $selectedStoredSessionId.set(storedSessionId)
-  $activeGatewayProfile.set(SETUP_PROFILE)
+  $activeGatewayProfile.set(setupProfile)
   $messages.set(visible ? messages : [])
 }
 
@@ -60,6 +61,7 @@ it('adopts the resumed runtime only after the correct saved transcript is visibl
   })
 
   await adoptGuideSession(
+    setupProfile,
     { id: 'guide', resolved_id: 'guide-tip' },
     false,
     async () => {
@@ -67,7 +69,7 @@ it('adopts the resumed runtime only after the correct saved transcript is visibl
     },
     request
   )
-  expect($setupSession.get()).toMatchObject({ storedId: 'guide', runtimeId: 'runtime-guide', profile: SETUP_PROFILE })
+  expect($setupSession.get()).toMatchObject({ storedId: 'guide', runtimeId: 'runtime-guide', profile: setupProfile })
   expect(request).not.toHaveBeenCalled()
   expect($messages.get()).toEqual(messages)
 })
@@ -81,6 +83,7 @@ it.each(['empty', 'wrong-session', 'wrong-profile', 'no-runtime'])(
 
     await expect(
       adoptGuideSession(
+        setupProfile,
         { id: 'guide' },
         false,
         async () => {

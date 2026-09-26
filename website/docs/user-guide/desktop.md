@@ -686,9 +686,9 @@ clearing the entry — the latch resets and the next boot dials fresh.
 
 The build downloads the Electron runtime (~114&nbsp;MB) from `github.com/electron/electron/releases`. If the installer hangs on the **Build desktop app** step with the live output repeating `retrying attempt=…`, GitHub is being blocked or throttled on your network (firewall, proxy, or region).
 
-The installer self-heals this automatically: on a failed build it (1) clears a corrupt cached Electron zip and retries, then (2) if it still fails, the Electron distributable is still missing, and you haven't set `ELECTRON_MIRROR`, retries once more through `npmmirror.com`, the de-facto Electron community mirror. `@electron/get` SHASUM-checks the download, but the checksums come from the same mirror — that catches a corrupt or partial download, not a compromised mirror. If you'd rather not trust a third-party host, pin your own `ELECTRON_MIRROR` (below); the build never overrides one you've set.
+The build does not fall back to a mirror on its own and does not retry a failed download: a build that fails for any reason leaves the previous app untouched (stage-and-swap, see [Updating](../getting-started/updating.md#what-happens-during-an-update)), the update itself fails, and `hermes desktop --build-only --force-build` (or the next `hermes update`) runs the build again. If the failure was a corrupt cached Electron zip, delete it from `@electron/get`'s cache (`~/.cache/electron/` on Linux, `~/Library/Caches/electron/` on macOS, `%LOCALAPPDATA%\electron\Cache` on Windows) before rebuilding. `@electron/get` SHASUM-checks every download, but the checksums come from the same host, so a mirror you point it at is trusted for both.
 
-To **choose your own mirror** (e.g. a corporate/trusted one), set `ELECTRON_MIRROR` before installing or rebuild manually — the build honors it and won't override it:
+To **use a mirror** (e.g. a corporate one, or `npmmirror.com`, the de-facto Electron community mirror), set `ELECTRON_MIRROR` before installing or rebuild manually — the build honors it and never overrides one you've set:
 
 ```bash
 ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ \

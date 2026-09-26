@@ -1026,8 +1026,7 @@ class TestContainerTypeRefusal:
     def test_valid_literal_and_scalar_keys_still_write(self, _isolated_hermes_home):
         self._write_config(_isolated_hermes_home, {"model": {"default": "m", "aliases": {"a": "p/m"}}})
 
-        # YAML 1.2 (ruamel): a bare `:` inside a flow mapping value needs quoting.
-        set_config_value("custom_providers", "[{name: ok, base_url: 'http://h/v1'}]")
+        set_config_value("custom_providers", "[{name: ok, base_url: http://h/v1}]")
         set_config_value("model.default", "bar")
         with pytest.raises(SystemExit):
             set_config_value("model.aliases", "notamap")

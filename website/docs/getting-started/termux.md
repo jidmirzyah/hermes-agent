@@ -7,7 +7,17 @@ description: "Install Hermes Agent on Android from its signed Termux APT reposit
 # Hermes on Android with Termux
 
 The Termux package runs Hermes on **aarch64 (arm64-v8a)** Android devices.
-This package is in prerelease testing.
+Two APT channels are published under
+`https://hermes-assets.nousresearch.com/releases/termux/<channel>`:
+
+| Channel | APT suite | Contents |
+| --- | --- | --- |
+| `stable` | `hermes-stable` | Tagged `vMAJOR.MINOR.PATCH` releases that passed the stable release gate |
+| `canary` | `hermes-canary` | Prerelease builds from canary tags; versions carry `~canary.<timestamp>` |
+
+The steps below use `stable`. To follow prereleases, replace `stable` with
+`canary` and `hermes-stable` with `hermes-canary` in steps 2 and 4. Both
+channels are signed with the same key.
 
 The package includes Python, Node.js, npm, uv, ripgrep, ffmpeg, and their runtime libraries.
 CI builds the native Python wheels and the TUI before it creates the package.
@@ -35,7 +45,7 @@ Do not use the desktop/server `install.sh` or a glibc Linux archive on this targ
    ```bash
    mkdir -p "$PREFIX/etc/apt/keyrings"
    curl -fsSL \
-     https://hermes-assets.nousresearch.com/releases/termux/canary/key.asc \
+     https://hermes-assets.nousresearch.com/releases/termux/stable/key.asc \
      -o "$PREFIX/etc/apt/keyrings/hermes-agent.asc"
    ```
 
@@ -53,11 +63,11 @@ Do not use the desktop/server `install.sh` or a glibc Linux archive on this targ
 
    If the fingerprint differs, stop. Do not disable signature verification.
 
-4. Add the canary repository:
+4. Add the repository:
 
    ```bash
    printf '%s\n' \
-     "deb [signed-by=$PREFIX/etc/apt/keyrings/hermes-agent.asc] https://hermes-assets.nousresearch.com/releases/termux/canary hermes-canary main" \
+     "deb [signed-by=$PREFIX/etc/apt/keyrings/hermes-agent.asc] https://hermes-assets.nousresearch.com/releases/termux/stable hermes-stable main" \
      > "$PREFIX/etc/apt/sources.list.d/hermes-agent.list"
    ```
 
@@ -95,7 +105,10 @@ pkg upgrade hermes-agent
 
 `hermes update` refuses to modify an APT-owned installation.
 It prints the package-manager command instead.
-Canary versions contain `~canary.<timestamp>` and sort before the corresponding stable version.
+Canary versions contain `~canary.<timestamp>` and sort before the corresponding
+stable version. Each suite only lists its own channel's packages; to move
+between channels, edit the channel path and suite in `hermes-agent.list`, then
+`pkg update && pkg upgrade hermes-agent`.
 
 ## Gateway
 

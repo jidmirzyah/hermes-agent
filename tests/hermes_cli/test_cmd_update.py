@@ -1,13 +1,57 @@
-"""Git trampoline recovery; branch updates use the real target-identity suite."""
+"""Tests for cmd_update — branch fallback when remote branch doesn't exist."""
 
+import hashlib
 import subprocess
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import ANY, patch
 
 import pytest
 
+from hermes_cli.main import cmd_update, PROJECT_ROOT
+from hermes_cli import main_web_build
+from hermes_cli import main_install_repair
 from hermes_cli import update_cmd
 
 
+def _make_run_side_effect(branch="main", verify_ok=True, commit_count="0"):
+    """Build a side_effect function for subprocess.run that simulates git commands."""
+
+    def side_effect(cmd, **kwargs):
+        joined = " ".join(str(c) for c in cmd)
+
+        # git rev-parse --abbrev-ref HEAD  (get current branch)
+        if "rev-parse" in joined and "--abbrev-ref" in joined:
+            return subprocess.CompletedProcess(cmd, 0, stdout=f"{branch}\n", stderr="")
+
+        # git rev-parse --verify origin/{branch}  (check remote branch exists)
+        if "rev-parse" in joined and "--verify" in joined:
+            rc = 0 if verify_ok else 128
+            return subprocess.CompletedProcess(cmd, rc, stdout="", stderr="")
+
+        # git rev-list HEAD..origin/{branch} --count
+        if "rev-list" in joined:
+            return subprocess.CompletedProcess(cmd, 0, stdout=f"{commit_count}\n", stderr="")
+
+        # Fallback: return a successful CompletedProcess with empty stdout
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    return side_effect
+
+
+@pytest.fixture
+def mock_args():
+    return SimpleNamespace()
+
+
+# ---------------------------------------------------------------------------
+# Managed-uv compatibility for tests that patch shutil.which
+# ---------------------------------------------------------------------------
+# The production code now uses ``ensure_uv()`` / ``update_managed_uv()``
+# instead of ``shutil.which("uv")``.  Many tests in this file patch
+# ``shutil.which`` to control whether uv is "available" — these autouse
+# fixtures make the managed_uv functions delegate to the patched
+# ``shutil.which`` so the existing test setup keeps working without
+# per-test changes.
 @pytest.fixture(autouse=True)
 def _isolate_venv_holders(monkeypatch):
     """The update flow's venv-holder guard sees the live gateway processes on
@@ -1583,16 +1627,15 @@ class TestGitTrampolineSelfHeal:
         # PortableGit tree lives under the SHARED root (monerostar review on
         # #88136). The candidate list must check get_default_hermes_root()
         # before the profile home.
-        import hermes_constants
-        from hermes_cli.update_cmd_git import _portable_git_candidates
+        from hermes_cli import update_cmd
 
         root = tmp_path / "root"
         profile_home = root / "profiles" / "foo"
 
-        monkeypatch.setattr(hermes_constants, "get_default_hermes_root", lambda: root)
-        monkeypatch.setattr(hermes_constants, "get_hermes_home", lambda: profile_home)
+        monkeypatch.setattr(update_cmd, "get_default_hermes_root", lambda: root)
+        monkeypatch.setattr(update_cmd, "get_hermes_home", lambda: profile_home)
 
-        candidates = _portable_git_candidates()
+        candidates = update_cmd._portable_git_candidates()
         assert candidates[0] == (
             root / "git" / "mingw64" / "libexec" / "git-core" / "git.exe"
         )

@@ -155,6 +155,17 @@ json.dump(sorted(leaf_paths(DEFAULT_CONFIG)), sys.stdout, indent=2)
           ''
         );
 
+        # pm/lock.json pins provenance sidecars (checksums.txt, .sig/.pem/.asc)
+        # next to these archives. `nix flake check` otherwise only evaluates
+        # the pm derivations, so a sidecar leaking into srcs ("do not know
+        # how to unpack") stayed green; build the two sidecar-bearing pins.
+        pm-packages-unpack = pkgs.runCommand "hermes-pm-packages-unpack" { } ''
+          test -x ${self'.packages.pm-tirith}/tirith
+          test -x ${self'.packages.pm-iron-proxy}/iron-proxy
+          mkdir -p $out
+          echo "ok" > $out/result
+        '';
+
         # Verify the default package builds successfully (cross-platform).
         # On Linux the runtime checks below already depend on the package,
         # but this ensures darwin builders also build it during flake check.
@@ -410,7 +421,7 @@ json.dump(sorted(leaf_paths(DEFAULT_CONFIG)), sys.stdout, indent=2)
                 # IS the default package, so a launcher that pinned the plain
                 # default would look correct while it shipped a second
                 # runtime to anyone who customises theirs.
-                extraDependencyGroups = [ "honcho" ];
+                extraDependencyGroups = [ "hindsight" ];
                 backend = {
                   mode = "serve";
                   port = 9231;

@@ -85,9 +85,8 @@ const manifest = substituteManifestMacros(template, (m) => {
   switch (m) {
     case "publisher": return options.publisher
     case "publisherDisplayName": return options.publisherDisplayName
-    // Same 4-part derivation the real build uses (msix-shared::appIdentity) —
-    // a canary shows its minutes-since-stable component here too, so this
-    // inspection tool never disagrees with what electron-builder shipped.
+    // Same quad the real build stamps (msix-shared::nativeQuad) — the build
+    // time, so this inspection tool never disagrees with what shipped.
     case "version": return appIdentity(desktop, process.env.HERMES_PAYLOAD_TAG).version
     case "applicationId": return resolvePackageApplicationId(options.applicationId, options.identityName, appInfoName, "MSIX")
     case "identityName": return resolvePackageIdentityName(options.identityName, appInfoName, "MSIX")

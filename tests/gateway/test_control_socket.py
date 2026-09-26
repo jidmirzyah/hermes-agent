@@ -18,10 +18,7 @@ from gateway.control_socket import (
     windows_pipe_name,
 )
 
-pytestmark = pytest.mark.skipif(
-    sys.platform == "win32",
-    reason="Unix-socket transport; the named-pipe half is covered on the wine2e lane",
-)
+pytestmark = pytest.mark.platforms("posix")  # Unix-socket transport; the named-pipe half is covered on the wine2e lane
 
 
 def _run(coro):

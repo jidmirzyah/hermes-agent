@@ -188,10 +188,14 @@ assert importlib.util.find_spec('idna') is None
             assert launch_report["version"] == list(sys.version_info[:2])
             assert Path(launch_report["idna"]).is_relative_to(hermes_home / "installs")
             assert launched.stderr.count("completing source-update dependencies") == 1
+            # The launch finished the update's shared tail, whose maintenance migrates
+            # config.yaml; `pm repair` below must then leave that migrated file alone.
+            assert "_config_version" in config.read_text()
     finally:
         server.shutdown()
         server.server_close()
         thread.join(timeout=10)
+    expected_config = config.read_text()
 
     report_code = """
 import json
@@ -270,7 +274,9 @@ print(json.dumps({'yaml': ruamel.yaml.__file__, 'idna': idna.__file__,
     assert repaired_fact["extras"] == initial_fact["extras"]
     assert repaired_fact["stamp"] == initial_fact["stamp"]
     assert Path(repaired_fact["resolved_lock"]).read_bytes() == lock_before
-    assert config.read_text() == "plugins:\n  enabled: [cold-proof]\n"
+    assert config.read_text() == expected_config
+    if not bootstrap_name:
+        assert expected_config == "plugins:\n  enabled: [cold-proof]\n"
     assert not (state / ".repair-incomplete").exists()
     assert not (repo / "venv").exists()
     assert not (repo / ".venv").exists()

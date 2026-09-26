@@ -85,7 +85,7 @@ export interface ChannelManifest {
 const SHA256 = /^[a-f0-9]{64}$/
 const COMMIT = /^[a-f0-9]{40}$/
 const BUILD_ID = /^[a-f0-9]{32}$/
-const VERSION = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$/
+const VERSION = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?(?:\+[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$/
 
 function parseChannelJson(body: string): unknown {
   const parsed: unknown = JSON.parse(body)
@@ -376,11 +376,15 @@ function request(fields: Fields): ChannelRequest {
     throw new Error('Noncanonical request publicBase')
   }
 
-  const releaseTag = fields.optional('releaseTag', /^v\d+\.\d+\.\d+(?:-canary\.\d+)?$/)
+  const releaseTag = fields.optional(
+    'releaseTag',
+    /^v\d+\.\d+\.\d+(?:\+canary\.20\d{6}T\d{6}Z)?$/
+  )
+  const canaryRelease: boolean = /\+canary\./.test(releaseTag || '')
 
   const windowsVersion = fields.text(
     'windowsVersion',
-    releaseTag?.includes('-canary.') ? /^\d+\.\d+\.\d+\.\d+$/ : /^\d+\.\d+\.\d+\.0$/
+    canaryRelease ? /^\d+\.\d+\.\d+\.\d+$/ : /^\d+\.\d+\.\d+\.0$/
   )
 
   if (windowsVersion.split('.').some((part: string): boolean => Number(part) > 65535)) {

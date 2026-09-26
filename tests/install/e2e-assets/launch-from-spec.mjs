@@ -30,10 +30,11 @@ import { execFileSync } from 'node:child_process';
 import { parseArgs } from 'node:util';
 import { _electron } from '@playwright/test';
 import { prepareWindowForInput } from './window-input.cjs';
-import { pickAppWindow, openAbout, waitForUpdate } from './update-ui.cjs';
+import { pickAppWindow, openAbout, readManualUpdateCommand, waitForUpdate } from './update-ui.cjs';
 import { observeSourceUpdate } from './source-update-observer.mjs';
 import { runUpdateWindowChat } from './update-window-chat.mjs';
-import { updateWindowEnvironment } from './smoke-env.mjs';
+import { isolateUpdateWindowEnvironment, isolatedElectronArgs, updateWindowEnvironment } from './smoke-env.mjs';
+import { sourceRuntimeSettleCommand } from './source-runtime-settle.mjs';
 
 /**
  * @typedef {{argv: string[], cwd: string, env: Record<string, string>,
@@ -83,6 +84,23 @@ function log(msg) {
   console.log(`[launch-from-spec] ${msg}`);
 }
 
+/**
+ * Settle source runtime/package replacement before Playwright owns Electron.
+ * A first non-metadata startup may replace the packaged app and relaunch it;
+ * doing that after `_electron.launch` attaches loses the inspection pipe.
+ *
+ * @param {string} root
+ * @param {Record<string, string>} env
+ */
+function settleSourceRuntime(root, env) {
+  const invocation = sourceRuntimeSettleCommand(root, env);
+  log('settling source runtime under the captured launch environment');
+  execFileSync(invocation.command, invocation.args, {
+    cwd: root, env, stdio: 'inherit', timeout: 20 * 60_000,
+    windowsVerbatimArguments: invocation.windowsVerbatimArguments,
+  });
+}
+
 // Coarse phase marker for the self-deadline's post-mortem line.
 let currentPhase = 'init';
 /** @param {string} p */
@@ -122,14 +140,17 @@ async function main() {
   /** @type {LaunchSpec} */
   const spec = JSON.parse(fs.readFileSync(values.spec, 'utf8'));
   const launch = resolveLaunch(spec);
-  log(`launching ${launch.executablePath} (shape: ${spec.matchedShape})`);
+  const capturedEnv = updateWindowEnvironment(launch.env, values['repo-dir'], 'source');
+  settleSourceRuntime(values['repo-dir'], capturedEnv);
+  const launchEnv = isolateUpdateWindowEnvironment(capturedEnv);
+  log(`launching ${launch.executablePath} (shape: ${spec.matchedShape}, isolated userData: ${launchEnv.HERMES_DESKTOP_USER_DATA_DIR})`);
 
   phase('launch');
   const app = await _electron.launch({
     executablePath: launch.executablePath,
-    args: launch.args,
+    args: isolatedElectronArgs(launch.args, launchEnv.HERMES_DESKTOP_USER_DATA_DIR),
     cwd: launch.cwd,
-    env: updateWindowEnvironment(launch.env, values['repo-dir'], 'source'),
+    env: launchEnv,
   });
   const window = await pickAppWindow(app, log);
   await window.screenshot({ path: `${values.spec}.window.png` }).catch(() => {});
@@ -142,6 +163,7 @@ async function main() {
     mockUrl: values['mock-url'], outDir: values['chat-out'],
     expectCommit: values['old-sha'],
     root: values['repo-dir'], origin: 'source', executable: launch.executablePath,
+    userData: launchEnv.HERMES_DESKTOP_USER_DATA_DIR,
   });
 
   if (values['no-update']) {
@@ -198,6 +220,18 @@ async function main() {
   await updateNow.click();
   phase('update-poll');
   log('clicked Update now; polling for result file');
+
+  const manualCommand = await readManualUpdateCommand(window);
+  if (manualCommand) {
+    fs.mkdirSync(values['chat-out'], { recursive: true });
+    fs.writeFileSync(
+      path.join(values['chat-out'], 'manual-update.json'),
+      `${JSON.stringify({ command: manualCommand, oldSha: values['old-sha'] }, null, 2)}\n`,
+    );
+    log(`OLD requires the manual update path: ${manualCommand}`);
+    await app.close();
+    process.exit(42);
+  }
 
   // The app may relaunch/exit during the update; completion signals are
   // product state, not Playwright events.

@@ -1,5 +1,6 @@
 """Standalone per-platform senders and error helpers for send_message."""
 
+from pm import install_hint
 import asyncio
 import contextlib
 import logging
@@ -327,7 +328,7 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
         return _success("telegram", chat_id, warnings, message_id=str(last_msg.message_id))
     except ImportError:
         return {"error": "python-telegram-bot not installed. Run: "
-                "python -c \"from pm import sync_venv; sync_venv(['telegram'], explicit=True)\""}
+                f"{install_hint('telegram')}"}
     except Exception as e:
         return _error(f"Telegram send failed: {e}")
 
@@ -390,7 +391,7 @@ async def _resolve_slack_user_target(token, chat_id):
         import aiohttp
     except ImportError:
         return None, {"error": "aiohttp not installed. Run: "
-                      "python -c \"from pm import sync_venv; sync_venv(['messaging'], explicit=True)\""}
+                      f"{install_hint('messaging')}"}
     try:
         from gateway.platforms.base import resolve_proxy_url, proxy_kwargs_for_aiohttp
         _sess_kw, _req_kw = proxy_kwargs_for_aiohttp(resolve_proxy_url())
@@ -563,7 +564,7 @@ async def _send_matrix_via_adapter(pconfig, chat_id, message, media_files=None, 
         from plugins.platforms.matrix.adapter import MatrixAdapter
     except ImportError:
         return {"error": "Matrix dependencies not installed. Run: "
-                "python -c \"from pm import sync_venv; sync_venv(['matrix'], explicit=True)\""}
+                f"{install_hint('matrix')}"}
     adapter = MatrixAdapter(pconfig)
     try:
         if not await adapter.connect():

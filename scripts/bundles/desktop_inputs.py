@@ -52,6 +52,10 @@ def identity_environment(request: BuildRequest, variant: str, inherited: Mapping
                HERMES_DESKTOP_VARIANT=variant,
                HERMES_PAYLOAD_VERSION=request.version,
                HERMES_BUNDLE_ENV_JSON=json.dumps(request.bundle_env, sort_keys=True))
+    if request.release_epoch is None:
+        env.pop("HERMES_RELEASE_EPOCH", None)
+    else:
+        env["HERMES_RELEASE_EPOCH"] = str(request.release_epoch)
     env.pop("BUILD_NUMBER", None)
     env.pop("GITHUB_HEAD_REF", None)
     env.pop("_HERMES_CHANNEL_REQUEST_JSON", None)

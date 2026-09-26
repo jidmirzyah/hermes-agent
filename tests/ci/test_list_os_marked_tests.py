@@ -97,6 +97,25 @@ def test_negated_spec_lists_for_that_lane(tmp_path):
     assert any(p.endswith("test_negated.py") for p in listed)
 
 
+@pytest.mark.parametrize("spec,lanes", [
+    ("posix", {"linux", "macos"}), ("any", {"linux", "macos", "windows"}),
+    ("not linux", {"linux", "macos", "windows"}),  # admits the others; named lane keeps its import
+    ("macos", {"macos"}),
+])
+def test_specs_resolve_to_every_lane_they_admit(tmp_path, spec, lanes):
+    """The selector resolves specs like the conftest gate: ``platforms("posix")``
+    files must reach the macOS lane, not just files spelling out ``"macos"``."""
+    _write(
+        tmp_path,
+        "test_gated.py",
+        f'import pytest\n\n\n@pytest.mark.platforms("{spec}")\ndef test_x():\n    pass\n',
+    )
+    for platform in ("linux", "macos", "windows"):
+        result = _run(platform, str(tmp_path))
+        listed = any(p.endswith("test_gated.py") for p in result.stdout.split())
+        assert listed is (platform in lanes), (platform, result.stdout, result.stderr)
+
+
 def test_unknown_platform_is_rejected(tmp_path):
     result = _run("amiga", str(tmp_path))
     assert result.returncode == 2

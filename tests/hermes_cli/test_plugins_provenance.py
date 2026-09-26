@@ -98,3 +98,29 @@ def test_update_url_tag_round_trips(tmp_path):
     _fake_git_dir(tmp_path / "plugins" / "plug")
     prov = plugins_provenance(tmp_path / "plugins")
     assert prov[0].saved_update_url == "https://example/feed.yml"
+
+def test_origin_url_uses_the_resolved_git_and_survives_no_git_at_all(tmp_path, monkeypatch):
+    """Provenance runs from the gateway service, where PATH can be minimal: the probe must use the
+    same resolved git as install/update, and with no git anywhere the .git/config parse still
+    yields the origin (never a bare ``git`` spawn that raises or picks up a stray binary)."""
+    import subprocess
+    from hermes_cli import plugins_cmd, plugins_provenance
+
+    plugin = tmp_path / "plugins" / "p"
+    plugin.mkdir(parents=True)
+    _fake_git_dir(plugin, "https://example/from-config")
+    spawned = []
+    real_run = subprocess.run
+
+    def record(argv, *a, **k):
+        spawned.append(argv[0])
+        return real_run(argv, *a, **k)
+
+    monkeypatch.setattr(subprocess, "run", record)
+    monkeypatch.setattr(plugins_cmd, "_resolve_git_executable", lambda: None)
+    assert plugins_provenance._git_origin_url(plugin) == "https://example/from-config"
+    assert spawned == []
+
+    monkeypatch.setattr(plugins_cmd, "_resolve_git_executable", lambda: "/nonexistent/resolved-git")
+    assert plugins_provenance._git_origin_url(plugin) == "https://example/from-config"
+    assert spawned == ["/nonexistent/resolved-git"]

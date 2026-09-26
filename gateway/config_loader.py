@@ -392,7 +392,7 @@ def read_yaml_layers(home: Path) -> dict:
         # comments), and nothing caches this loader — so the pure-Python parser dominates the load.
         from utils import fast_safe_load
 
-        with open(config_yaml_path, encoding="utf-8") as f:
+        with open(config_yaml_path, encoding="utf-8-sig") as f:
             yaml_cfg = fast_safe_load(f) or {}
 
     from hermes_cli.config import _expand_env_vars

@@ -299,7 +299,8 @@ def _install_sidecar() -> int:
         if npm is None:
             env = pm.ensure("npm", explicit=True).env
             installed = pm.installed_package("npm")
-            assert installed is not None and installed.binary is not None
+            if installed is None or installed.binary is None:
+                raise pm.InstallError("npm", "ensured but no selected binary was recorded")
             npm = str(installed.binary)
     except pm.InstallError as exc:
         print(f"Could not prepare Photon dependencies: {exc}", file=sys.stderr)

@@ -17,5 +17,11 @@ interface DarwinFeed {
  */
 declare function darwinFeed(channel: string, light?: boolean): DarwinFeed
 
-declare const contract: { darwinFeed: typeof darwinFeed }
+/** Validate and canonicalize the public updater feed base URL. */
+declare function feedBaseUrl(raw: string | undefined): string | undefined
+
+declare const contract: {
+  darwinFeed: typeof darwinFeed
+  feedBaseUrl: typeof feedBaseUrl
+}
 export = contract

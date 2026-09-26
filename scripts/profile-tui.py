@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S bash -c 'exec "$BASH" "$(dirname "$0")/_hermes-python" "$0" "$@"'
 """Drive the Hermes TUI under HERMES_DEV_PERF and summarize the pipeline.
 
 Usage:

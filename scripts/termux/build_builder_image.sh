@@ -24,7 +24,8 @@ identity = sys.argv[1].encode() + b"\0" + pathlib.Path(sys.argv[2]).read_bytes()
 print(hashlib.sha256(identity).hexdigest()[:12])
 ' "$BASE" "$DOCKERFILE")"
 REGISTRY="ghcr.io"
-OWNER="${GITHUB_REPOSITORY_OWNER,,}"
+# macOS still ships Bash 3.2, which predates ${value,,} case conversion.
+OWNER="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
 IMAGE="${REGISTRY}/${OWNER}/hermes-termux-builder:${SHORT}"
 
 if docker manifest inspect "$IMAGE" >/dev/null 2>&1; then

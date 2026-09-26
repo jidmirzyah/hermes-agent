@@ -365,9 +365,14 @@ class Store:
         """Serialize writers using the same advisory lock as runtime publication."""
         from hermes_cli.runtime_state import _lock
         self.root.mkdir(parents=True, exist_ok=True)
-        fd = os.open(self.root / ".install.lock", os.O_CREAT | os.O_RDWR, 0o600)
+        lock = self.root / ".install.lock"
+        fd = os.open(lock, os.O_CREAT | os.O_RDWR, 0o600)
         try:
-            _lock(fd, wait=True)
+            # A second `hermes pm install` behind an sdist build otherwise sits
+            # silent for minutes; say what it is waiting on.
+            if not _lock(fd, wait=True, timeout=2):
+                print(f"waiting for {lock} (another PM operation holds it)", file=sys.stderr, flush=True)
+                _lock(fd, wait=True)
             yield
         finally:
             os.close(fd)

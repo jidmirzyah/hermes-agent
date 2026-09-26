@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+from pm import install_hint
 import json
 import logging
 import os
@@ -2090,7 +2091,7 @@ def _get_azure_foundry_auth_status() -> Dict[str, Any]:
                     "is skipped here. Run `hermes doctor` to verify token acquisition."
                 ) if installed else (
                     "azure-identity not installed. From the Hermes environment, run: "
-                    "python -c \"from pm import sync_venv; sync_venv(['azure-identity'], explicit=True)\". "
+                    f"{install_hint('azure-identity')}. "
                     "Then restart Hermes."))
         except Exception as exc:
             info["logged_in"] = False

@@ -2,8 +2,18 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { afterEach, expect, it, vi } from 'vitest'
 
 import type { DesktopUninstallSummary } from '@/global'
+import { I18nProvider, TRANSLATIONS, useI18n } from '@/i18n'
+import type { I18nContextValue } from '@/i18n'
 
 import { UninstallSection } from './uninstall-section'
+
+let i18n: I18nContextValue
+
+function Surface(): React.JSX.Element {
+  i18n = useI18n()
+
+  return <UninstallSection />
+}
 
 function summary(allowed: boolean): DesktopUninstallSummary {
   return {
@@ -72,3 +82,28 @@ it('keeps owned-install removal modes and confirms the selected mode', async ():
     expect(run).toHaveBeenCalledWith('gui')
   })
 })
+
+it.each(['gui', 'lite', 'full'] as const)(
+  'localizes confirmation for %s without changing mode or running before confirmation',
+  async (mode: 'gui' | 'lite' | 'full'): Promise<void> => {
+    const run: ReturnType<typeof vi.fn> = vi.fn().mockResolvedValue({ ok: false })
+    vi.stubGlobal('hermesDesktop', {
+      uninstall: { summary: async (): Promise<DesktopUninstallSummary> => summary(true), run }
+    })
+    render(
+      <I18nProvider configClient={null} initialLocale="zh">
+        <Surface />
+      </I18nProvider>
+    )
+    const zh: (typeof TRANSLATIONS)['zh']['settings']['uninstallSection'] = TRANSLATIONS.zh.settings.uninstallSection
+    await screen.findByText(zh.uninstallHermes)
+    fireEvent.click(screen.getByRole('button', { name: new RegExp(zh.options[mode].title) }))
+    expect(screen.getByText(zh.confirmBody(zh.options[mode].consequence))).toBeTruthy()
+    expect(run).not.toHaveBeenCalled()
+    await act((): Promise<void> => i18n.setLocale('ja'))
+    const ja: (typeof TRANSLATIONS)['ja']['settings']['uninstallSection'] = TRANSLATIONS.ja.settings.uninstallSection
+    expect(screen.getByText(ja.confirmBody(ja.options[mode].consequence))).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: ja.yesUninstall }))
+    expect(run).toHaveBeenCalledWith(mode)
+  }
+)

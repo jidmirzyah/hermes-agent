@@ -241,6 +241,15 @@ jobs:
         shell: powershell
         run: powershell -NoProfile -ExecutionPolicy Bypass -File tests\install\windows-e2e.ps1 -Phase update -InstallMethod "${{ inputs.install-method }}" -Route "${{ inputs.update-method }}" -InstallRef "${{ inputs.install-ref }}" -SetupExeUrl ${{ inputs.setup-exe-url }}
 
+      # After everything, including the new runtime's launch and its smoke
+      # checks: the bootstrap marker can complete on a later run than the
+      # install, so stamp truthfulness is asserted here — not in the install
+      # phase. Known-failure legs legitimately never reach the new HEAD.
+      - name: Verify install stamps describe the updated checkout
+        if: steps.update.outputs.known_failure == ''
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tests\install\windows-e2e.ps1 -Phase verify-stamp -InstallMethod "${{ inputs.install-method }}" -Route "${{ inputs.update-method }}" -InstallRef "${{ inputs.install-ref }}" -SetupExeUrl ${{ inputs.setup-exe-url }}
+
       - name: Stage known-failure receipt
         if: steps.update.outputs.known_failure != ''
         shell: pwsh

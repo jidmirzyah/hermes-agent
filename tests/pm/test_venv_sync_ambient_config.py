@@ -31,7 +31,7 @@ def test_ambient_uv_config_does_not_affect_pm_venv_sync(tmp_path, monkeypatch):
     (config / "uv" / "uv.toml").write_text('required-version="<0.0.1"\n')
     for key, value in {
         "UV_NO_CONFIG": "1", "UV_CONFIG_FILE": "/poison/uv.toml",
-        "UV_DEFAULT_INDEX": "https://poison.invalid/simple", "UV_PYTHON": "/poison/python",
+        "UV_PYTHON": "/poison/python",
         "UV_PROJECT_ENVIRONMENT": str(tmp_path / "unrelated-environment"),
         "UV_CACHE_DIR": str(tmp_path / "hostile-cache"),
         "UV_PROJECT": "/poison/project", "VIRTUAL_ENV": "/poison/venv",

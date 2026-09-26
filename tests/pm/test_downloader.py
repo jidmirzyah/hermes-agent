@@ -186,6 +186,12 @@ def test_redirect_to_non_https_refused():
     # An https redirect resolves through the default handler.
     assert handler.redirect_request(req, None, 302, "Found", {},
                                     "https://example.com/b") is not None
+    # Loopback is a test-server affordance: an https origin may not land there.
+    with pytest.raises(DownloadError):
+        handler.redirect_request(req, None, 302, "Found", {}, "http://127.0.0.1:8000/b")
+    local = urllib.request.Request("http://127.0.0.1:8000/a")
+    assert handler.redirect_request(local, None, 302, "Found", {},
+                                    "http://localhost:8000/b") is not None
 
 
 # ── pause ─────────────────────────────────────────────────────

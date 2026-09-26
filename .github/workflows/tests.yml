@@ -49,7 +49,8 @@ jobs:
       - name: Set up locked Python and test dependencies
         uses: ./.github/actions/setup-pm
         with:
-          extras: '["all", "dev", "anthropic", "bedrock", "mistral", "fal", "modal", "daytona", "hindsight", "parallel-web"]'
+          extras: '["all", "anthropic", "bedrock", "mistral", "fal", "modal", "daytona", "hindsight", "parallel-web"]'
+          test-environment: 'true'
           prune-python-cache: true
 
       - name: Restore per-file duration cache
@@ -100,6 +101,10 @@ jobs:
           # size. The remaining time is the slowest files plus the setup.
           # Workers above the core count only add contention.
           HERMES_TEST_WORKERS: 96
+          # A healthy 44-test compression file takes ~197s alone and can exceed
+          # the 300s default under 96-worker load before its duration is cached.
+          # Match the runner's 3x known-slow headroom on the first PR run too.
+          HERMES_TEST_FILE_TIMEOUT: 600
           # Ensure tests don't accidentally call real APIs
           OPENROUTER_API_KEY: ""
           OPENAI_API_KEY: ""
@@ -138,7 +143,8 @@ jobs:
       - name: Set up locked Python and test dependencies
         uses: ./.github/actions/setup-pm
         with:
-          extras: '["all", "dev", "anthropic", "bedrock", "mistral", "fal", "modal", "daytona", "hindsight", "parallel-web"]'
+          extras: '["all", "anthropic", "bedrock", "mistral", "fal", "modal", "daytona", "hindsight", "parallel-web"]'
+          test-environment: 'true'
           prune-python-cache: true
 
       - name: Run e2e tests

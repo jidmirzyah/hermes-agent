@@ -745,6 +745,7 @@ class TestNativeEnvironmentContracts:
         identifies ``<repo>/venv`` as the Hermes runtime producer contract.
         """
         import tools.environments.local as local
+        from tools.environments import local_pythonpath
 
         repo_root = tmp_path / "hermes-agent"
         runtime_venv = repo_root / "venv"
@@ -1213,6 +1214,9 @@ class TestNativeEnvironmentContracts:
         assert env["PYTHONPATH"].split(os.pathsep) == ["/home/user/my-lib"]
 
 
+
+
+
 class TestPythonhomeSanitized:
     """PYTHONHOME must not leak from the Hermes runtime into subprocesses.
 
@@ -1482,6 +1486,7 @@ class TestSanePathIncludesHomebrew:
         local_mod._HERMES_BIN_DIR = saved
 
 
+
     def test_make_run_env_appends_homebrew_on_minimal_path(self, monkeypatch):
         """When PATH is minimal, _make_run_env appends missing sane entries.
 
@@ -1689,4 +1694,3 @@ class TestHermesInternalDynamicSecrets:
         assert "AUXILIARY_VISION_API_KEY" not in run_env
         assert "GATEWAY_RELAY_SECRET" not in run_env
         assert run_env.get("AUXILIARY_VISION_PROVIDER") == "openai"
-

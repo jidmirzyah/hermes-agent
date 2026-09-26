@@ -313,7 +313,7 @@ def fast_replace_retries(monkeypatch: pytest.MonkeyPatch) -> None:
 # ── cross-platform: the retry/fallback state machine ──────────────────────
 
 
-@pytest.mark.windows_only
+@pytest.mark.platforms("windows")
 @pytest.mark.parametrize("winerror", [5, 32, 33])
 def test_contended_rename_retries_then_rewrites_in_place(
     tmp_path: Path,
@@ -347,7 +347,7 @@ def test_contended_rename_retries_then_rewrites_in_place(
     assert not tmp.exists()
 
 
-@pytest.mark.windows_only
+@pytest.mark.platforms("windows")
 def test_contended_rename_retry_wins_keeps_write_atomic(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fast_replace_retries: None
 ) -> None:
@@ -379,7 +379,7 @@ def test_contended_rename_retry_wins_keeps_write_atomic(
     assert not tmp.exists()
 
 
-@pytest.mark.windows_only
+@pytest.mark.platforms("windows")
 def test_genuine_denial_propagates_after_budget(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fast_replace_retries: None
 ) -> None:
@@ -409,7 +409,7 @@ def test_genuine_denial_propagates_after_budget(
     assert tmp.exists(), "the pending write must survive for the caller"
 
 
-@pytest.mark.windows_only
+@pytest.mark.platforms("windows")
 def test_contended_retry_switching_to_exdev_uses_copy_fallback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fast_replace_retries: None
 ) -> None:
@@ -506,7 +506,7 @@ def test_in_place_rewrite_never_exposes_a_truncated_file(
     assert observed == [5000]
 
 
-@pytest.mark.windows_only
+@pytest.mark.platforms("windows")
 @pytest.mark.require_symlinks
 def test_symlinked_target_survives_a_contended_rename(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fast_replace_retries: None

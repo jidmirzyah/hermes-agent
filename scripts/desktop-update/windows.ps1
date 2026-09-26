@@ -1629,8 +1629,19 @@ try {
     # all-profile fleet only after the updated runtime verifies. A remote-served
     # Desktop must stay passive: its -NoGateway hand-off owns no local poller.
     if ($res.Code -eq 0 -and -not $desktopBuildFailed -and -not $NoGateway) {
-        $gatewayRestart = Invoke-HermesStep $pythonExe @("-m", "hermes_cli.main", "gateway", "start", "--all") "gateway restart"
-        if ($gatewayRestart.Code -ne 0) {
+        $gatewayRestartFailed = $false
+        try {
+            # Resolve again after update: PM may have published a new generation,
+            # and its command can include an isolation/bootstrap prefix.
+            $gatewayCommand = @(Get-HermesRuntimeCommand -InstallRoot $InstallRoot)
+            $gatewayArgs = @($gatewayCommand | Select-Object -Skip 1) + @("gateway", "start", "--all")
+            $gatewayRestart = Invoke-HermesStep $gatewayCommand[0] $gatewayArgs "gateway restart"
+            $gatewayRestartFailed = $gatewayRestart.Code -ne 0
+        } catch {
+            $gatewayRestartFailed = $true
+            Write-HandoffLog "gateway restart setup failed: $($_.Exception.Message)"
+        }
+        if ($gatewayRestartFailed) {
             # The update itself succeeded; a restart miss is a manual follow-up
             # (Write-Result's manual flag -> Desktop boot dialog), never a failed
             # update: a non-zero exit here would run the error finale and hide

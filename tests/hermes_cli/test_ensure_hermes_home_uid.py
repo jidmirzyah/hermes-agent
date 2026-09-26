@@ -86,7 +86,7 @@ class TestChownToHermesUid:
 
 
 class TestSecureDirChown:
-    @pytest.mark.skipif(sys.platform == "win32", reason="chown is no-op on Windows")
+    @pytest.mark.platforms("posix")  # chown is no-op on Windows
     def test_secure_dir_invokes_chown_when_env_set(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HERMES_UID", "1000")
         monkeypatch.setenv("HERMES_GID", "911")
@@ -99,7 +99,7 @@ class TestSecureDirChown:
             cfg._secure_dir(d)
         mock_chown.assert_called_once_with(d, 1000, 911)
 
-    @pytest.mark.skipif(sys.platform == "win32", reason="chown is no-op on Windows")
+    @pytest.mark.platforms("posix")  # chown is no-op on Windows
     def test_secure_dir_no_chown_when_env_unset(self, tmp_path, monkeypatch):
         monkeypatch.delenv("HERMES_UID", raising=False)
         monkeypatch.delenv("HERMES_GID", raising=False)

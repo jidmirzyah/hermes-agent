@@ -1,6 +1,5 @@
 """Tests for agent/skill_utils.py."""
 
-from unittest.mock import patch
 
 import pytest
 

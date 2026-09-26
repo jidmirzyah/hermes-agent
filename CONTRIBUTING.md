@@ -69,7 +69,7 @@ If your skill is specialized, community-contributed, or niche, it's better suite
 
 ## Memory Providers: Ship as a Standalone Plugin
 
-**We are no longer accepting new memory providers into this repo.** The set of built-in providers under `plugins/memory/` (honcho, mem0, supermemory, byterover, holographic, openviking, retaindb) is closed. If you want to add a new memory backend, publish it as a **standalone plugin repo** that users install into `~/.hermes/plugins/` (or via a pip entry point).
+**We are no longer accepting new memory providers into this repo.** The set of built-in providers under `plugins/memory/` (honcho, mem0, supermemory, byterover, hindsight, holographic, openviking, retaindb) is closed. If you want to add a new memory backend, publish it as a **standalone plugin repo** that users install into `~/.hermes/plugins/` (or via a pip entry point).
 
 Standalone memory plugins:
 
@@ -125,20 +125,22 @@ Bash:
 
 ```bash
 source ./activate
-python hermes --version
+hermes --version
 ```
 
 PowerShell:
 
 ```powershell
 . .\activate.ps1
-python hermes --version
+hermes --version
 ```
 
-Run `python hermes` for this checkout, not a global `hermes` alias. PM activation
+Run `hermes` for this checkout. Activation defines it as a function for this
+worktree, so it hides a global `hermes` command or MSIX alias and refuses
+outside the worktree. PM activation
 syncs tools and Python dependencies before adding them to the shell. It does not
 install JS workspaces or rewrite launchers and shell configuration. `deactivate`
-restores the prior shell environment.
+restores the prior shell environment and removes the function.
 
 ### Manual development and test environment
 
@@ -151,7 +153,7 @@ architecture before building source dependencies.
 Build an independent interpreter for tests and editor tools:
 
 ```bash
-python -m pm.build_env --source . --out .venv --extra dev --group test
+python -m pm.build_env --source . --out .venv --group dev --group test
 ```
 
 PM builds from the committed lock and checks dependency consistency before
@@ -176,7 +178,7 @@ This test environment does not replace PM's application selection or tool
 store. Do not point a bundled app at it or install into an MSIX payload.
 
 For an isolated development instance, select a disposable `HERMES_HOME` before
-starting the source command. Use `python hermes setup` to configure it rather
+starting the source command. Use `hermes setup` to configure it rather
 than copying production credentials into the checkout.
 
 ### JavaScript workspaces and website

@@ -5,13 +5,14 @@ import json
 import os
 import subprocess
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
 from scripts.releases.stable import (
-    check_tag, plan_transitions, read_manifest, require_stable_identity,
-    require_success, validate_candidates,
+    check_claim, ensure_final_tag, plan_transitions, read_manifest, require_stable_identity,
+    require_success, retarget_release, validate_candidates,
 )
 
 BASE = "https://releases.example"
@@ -20,17 +21,23 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def candidates(tag, commit, digest):
     packages = []
+    second = 100 + int(tag.rsplit('.', 1)[1])
+    release_epoch = int((datetime(2026, 8, 29, 1, 0, tzinfo=timezone.utc)
+                         + timedelta(seconds=second)).timestamp())
+    native_version = f"2026.5761.{second}.0"
     for platform in ("windows", "macos"):
         for arch in ("x64", "arm64"):
             packages.append({
                 "platform": platform, "arch": arch, "tag": tag, "commit": commit,
                 "identity": "test.application",
-                "version": f"{tag[1:]}.0" if platform == "windows" else tag[1:],
+                "version": native_version if platform == "windows" else tag[1:],
+                **({"executableVersion": native_version} if platform == "windows" else {}),
                 **({"publisher": "CN=Test", "applicationId": "App"} if platform == "windows" else {"teamId": "ABCDEFGHIJ"}),
                 "artifact": {"sha256": digest,
                              "url": f"{BASE}/releases/tag/{tag}/{arch}" + (".msixbundle" if platform == "windows" else ".zip")},
             })
-    return {"schema": 2, "tag": tag, "commit": commit, "packages": packages,
+    return {"schema": 2, "tag": tag, "commit": commit, "releaseEpoch": release_epoch,
+            "packages": packages,
             "smoke_results": {name: {"result": "success"} for name in (
                 "smoke-darwin", "smoke-win32", "smoke-win32-universal")}}
 
@@ -67,13 +74,14 @@ def test_transitions_bind_all_arches_identity_version_and_archive():
     old = candidates("v1.2.3", "a" * 40, "1" * 64)
     old["schema"] = 1
     del old["smoke_results"]
-    with pytest.raises(ValueError, match="Legacy candidate"):
+    with pytest.raises(ValueError, match="does not match release identity"):
         validate_candidates(old, old["tag"], old["commit"], BASE)
+    old = candidates("v1.2.3", "a" * 40, "1" * 64)
     new = candidates("v1.2.4", "b" * 40, "2" * 64)
-    require_stable_identity(new["tag"], new["commit"], "refs/tags/v1.2.4")
-    for tag, ref in [("v1.2.4", "refs/heads/main"), ("v1.2.4-canary.20260907143420", "refs/tags/v1.2.4-canary.20260907143420")]:
+    require_stable_identity(new["tag"], new["commit"])
+    for tag in ("v1.2.4+canary.20260907T143420Z", "v1.2.4-rc"):
         with pytest.raises(ValueError):
-            require_stable_identity(tag, new["commit"], ref)
+            require_stable_identity(tag, new["commit"])
     transitions = plan_transitions(old, new, BASE)
     assert {row["target"] for row in transitions} == {"windows-x64", "windows-arm64", "macos-x64", "macos-arm64"}
     assert all(row["transition"]["new"]["commit"] == new["commit"] for row in transitions)
@@ -186,18 +194,39 @@ def test_manifest_origin_checks_with_real_https(https_origin):
     assert server.requests == []
 
 
-def test_tag_movement_fails_closed(tmp_path, monkeypatch):
+def test_claim_object_movement_and_lightweight_tags_fail_closed(tmp_path, monkeypatch):
     commit = "a" * 40
-    env = {"RELEASE_TAG": "v1.2.3", "GITHUB_SHA": commit, "GITHUB_REF": "refs/tags/v1.2.3"}
+    claim_object = "b" * 40
+    ref = "refs/tags/v1.2.3-rc"
+    env = {"RELEASE_CLAIM_TAG": "v1.2.3-rc", "RELEASE_CLAIM_OBJECT": claim_object,
+           "GITHUB_SHA": commit, "GITHUB_REF": ref}
 
     def git(argv):
         if argv[1] == "ls-remote":
-            return f"{'b' * 40}\trefs/tags/v1.2.3\n{commit}\trefs/tags/v1.2.3^{{}}"
-        return commit if argv[1] == "rev-parse" else ""
+            return f"{claim_object}\t{ref}\n{commit}\t{ref}^{{}}"
+        if argv[1:3] == ["cat-file", "-t"]:
+            return "tag"
+        if argv[1:3] == ["cat-file", "-p"]:
+            return "tagger Fixture <fixture@example.test> 1790000000 +0000\n"
+        if argv[1] == "rev-parse":
+            return claim_object if argv[-1] == ref else commit
+        if argv[1] == "tag":
+            return json.dumps({
+                "schema": 1, "version": "1.2.3", "commit": commit,
+                "autopublish": False, "claimEpoch": 1_790_000_000,
+            })
+        return ""
 
-    assert check_tag(env, git) == ("v1.2.3", commit)
+    assert check_claim(env, git) == {
+        "claim_tag": "v1.2.3-rc", "claim_object": claim_object,
+        "tag": "v1.2.3", "version": "1.2.3", "commit": commit,
+        "autopublish": False, "claim_epoch": 1_790_000_000,
+    }
     with pytest.raises(ValueError, match="moved"):
-        check_tag(env, lambda argv: f"{'c' * 40}\trefs/tags/v1.2.3" if argv[1] == "ls-remote" else git(argv))
+        check_claim(env, lambda argv: f"{'c' * 40}\t{ref}\n{commit}\t{ref}^{{}}"
+                    if argv[1] == "ls-remote" else git(argv))
+    with pytest.raises(ValueError, match="annotated"):
+        check_claim(env, lambda argv: "commit" if argv[1] == "cat-file" else git(argv))
 
     repo = tmp_path / "repo"
     remote = tmp_path / "remote.git"
@@ -212,10 +241,57 @@ def test_tag_movement_fails_closed(tmp_path, monkeypatch):
     subprocess.run(["git", "commit", "-m", "first"], check=True, capture_output=True)
     actual = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True, encoding="utf-8").strip()
     subprocess.run(["git", "remote", "add", "origin", str(remote)], check=True)
-    subprocess.run(["git", "tag", "v1.2.3"], check=True)
-    subprocess.run(["git", "push", "origin", "main", "v1.2.3"], check=True, capture_output=True)
-    env["GITHUB_SHA"] = actual
-    assert check_tag(env) == ("v1.2.3", actual)
-    subprocess.run(["git", "--git-dir", str(remote), "update-ref", "-d", "refs/tags/v1.2.3"], check=True)
+    metadata = json.dumps({
+        "schema": 1, "version": "1.2.3", "commit": actual,
+        "autopublish": False, "claimEpoch": 1_790_000_000,
+    }, sort_keys=True, separators=(",", ":"))
+    subprocess.run(
+        ["git", "tag", "-a", "v1.2.3-rc", "-m", metadata], check=True,
+        env={**os.environ, "GIT_COMMITTER_DATE": "@1790000000 +0000"},
+    )
+    subprocess.run(["git", "push", "origin", "main", "v1.2.3-rc"], check=True, capture_output=True)
+    env.update({"GITHUB_SHA": actual, "RELEASE_CLAIM_OBJECT": subprocess.check_output(
+        ["git", "rev-parse", ref], text=True, encoding="utf-8").strip()})
+    claim = check_claim(env)
+    assert claim["commit"] == actual
+    final_object = ensure_final_tag(
+        "v1.2.3", actual, claim,
+        candidate_manifest_sha256="c" * 64,
+        docker_manifest_digest="sha256:" + "d" * 64,
+        release_id=123,
+    )
+    remote_final = subprocess.check_output(
+        ["git", "ls-remote", "origin", "refs/tags/v1.2.3", "refs/tags/v1.2.3^{}"],
+        text=True, encoding="utf-8",
+    )
+    assert f"{final_object}\trefs/tags/v1.2.3" in remote_final
+    assert f"{actual}\trefs/tags/v1.2.3^{{}}" in remote_final
+    subprocess.run(["git", "--git-dir", str(remote), "update-ref", "-d", ref], check=True)
     with pytest.raises(ValueError, match="moved"):
-        check_tag(env)
+        check_claim(env)
+
+
+@pytest.mark.parametrize("publish", [False, True])
+def test_retarget_release_preserves_the_database_id_and_explicit_draft_policy(publish):
+    commit = "a" * 40
+    calls = []
+    patched = False
+
+    def gh(argv):
+        nonlocal patched
+        calls.append(argv)
+        if argv[1:3] == ["api", "--method"]:
+            patched = True
+            return "{}"
+        if argv[1:3] == ["api", "repos/example/project/releases/42"]:
+            return json.dumps({
+                "id": 42, "tag_name": "v1.2.3" if patched else "v1.2.3-rc",
+                "target_commitish": commit, "prerelease": False,
+                "draft": not publish if patched else True,
+            })
+        return "{}"
+
+    retarget_release("example/project", 42, "v1.2.3", commit, publish=publish, run=gh)
+
+    assert ["--field", f"draft={str(not publish).lower()}"] == calls[1][-2:]
+    assert calls[2] == ["gh", "api", "repos/example/project/releases/42"]

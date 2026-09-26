@@ -1522,14 +1522,9 @@ def _print_gateway_process_mismatch(snapshot: GatewayRuntimeSnapshot) -> None:
 
 def _print_multiplex_standalone_reason() -> None:
     """The boot guard kept an unset-default gateway standalone: say so in status, with the remedy."""
-    try:
-        from gateway.status import read_runtime_status
-        reason = (read_runtime_status() or {}).get("multiplex_standalone_reason")
-    except Exception:
-        return
-    if reason:
-        print(f"⚠ Serving the default profile only: {reason}")
-        print("  Fold every profile onto this gateway: hermes gateway migrate --multiplex")
+    from hermes_cli.gateway_multiplex_mode import recorded_standalone_warning_lines
+    for line in recorded_standalone_warning_lines():
+        print(line)
 
 
 def _print_served_ingress_urls(profile: str | None = None) -> None:
@@ -3285,6 +3280,20 @@ def _refuse_temp_home_service_write(definition: str, kind: str) -> bool:
     return True
 
 
+def _retire_hermes_replace_dropin(system: bool = False) -> bool:
+    """Remove only the legacy ``--replace`` drop-in written by Hermes."""
+    unit_path = get_systemd_unit_path(system=system)
+    dropin = unit_path.parent / f"{unit_path.name}.d" / "20-replace.conf"
+    try:
+        text = dropin.read_text(encoding="utf-8-sig")
+    except OSError:
+        return False
+    if not all(token in text for token in ("Added to end the gateway respawn storm", "--replace", "ExecStart=")):
+        return False
+    dropin.unlink()
+    return True
+
+
 def refresh_systemd_unit_if_needed(system: bool = False) -> bool:
     """Rewrite the installed systemd unit when the generated definition has changed."""
     unit_path = get_systemd_unit_path(system=system)
@@ -3292,7 +3301,13 @@ def refresh_systemd_unit_if_needed(system: bool = False) -> bool:
         return False
 
     # systemd_unit_is_current is the HERMES_HOME-sync chokepoint; its env mutation persists for the regenerate below.
-    if systemd_unit_is_current(system=system):
+    current = systemd_unit_is_current(system=system)
+    if _retire_hermes_replace_dropin(system=system):
+        _run_systemctl(["daemon-reload"], system=system, check=True, timeout=30)
+        print(f"↻ Removed the stale Hermes --replace drop-in from the gateway {_service_scope_label(system)} service")
+        if current:
+            return True
+    elif current:
         return False
 
     expected_user = _read_systemd_user_from_unit(unit_path) if system else None

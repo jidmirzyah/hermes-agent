@@ -9,11 +9,27 @@ import base64
 import hashlib
 import io
 import json
+import threading
 from pathlib import Path
 
 from pm.environments import dependency_home_root, install_state_dir, runtime_facts_path
 from hermes_cli.runtime_state import _atomic_bytes, _bytes, _digest
 from pm.workspace import enabled_plugin_dirs, _is_member_candidate
+
+
+_METADATA_LOCK_HOLDER = threading.local()
+
+
+def _metadata_records(data: bytes | None) -> dict:
+    if data is None:
+        return {}
+    try:
+        records = json.loads(data)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("Plugin install metadata changed while preparing the update; retry.") from exc
+    if not isinstance(records, dict):
+        raise ValueError("Plugin install metadata changed while preparing the update; retry.")
+    return records
 
 
 def candidate_members(extra_dirs=(), **selection):
@@ -103,14 +119,17 @@ class StagedPlugin:
             raise ValueError("The updated plugin changed its installed name; reinstall it explicitly.")
         self.staged_digest = tree_digest(self.staged)
         self.metadata = self.target.parent / ".install-metadata.json"
-        self.previous = _bytes(self.metadata)
-        current = json.loads(self.previous) if self.previous is not None else {}
-        if current != plugin["old_metadata"]:
+        previous = _bytes(self.metadata)
+        current = _metadata_records(previous)
+        self.old_record = plugin["old_metadata"].get(self.target.name)
+        if current.get(self.target.name) != self.old_record:
             raise ValueError("Plugin install metadata changed while preparing the update; retry.")
+        self.new_record = plugin["new_metadata"].get(self.target.name)
+        if self.new_record is None:
+            raise ValueError("Plugin publication omitted its install metadata record.")
         self.target_digest = tree_digest(self.target) if self.target.exists() else None
         if self.target_digest != plugin["target_digest"]:
             raise ValueError("Plugin files changed while preparing the update; retry.")
-        self.proposed = (json.dumps(plugin["new_metadata"], indent=2, sort_keys=True) + "\n").encode()
         sources = member_sources(enabled_plugin_dirs(installing=self.target))
         self.active = self.target.resolve() in sources
         self.members = {}
@@ -123,26 +142,34 @@ class StagedPlugin:
     def publish(self, project: Path) -> None:
         import os
         import uuid
+        from hermes_cli.auth import _file_lock
         from pm.store import tree_digest
 
         if selection_snapshot() != self.configs:
             raise ValueError("Plugin enablement changed while preparing the update; retry.")
         if tree_digest(self.staged) != self.staged_digest:
             raise ValueError("Staged plugin files changed while preparing the update; retry.")
-        if _bytes(self.metadata) != self.previous:
-            raise ValueError("Plugin install metadata changed while preparing the update; retry.")
-        current = tree_digest(self.target) if self.target.exists() else None
-        if current != self.target_digest:
-            raise ValueError("Plugin files changed while preparing the update; retry.")
-        backup = self.target.parent / f".previous-{uuid.uuid4().hex}"
-        row = {
-            "kind": "plugin", "target": str(self.target), "backup": str(backup), "metadata": str(self.metadata),
-            "target_existed": self.target.exists(), "facts_before": _digest(runtime_facts_path(project)),
-            "metadata_before": base64.b64encode(self.previous).decode() if self.previous is not None else None,
-            "metadata_after": base64.b64encode(self.proposed).decode(),
-        }
-        _atomic_bytes(install_state_dir(project) / "publication.json", json.dumps(row).encode())
-        if self.target.exists():
-            os.replace(self.target, backup)
-        os.replace(self.staged, self.target)
-        _atomic_bytes(self.metadata, self.proposed)
+        lock = self.metadata.with_name(f"{self.metadata.name}.lock")
+        with _file_lock(lock, _METADATA_LOCK_HOLDER, 10.0,
+                        "Timed out waiting for the plugin install metadata lock"):
+            previous = _bytes(self.metadata)
+            metadata = _metadata_records(previous)
+            if metadata.get(self.target.name) != self.old_record:
+                raise ValueError("Plugin install metadata changed while preparing the update; retry.")
+            metadata[self.target.name] = self.new_record
+            proposed = (json.dumps(metadata, indent=2, sort_keys=True) + "\n").encode()
+            current = tree_digest(self.target) if self.target.exists() else None
+            if current != self.target_digest:
+                raise ValueError("Plugin files changed while preparing the update; retry.")
+            backup = self.target.parent / f".previous-{uuid.uuid4().hex}"
+            row = {
+                "kind": "plugin", "target": str(self.target), "backup": str(backup), "metadata": str(self.metadata),
+                "target_existed": self.target.exists(), "facts_before": _digest(runtime_facts_path(project)),
+                "metadata_before": base64.b64encode(previous).decode() if previous is not None else None,
+                "metadata_after": base64.b64encode(proposed).decode(),
+            }
+            _atomic_bytes(install_state_dir(project) / "publication.json", json.dumps(row).encode())
+            if self.target.exists():
+                os.replace(self.target, backup)
+            os.replace(self.staged, self.target)
+            _atomic_bytes(self.metadata, proposed)

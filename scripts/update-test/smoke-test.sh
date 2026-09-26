@@ -17,7 +17,6 @@ export HOME="$ROOT/home"; mkdir -p "$HOME"
 export GIT_CONFIG_GLOBAL="$ROOT/gitconfig-test"; : > "$GIT_CONFIG_GLOBAL"
 export HERMES_HOME="$ROOT/home/.hermes"
 export HERMES_DESKTOP_USER_DATA_DIR="$ROOT/electron-user-data"
-if tar --help 2>&1 | grep -q -- '--force-local'; then export TAR_OPTIONS=--force-local; fi
 
 H="$HERMES_HOME"; INSTALL="$H/hermes-agent"
 
@@ -37,6 +36,10 @@ printf 'console.log(1)\n'            > "$H/photon/sidecar/index.mjs"
 printf '{"name":"sidecar"}\n'        > "$H/photon/sidecar/package.json"
 printf '{"lockfileVersion":3}\n'     > "$H/photon/sidecar/package-lock.json"
 printf '{"lockfileVersion":3}\n'     > "$H/photon/sidecar/node_modules/.package-lock.json"
+mkdir -p "$H/cache/scratch"
+printf 'throwaway\n'                 > "$H/cache/scratch/keep.txt"
+# Old directory times, so a clone that stamps directories with "now" is caught.
+touch -t 202001010000 "$H/memories" "$H/skills/foo" "$H/skills"
 
 python - "$H/state.db" <<'PY'
 import sqlite3, sys
@@ -57,7 +60,13 @@ git -C "$INSTALL" -c commit.gpgsign=false commit -qm initial
 git -C "$INSTALL" remote add origin https://github.com/NousResearch/hermes-agent.git
 HEAD_SHA="$(git -C "$INSTALL" rev-parse HEAD)"
 mkdir -p "$INSTALL/.hermes/bin" "$INSTALL/.hermes-runtime/python"
-printf '#!/bin/sh\necho hermes 0.0.0\n' > "$INSTALL/.hermes/bin/hermes"; chmod +x "$INSTALL/.hermes/bin/hermes"
+# A fake launcher that understands `backup -o <zip>`: pre calls it for the data backup.
+cat > "$INSTALL/.hermes/bin/hermes" <<'SH'
+#!/bin/sh
+if [ "$1" = backup ] && [ "$2" = -o ]; then printf 'fake-zip\n' > "$3"; exit 0; fi
+echo hermes 0.0.0
+SH
+chmod +x "$INSTALL/.hermes/bin/hermes"
 printf 'big' > "$INSTALL/.hermes-runtime/python/interpreter.bin"
 mkdir -p "$HOME/.local/bin"
 ln -sfn "$INSTALL/.hermes/bin/hermes" "$HOME/.local/bin/hermes"
@@ -88,15 +97,20 @@ cp -a "$HERMES_DESKTOP_USER_DATA_DIR/." "$ROOT/pristine/userdata/"
 "${RUN[@]}" pre --source "$INSTALL" --ref main --backup-root "$BACKUPS" > "$ROOT/pre.log" 2>&1
 check $? "pre exits 0"
 SNAP="$(ls -1d "$BACKUPS"/*/ | head -1)"; SNAP="${SNAP%/}"
-for f in hermes-home.tar electron-userdata.tar manifest.json hermes-home.txt target-sha; do
+for f in hermes-backup.zip home manifest.json hermes-home.txt target-sha; do
   [ -e "$SNAP/$f" ]; check $? "backup artifact $f"
 done
-TARLIST="$(tar -tf "$SNAP/hermes-home.tar" 2>&1 || true)"
-grep -qE '^\./hermes-agent/\.git/config$' <<< "$TARLIST"; check $? "whole home: checkout .git in the tar"
-grep -qE '^\./hermes-agent/\.hermes-runtime/python/interpreter\.bin$' <<< "$TARLIST"; check $? "whole home: PM store in the tar"
-grep -qE '^\./config\.yaml$' <<< "$TARLIST"; check $? "whole home: config.yaml in the tar"
-UDLIST="$(tar -tf "$SNAP/electron-userdata.tar" 2>&1 || true)"
-grep -qE '^\./Cache/data\.bin$' <<< "$UDLIST"; check $? "whole userData: nothing filtered out of the tar"
+[ -f "$SNAP/home/hermes-agent/.git/config" ]; check $? "whole home: checkout .git in the clone"
+[ -f "$SNAP/home/hermes-agent/.hermes-runtime/python/interpreter.bin" ]; check $? "whole home: PM store in the clone"
+[ -f "$SNAP/home/config.yaml" ]; check $? "whole home: config.yaml in the clone"
+[ ! -e "$SNAP/home/cache" ]; check $? "cache/ left out of the clone"
+[ -f "$SNAP/userdata/Cache/data.bin" ]; check $? "whole userData: nothing filtered out of the clone"
+grep -q 'clone_mode' "$SNAP/manifest.json"; check $? "manifest records the clone mode"
+echo "    clone mode: $(sed -n 's/.*"clone_mode": "\(.*\)",/\1/p' "$SNAP/manifest.json")"
+same_mtime() { ! [ "$1" -nt "$2" ] && ! [ "$2" -nt "$1" ]; }
+same_mtime "$SNAP/home/memories" "$H/memories" && same_mtime "$SNAP/home/skills/foo" "$H/skills/foo"
+check $? "clone keeps directory mtimes"
+! grep -q 'fast clone .* failed' "$ROOT/pre.log"; check $? "no clone fell back to the slow path"
 
 echo
 echo "--- pre points the install at the rehearsal copy ---"
@@ -115,6 +129,17 @@ grep -q 'nothing has been updated yet' "$ROOT/pre.log"; check $? "pre says it di
 echo
 echo "--- status (read-only) ---"
 check_out "$HEAD_SHA" "status reports what it prepared" "${RUN[@]}" status --backup-root "$BACKUPS"
+check_out "clone *present" "status reports the clone present" "${RUN[@]}" status --backup-root "$BACKUPS"
+
+echo
+echo "--- simulate an update: modify, add and delete in both trees ---"
+printf 'timezone: changed-by-update\n' > "$H/config.yaml"
+rm "$H/memories/note.md"
+printf 'print(2)\n' > "$INSTALL/added_by_update.py"
+mkdir -p "$H/photon/sidecar/node_modules/newdep"; printf 'x' > "$H/photon/sidecar/node_modules/newdep/index.js"
+printf '{"window":{"changed":true}}\n' > "$HERMES_DESKTOP_USER_DATA_DIR/Preferences"
+printf '{}\n' > "$HERMES_DESKTOP_USER_DATA_DIR/new-after-update.json"
+! diff -r --no-dereference "$ROOT/pristine/home" "$H" >/dev/null 2>&1; check $? "the simulated update changed HERMES_HOME"
 
 echo
 echo "--- post ---"
@@ -133,6 +158,10 @@ check $? "post exits 0"
 [ "$(git -C "$INSTALL" config --local --get-regexp 'insteadOf' 2>/dev/null | wc -l | tr -d ' ')" = 0 ]; check $? "no stale insteadOf left in the checkout"
 [ ! -f "$H/.skip_upstream_prompt" ]; check $? "upstream-prompt marker removed"
 git -C "$INSTALL" remote get-url origin | grep -q 'NousResearch'; check $? "origin resolves officially again"
+[ -f "$H/cache/scratch/keep.txt" ]; check $? "cache/ left in place"
+[ -f "$SNAP/hermes-backup.zip" ]; check $? "post keeps hermes-backup.zip"
+[ ! -e "$SNAP/home" ] && [ ! -e "$SNAP/userdata" ]; check $? "post consumed the clones"
+[ ! -e "$SNAP/replaced" ]; check $? "post deleted the post-update trees"
 if [ "$SYMLINKS_OK" = 1 ]; then
   [ -L "$HOME/.local/bin/hermes" ]; check $? "shim outside the two trees left untouched"
 else

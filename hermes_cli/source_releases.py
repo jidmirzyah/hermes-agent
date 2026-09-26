@@ -10,7 +10,7 @@ import subprocess
 import urllib.error
 import urllib.request
 
-from hermes_cli.update_channel import is_canary_tag
+from hermes_cli.update_channel import STABLE_TAG_RE, is_canary_tag
 
 logger = logging.getLogger(__name__)
 _PUBLIC_BASE = "https://hermes-assets.nousresearch.com"
@@ -19,7 +19,6 @@ _GITHUB_ORIGIN = re.compile(
     r"^(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)"
     r"([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?/?$", re.IGNORECASE,
 )
-_STABLE_TAG = re.compile(r"v(?:0|[1-9]\d{0,2})\.\d+\.\d+")
 _SHA = re.compile(r"[0-9a-f]{40}")
 
 
@@ -175,7 +174,7 @@ class _BuildMetadata(HTMLParser):
 def _valid_tag(tag, channel: str) -> bool:
     if not isinstance(tag, str):
         return False
-    return bool(_STABLE_TAG.fullmatch(tag)) if channel == "stable" else (
+    return bool(STABLE_TAG_RE.fullmatch(tag)) if channel == "stable" else (
         tag == tag.strip() and is_canary_tag(tag)
     )
 

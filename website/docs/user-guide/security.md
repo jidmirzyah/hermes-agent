@@ -930,6 +930,16 @@ operating-system trust procedure. Hermes' provider resolver no longer selects
 trust through `HERMES_CA_BUNDLE` or the old CA-environment-variable ladder.
 Sandboxed subprocesses can have their own separate CA configuration.
 
+The former startup certificate guard is gone with it: Hermes no longer
+validates `HERMES_CA_BUNDLE` / `SSL_CERT_FILE` / `REQUESTS_CA_BUNDLE` /
+`CURL_CA_BUNDLE` at launch, so there is no `SSLConfigurationError` and the
+`HERMES_SKIP_SSL_GUARD` escape hatch has no effect. `HERMES_CA_BUNDLE` is
+still honoured by the Nous Portal login flow only (`hermes login`, or its
+`--ca-bundle` flag); the standard `SSL_CERT_FILE` / `REQUESTS_CA_BUNDLE` / `CURL_CA_BUNDLE` variables
+are still read by the plain `requests`/`urllib` calls some tools make (and by
+`pip`, `uv`, `curl`, Node), so a stale path in one of them now fails at the
+call that uses it rather than at startup. Fix or unset the variable there.
+
 A custom provider can declare `ssl_ca_cert` for its endpoint. That bundle
 replaces platform trust for chat, model metadata, and model catalog probes.
 A missing file produces a warning and falls back to platform trust.
@@ -940,6 +950,16 @@ Provider HTTP clients keep proxy configuration separate from certificate
 selection. A stale ambient CA-file path cannot prevent those clients from
 starting. PM index credentials are sent only to their exact HTTPS origin;
 redirects to another origin do not receive them.
+
+## Trusted-by-placement extension points {#trusted-by-placement}
+
+Most third-party code Hermes can run is gated by an explicit allow-list: general plugins need `plugins.enabled`, shell hooks need a first-use approval (or `hooks_auto_accept`), MCP servers are listed in config. One surface is deliberately different:
+
+| Extension point | Loaded from | Loaded when | Opt-in |
+|-----------------|-------------|-------------|--------|
+| [Gateway event hooks](./features/hooks.md#gateway-event-hooks) | `<profile home>/hooks/<name>/` (`HOOK.yaml` + `handler.py`) | Gateway startup (`HookRegistry.discover_and_load()`), per served profile | **Placing the directory.** No `plugins.enabled` entry, no prompt; `HERMES_SAFE_MODE` does not skip it. |
+
+The gateway imports every valid hook directory in-process, with the gateway's own privileges. This is the documented contract (since `3988c3c245f`), not an oversight: the profile home is operator-owned configuration, and anyone who can write into it can already run code as you through `config.yaml` shell hooks or by editing `plugins.enabled`, so a separate consent gate for `hooks/` would add friction without moving the trust boundary. Treat the contents of `~/.hermes/hooks/` like the contents of `config.yaml` — review a `handler.py` before you place it, and include `ls ~/.hermes/hooks/` whenever you audit the rest of the profile home (the directory is not on the [protected-paths denylist](#file-write-safety), so it is ordinary writable state). Full details: [gateway hook trust model](./features/hooks.md#gateway-hook-trust).
 
 ## Supply-chain advisory checking
 
