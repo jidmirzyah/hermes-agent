@@ -79,11 +79,11 @@ from hermes_cli.update_cmd_config import (  # noqa: F401
     _print_items, _run_config_check_fresh, _run_migrate_config_fresh)
 from hermes_cli.update_cmd_deps import (  # noqa: F401
     _INSTALL_DEFINING_FILES, _UPDATE_CRITICAL_MODULES,
-    _capture_active_lazy_features,
-    _critical_module_import_failures,
-    _desktop_app_present,
-    _editable_install_is_current,
-    _npm_bin_exists,
+    _abort_dependency_sync_if_self_locked, _capture_active_lazy_features,
+    _capture_active_tool_dependencies, _critical_module_import_failures,
+    _defer_update_for_self_lock, _dependency_sync_would_rewrite, _desktop_app_present,
+    _detect_self_loaded_native_modules, _editable_install_is_current, _ensure_uv_for_termux,
+    _ensure_venv_pip, _install_psutil_android_compat, _is_android_python, _npm_bin_exists,
     _npm_lockfile_changed, _npm_manifest_paths, _npm_manifests_digest, _path_uid,
     _rebuild_desktop_after_update, _record_npm_lockfile_hash, _refresh_active_lazy_features,
     _reapply_plugin_python_dependencies,
