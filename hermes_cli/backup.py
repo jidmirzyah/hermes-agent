@@ -11,6 +11,7 @@ import tempfile
 import threading
 import time
 import zipfile
+import zlib
 from contextlib import contextmanager, suppress
 from datetime import datetime, timezone
 from pathlib import Path
@@ -140,6 +141,17 @@ _EXCLUDED_PREFIXES = (
 # ``container_boot._STALE_RUNTIME_FILES``; import filters too because older backups predate the
 # backup-side exclusions.
 _IMPORT_SKIP_NAMES = {"gateway_state.json", "gateway.pid", "cron.pid", "gateway.lock", "processes.json"}
+
+try:  # zipfile already imports lzma (free); it is absent only from Pythons built without liblzma
+    import lzma
+    _LZMA_ERRORS: tuple[type[BaseException], ...] = (lzma.LZMAError,)
+except ImportError:  # pragma: no cover
+    _LZMA_ERRORS = ()
+
+# What reading a member's data raises when the archive itself is bad (a bzip2 bad stream and a
+# media read error are OSError, caught alongside): bad deflate stream, bad CRC, truncated stream.
+_ZIP_MEMBER_READ_ERRORS: tuple[type[BaseException], ...] = (
+    zipfile.BadZipFile, zlib.error, EOFError, *_LZMA_ERRORS)
 
 # zipfile.open() drops Unix mode bits on extract; restore tightens these to 0600.
 # vault.key / vault.json.enc: the local credential vault (agent/vault_store.py)

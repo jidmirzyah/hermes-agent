@@ -45,6 +45,17 @@ plugin, and fail to resolve in a disk plugin). Capability comes in tiers:
   restart the gateway, subscribe to the gateway event stream.
 - **`host.request`** — the gateway JSON-RPC door: sessions, config, skills,
   cron — everything the app itself calls.
+- **`captureGatewayFileDownload()`** — capture a gateway file-save action
+  immediately before starting a REST read, and retain it alongside the returned
+  data. The action `(storedPath, suggestedName) => Promise<void>` keeps that
+  read's connection/profile scope even if the user switches hosts before
+  clicking. Invoke only on an explicit user download gesture, using the
+  backend's persisted file path, never a guessed workspace path. Electron handles
+  authenticated streaming, the native save dialog, and older-gateway fallback;
+  plugins never receive credentials or open remote paths with `file://`. The
+  host shows the same "Saved" / "Download failed" toasts as the Files panel and
+  stays quiet on cancel; the promise settles when the save does and never
+  rejects.
 - **`ctx.rest` / `ctx.socket`** — your plugin's own backend namespace
   (`/api/plugins/<id>`) if you ship a `plugin_api.py`.
 - **`ui.*`** — the design language: the app's real components, theme variables,
@@ -223,6 +234,7 @@ Import the area constants from the SDK; each area has its own `data` payload.
 | Keybind | `KEYBINDS_AREA` | `data: KeybindContribution` |
 | Theme | `THEMES_AREA` | `data` as a `DesktopTheme` |
 | Composer | `COMPOSER_AREAS.*` | render slots, or middleware / attachment providers |
+| Appearance settings | `APPEARANCE_AREAS.extra` | `render` — controls appended to Settings → Appearance |
 
 ### Panes
 
@@ -635,6 +647,98 @@ register(ctx) {
 
 The reasoning-pill visibility CSS the plugin also injected has no hook; it is
 only needed if the app ever hides that label at narrow widths.
+
+### Appearance settings
+
+`APPEARANCE_AREAS.extra` renders contributions at the end of **Settings →
+Appearance**, after the built-in sections. It is the seam for a plugin that
+used to inject nodes into that page or drive its widgets through React
+internals.
+
+```ts
+APPEARANCE_AREAS = { extra: 'appearance.extra' } as const
+
+ctx.register({
+  area: APPEARANCE_AREAS.extra,
+  id: 'session-colour-rules',          // unique within your plugin
+  render: () => <MyAppearanceCard />   // any React tree; SDK hooks allowed
+})
+```
+
+*Arbitration:* every registration mounts, in registry order, each inside its
+own error boundary — a contribution that throws collapses to an inline error
+card naming its `id` (with Retry) and the rest of the page (and other plugins'
+cards) keep rendering. The slot mounts on the top-level Appearance page only,
+not on deep-link subpages (`settings/appearance/<section>`), and there is no
+"first wins" — plugins cannot suppress each other here.
+
+*Teardown:* the registration is owned by the plugin loader; disabling or
+reloading the plugin disposes it and the card disappears on the next render.
+Nothing persists app-side, so there is nothing to clean up in `ctx.onDispose`.
+
+For colour picking use the app's own swatch grid — `ColorSwatches` (already an
+SDK export) renders exactly what the profile rail and project dialog render,
+with your own `onChange`; feed it `PROFILE_SWATCHES` and pair it with
+`host.sessions.setColor(id, color)` for session colours.
+
+Migrations for the plugins that motivated this slot:
+
+* **better-session-appearance** — replace the fiber walk that harvests the
+  Appearance submenu's `{ onChange, swatches }` and the `clearBtn.after(...)` /
+  `host.appendChild(panel)` injection into the app dropdown with one
+  `ctx.register({ area: APPEARANCE_AREAS.extra, id: 'rules', render })` whose
+  card renders `<ColorSwatches swatches={PROFILE_SWATCHES} value onChange />`
+  plus its bold/glyph/auto-rule controls; drop the `data-better-session-appearance`
+  attribute writes and the dropdown `max-height` overrides.
+* **hermes-appearance-hub** — mount its paper-texture / font / intro-copy
+  controls as an `APPEARANCE_AREAS.extra` card instead of a status-bar menu
+  that reaches into Settings; the settings *values* still go through
+  `host.settings` (allowlisted keys) and `THEMES_AREA`.
+
+### Embedding external content
+
+Use the SDK's `<SandboxedFrame src title />` for any external web content
+(reader views, dashboards, docs). It renders a sandboxed iframe with the app's
+guest-content posture: opaque origin, `allow-scripts` by default, `no-referrer`,
+lazy loading. Never mount a raw Electron `<webview>`: it lands on the app's
+`persist:` preview partition, sharing the app's cookies and storage.
+
+```ts
+interface SandboxedFrameProps {
+  src: string      // absolute http(s): or data: URL; any other scheme renders nothing (console.warn)
+  title: string    // required — an untitled frame is unlabelled in the a11y tree
+  sandbox?: string // extra tokens; filtered through the allowlist below
+  className?: string; style?: CSSProperties
+  onLoad?, onError?: ReactEventHandler<HTMLIFrameElement>
+  ref?: Ref<HTMLIFrameElement>
+}
+```
+
+The props are an explicit allowlist, not `ComponentProps<'iframe'>`: `allow`
+(Permissions-Policy delegation — would hand a third-party site the mic/camera
+grant the app holds), `srcdoc`, `name`, `allowFullScreen`, `csp`,
+`credentialless` and every other iframe attribute are not props and nothing is
+spread onto the element, so they cannot reach the DOM even through a cast.
+
+*Arbitration (allowlist, not blocklist):* the only tokens a caller may add are
+`allow-scripts`, `allow-forms`, `allow-downloads`, `allow-pointer-lock`,
+`allow-orientation-lock`, `allow-presentation`. Everything else —
+`allow-same-origin`, `allow-top-navigation*`, `allow-popups*`, `allow-modals`,
+`allow-storage-access-by-user-activation`, and any token the primitive does not
+know — is dropped case-insensitively even if passed; an emptied set falls back
+to the default posture (`allow-scripts`), because a frame with **no** `sandbox`
+attribute is fully privileged. `loading="lazy"` and
+`referrerPolicy="no-referrer"` are not props. The opaque origin IS the
+containment: guest content cannot reach the app, its storage, or the preload
+bridge.
+
+*Teardown:* it is a plain React element — unmounting your pane/page removes the
+frame and its realm; nothing is registered app-side.
+
+Migration for **rss-reader** (#115972): replace the stubbed `/preview` → 501 →
+`host.openWorkspace('rss-browser')` → empty `RssBrowserFrame` → `ctx.os.openExternal`
+chain with `<SandboxedFrame src={article.url} title={article.title} />` inside
+the workspace page; drop the leftover `.rss-browser-frame-host webview` CSS.
 
 ### Transcript directives — inline components the model addresses
 
@@ -1272,6 +1376,52 @@ never auto-import Python. This is a security boundary, not an oversight
 (GHSA-mcfc-hp25-cjv7).
 :::
 
+#### Pushing events to your desktop half
+
+Your backend runs inside the gateway process, so it can push an update to your
+own desktop half over the app's global event stream — the same stream
+`host.onEvent` subscribes to:
+
+```python
+from hermes_cli.plugin_events import broadcast_plugin_event
+
+broadcast_plugin_event("rss-reader", "feed.updated", {"count": 3})
+# → event "plugin.rss-reader.feed.updated" reaches every connected desktop client
+```
+
+```javascript
+// register(ctx): the subscription is retired with the plugin
+host.onEvent('plugin.rss-reader.feed.updated', ({ payload }) => refreshFeeds(payload))
+```
+
+`broadcast_plugin_event(plugin_id, event, payload=None)`: the wire name is
+always `plugin.<plugin_id>.<event>`. `plugin_id` is your catalog name
+(`[a-z0-9_-]{1,64}`, no dots — it is the namespace and can't spell another
+plugin's); `event` is the BARE dotted name (`"feed.updated"`, not
+`"plugin.rss-reader.feed.updated"`), segments of `[A-Za-z0-9_-]`, so `""`,
+`"../x"` or `"a..b"` raise `ValueError` instead of stranding the desktop half
+on a name nobody emits. `payload` is a JSON dict (or omitted → `{}`), delivered
+as the event's `payload`; the frame carries `session_id: ""` like every global
+event. Delivery is fire-and-forget (a wedged client is skipped, never stalling
+your handler). Where it lands depends on the process the call runs in:
+
+| Caller runs in | Reaches |
+|---|---|
+| `hermes serve` (the Desktop backend): `plugin_api.py` routers, plugin slash commands, tools and hooks in the agent turn | every connected Desktop window |
+| the `dashboard.turn_isolation` compute-host child (tools/hooks of an isolated turn) | relayed over the host pipe to `hermes serve`, then every window |
+| the stdio TUI (`hermes` in a terminal) | that terminal's client |
+| `hermes gateway run` (messaging platforms), `hermes chat`, cron, `hermes plugins validate` | nobody — no Desktop client is attached to that process; the call is a logged no-op |
+
+Use this instead of importing `tui_gateway.server` internals; for plugin-scoped frames
+with a payload tailored per connection, `ctx.socket('/events')` remains the
+richer door.
+
+Migration (rss-reader): drop the `~/.hermes/rss-reader/commands.jsonl` queue,
+`GET /commands` and the 3 s `ctx.rest('/commands')` poll — the Python side
+calls `broadcast_plugin_event('rss-reader', 'feed.updated', payload)` where it
+used to enqueue, and the desktop side replaces the timer with
+`host.onEvent('plugin.rss-reader.feed.updated', fn)` inside `register(ctx)`.
+
 ### Calling it from the plugin
 
 ```javascript
@@ -1399,11 +1549,11 @@ pipeline as a trust boundary.
 |----------|---------|
 | Host | `host` (`.state.*`, `.settings`, `.notify`, `.notifyError`, `.navigate`, `.onEvent`, `.logs`, `.status`, `.restartGateway`, `.request`, `.composer`, `.sessions`, `.skills`, `.toolsets`, `.profiles`, `.pluginDecisions`) |
 | Plugin contract | `HermesPlugin`, `PluginContext`, `PluginContribution`, `PluginStorage`, `PluginOs`, `PluginRestOptions`, `PluginNativeNotificationInput`, `PluginNotificationAction`, `HermesOpenTarget`, `Contribution` |
-| Area constants | `PANES_AREA`, `ROUTES_AREA`, `SIDEBAR_NAV_AREA`, `STATUSBAR_AREAS`, `TITLEBAR_AREAS`, `WORKSPACE_PAGE_HEADER_AREA`, `PALETTE_AREA`, `KEYBINDS_AREA`, `THEMES_AREA`, `COMPOSER_AREAS`, `SESSION_ROW_AREAS`, `SIDEBAR_NAV_PREFS_AREA` |
+| Area constants | `PANES_AREA`, `ROUTES_AREA`, `SIDEBAR_NAV_AREA`, `STATUSBAR_AREAS`, `TITLEBAR_AREAS`, `WORKSPACE_PAGE_HEADER_AREA`, `PALETTE_AREA`, `KEYBINDS_AREA`, `THEMES_AREA`, `COMPOSER_AREAS`, `SESSION_ROW_AREAS`, `SIDEBAR_NAV_PREFS_AREA`, `APPEARANCE_AREAS` |
 | Area payloads | `RouteContribution`, `SidebarNavContribution`, `StatusbarItem`, `TitlebarTool`, `PaletteContribution`, `KeybindContribution`, `ComposerMiddleware`, `ComposerAttachmentProvider`, `SessionRowSlotContribution`, `SidebarNavPrefsContribution` |
 | React / state | `useValue`, `atom`, `computed`, `useQuery`, `useMutation`, `useQueryClient`, `queryClient`, `Contribute` |
 | Theming | `useTheme`, `requestTheme`, `setAccentOverride`, `$accentOverride`, `retintTheme`, `themeHue`, `DesktopTheme`, `DesktopThemeColors`, plus OKLCH math (`hexToOklch`, `oklchToHex`, `oklchToSrgb255`, `mixOklab`, `maxChroma`, `hueDelta`, `normalizeHex`) and sRGB measures (`contrastRatio` — `number | null`, null for unparseable input — `readableOn`) |
-| UI kit | `Button`, `Input`, `Textarea`, `Select*`, `Switch`, `Checkbox`, `SegmentedControl`, `Tabs*`, `Dialog*`, `ConfirmDialog`, `DropdownMenu*`, `ContextMenu*`, `Popover*`, `Tip`/`Tooltip*`, `Badge`, `Kbd`/`KbdGroup`, `SearchField`, `ScrollArea`, `Separator`, `Skeleton`, `GlyphSpinner`, `Loader`, `EmptyState`, `ErrorState`, `CopyButton`, `StatusDot`, `LogView`, `Codicon`, `DecodeText` |
+| UI kit | `Button`, `Input`, `Textarea`, `Select*`, `Switch`, `Checkbox`, `SegmentedControl`, `Tabs*`, `Dialog*`, `ConfirmDialog`, `DropdownMenu*`, `ContextMenu*`, `Popover*`, `Tip`/`Tooltip*`, `Badge`, `Kbd`/`KbdGroup`, `SearchField`, `ScrollArea`, `Separator`, `Skeleton`, `GlyphSpinner`, `Loader`, `EmptyState`, `ErrorState`, `CopyButton`, `StatusDot`, `LogView`, `Codicon`, `DecodeText`, `SandboxedFrame` |
 | Helpers | `cn`, `icons`, `haptic`, `useI18n`, `profileColor`, `profileColorSoft`, `relativeTime`, `fmtDateTime`, `fmtDayTime`, `coarseElapsed`, `evaluateRuntimeReadiness` |
 
 The canonical, always-current export list is `apps/desktop/src/sdk/index.ts`.
