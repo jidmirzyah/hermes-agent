@@ -375,7 +375,7 @@ class TestPythonDependenciesSeam:
             hermes_home / "plugins", "pipok",
             manifest_extra={
                 "manifest_version": 2,
-                "python_dependencies": ["pyyaml>=5,<7"],
+                "python_dependencies": ["rich>=13,<15"],
             },
         )
         _enable(hermes_home, ["pipok"])

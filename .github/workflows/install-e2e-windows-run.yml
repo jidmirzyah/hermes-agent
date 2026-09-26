@@ -101,11 +101,20 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: ${{ github.sha }}
-      - name: Install driver dependencies and verify helpers
+      - name: Set up driver tools only
+        uses: ./.github/actions/setup-pm
+        with:
+          toolchain: all
+          packages: ffmpeg
+          cache: false
+          cache-python: false
+          cache-node: false
+      - name: Install locked chat driver dependencies
+        shell: bash
+        run: npm ci --workspace tests-js --include-workspace-root --omit=dev --ignore-scripts --no-audit --no-fund
+      - name: Verify native helpers
         shell: pwsh
         run: |
-          npm ci --ignore-scripts --no-audit --no-fund
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           node --test tests/install/e2e-assets/windows-bundled-helpers.test.mjs
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Start recording
@@ -176,8 +185,41 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
 
-      # One recording mechanism on every OS: the composite action installs
-      # ffmpeg (cached - winget's download is the slow part), starts the
+      # Old installers refresh PATH after winget installs ripgrep, dropping the
+      # process-only uv path. Supply the tool before running those shipped scripts.
+      - name: Set up driver tools only
+        uses: ./.github/actions/setup-pm
+        with:
+          toolchain: all
+          packages: ffmpeg,ripgrep
+          cache: false
+          cache-python: false
+          cache-node: false
+
+      - name: Install locked chat driver dependencies
+        shell: bash
+        run: npm ci --workspace tests-js --include-workspace-root --omit=dev --ignore-scripts --no-audit --no-fund
+
+      # A released tag prints its one-shot chat through prompt_toolkit, whose Windows
+      # output object needs a console screen buffer -- piping the CLI's stdout into the
+      # evidence log takes that away and the turn dies with NoConsoleScreenBufferError.
+      # The driver therefore runs that turn under e2e-assets/pty-run.py, which uses
+      # pywinpty: the same ConPTY spawner the product uses on Windows, pinned to the
+      # version pyproject.toml requires. Install it with uv (the toolchain python ships
+      # without pip) out of HERMES_RUNTIME_DIR, which is the tools directory itself and
+      # is not on PATH for workflow steps; the import check proves it landed.
+      - name: Install the pseudoconsole runner's dependency
+        shell: pwsh
+        run: |
+          $uvDir = Get-ChildItem $env:HERMES_RUNTIME_DIR -Filter 'uv-*' -Directory | Select-Object -First 1
+          if (-not $uvDir) { throw "uv not found under $env:HERMES_RUNTIME_DIR" }
+          & (Join-Path $uvDir.FullName 'uv.exe') pip install --system --python $env:HERMES_PYTHON --quiet "pywinpty==3.0.5"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -c "import winpty; print('pty-run dependency ready')"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # One recording mechanism on every OS: the composite action verifies
+      # ffmpeg from the PM toolchain (packages: ffmpeg above), starts the
       # capture, and record-stop fails on a zero-frame file so a silently
       # missing recording cannot go green.
       - name: Start screen recording

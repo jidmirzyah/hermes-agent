@@ -18,8 +18,8 @@ Sources of truth — two axes, composed per target:
                       assets/backgrounds/squircle-mac-dark.svg    mac HIG grid
 
   The master SVGs (assets/icon-master.svg light, assets/icon-master-dark.svg
-  dark) are GENERATED artifacts — squircle background + girl nested into the
-  824px HIG content safe zone. The light master drives every squircle target;
+  dark) are GENERATED artifacts — squircle background + scaled girl artwork.
+  The light master drives every squircle target;
   the dark master drives the dark-appearance targets. macOS is the exception:
   its icns targets render from an in-memory mac master that puts the same
   squircle on Apple's 824x824 (r=185.4) grid — centered in 1024 with 100px
@@ -31,10 +31,10 @@ and a seven-character SHA badge. The girl and tile geometry do not change.
 Only apps/desktop outputs use this identity. Website, bootstrap, dashboard,
 and the shared master SVGs retain the default brand.
 
-The girl is nested via its art bbox as viewBox, so it always lands centered in
-the box (824 safe zone for squircles / height-fitted for the marks) without
-distortion. The girl art corners sit ~185px from the squircle arc centers vs
-the 245px radius, so no art touches the rounded corners on any OS mask.
+The girl's position and uniform scale are registered to the reference artwork.
+She renders in front of the border, clipped only to the outer rounded silhouette.
+Only nodes near her bottom edge extend to the border; the fitted face and hair stay fixed.
+Standalone wordmarks remain centered and have no border.
 
 GENERATED OUTPUTS ARE NOT COMMITTED. Everything this script writes is
 gitignored and regenerated on demand by the consuming pipelines (website
@@ -93,6 +93,7 @@ import io
 import os
 import re
 import sys
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from PIL import Image
@@ -105,20 +106,24 @@ except ImportError:
         "  node scripts/generate-icons.mjs"
     )
 
+# Copy of hermes_cli.update_channel._CANARY_TAG_RE: this renderer runs in an
+# isolated icon-build venv (Nix, Docker, PM) where the application package is
+# absent. tests/scripts/test_icon_flavors.py pins it to the canonical one.
+_CANARY_TAG_RE = re.compile(r"^v(?:0|[1-9]\d*)\.\d+\.\d+-canary\.20\d{6}(?:\d{6})?$")
+
 # The nous dark background (#0d1117) — fixed dark tile/background everywhere.
 DARK_HEX = "#0d1117"
 DARK_RGB = (13, 17, 23)
+BORDER_FRACTION = 0.0407747197
 
-# Girl placement per background: (x, y, w, h) in that background's coordinate
-# space. Full-bleed squircles put the girl in the 824px HIG content safe zone
-# (centered, 100px pad on a 1024 canvas); the mac-grid squircle is itself 824
-# on 1024, so the girl box scales by 824/1024 to keep the same relative size
-# inside the shape. Marks reuse the full-bleed squircles.
+# Portrait boxes fitted to the reference at equal visible tile width, with
+# uniform scaling about the tile center followed by an up-left translation.
+# Keep their y coordinate: bottom anchoring would undo the registration.
 GIRL_BOXES = {
-    "squircle-light.svg": (100, 100, 824, 824),
-    "squircle-dark.svg": (100, 100, 824, 824),
-    "squircle-mac-light.svg": (180.5, 180.5, 663, 663),
-    "squircle-mac-dark.svg": (180.5, 180.5, 663, 663),
+    "squircle-light.svg": (72.149433, 104.703674, 872.767801, 872.767801),
+    "squircle-dark.svg": (72.149433, 104.703674, 872.767801, 872.767801),
+    "squircle-mac-light.svg": (157.949166, 184.039504, 702.522501, 702.522501),
+    "squircle-mac-dark.svg": (157.949166, 184.039504, 702.522501, 702.522501),
 }
 # The brand-kit SVG canvas (both girl svgs share this viewBox).
 GIRL_VIEWBOX = 5487.0615
@@ -215,7 +220,7 @@ def girl_path(art: IconArt, girl: str) -> str:
     """The girl `<path>` element with editor metadata stripped (resvg rejects
     undeclared inkscape/sodipodi prefixes)."""
     if girl not in art.paths:
-        src = art.girls[girl].read_text(encoding="utf-8")
+        src = art.girls[girl].read_text(encoding="utf-8-sig")
         m = re.search(r"<path\b.*?/>", src, re.S)
         assert m, f"no <path> found in {art.girls[girl].name}"
         path = re.sub(r'\s+(inkscape|sodipodi):[a-zA-Z-]+="[^"]*"', "", m.group(0))
@@ -235,13 +240,17 @@ def girl_bbox(art: IconArt, girl: str) -> tuple[float, float, float, float]:
     return art.bboxes[girl]
 
 
-def girl_layer(art: IconArt, girl: str, box: tuple[float, float, float, float]) -> str:
+def girl_layer(
+    art: IconArt, girl: str, box: tuple[float, float, float, float],
+    *, align: str = "xMidYMid",
+) -> str:
     """Nested-svg layer: girl art (bbox as viewBox) placed into `box` — the
     box's aspect is preserved via 'meet', so the girl never distorts."""
     bx, by, bw, bh = girl_bbox(art, girl)
     x, y, w, h = box
     return (
-        f'<svg x="{x}" y="{y}" width="{w}" height="{h}" viewBox="{bx} {by} {bw} {bh}">\n'
+        f'<svg x="{x}" y="{y}" width="{w}" height="{h}" viewBox="{bx} {by} {bw} {bh}" '
+        f'preserveAspectRatio="{align} meet">\n'
         f"    {girl_path(art, girl)}\n"
         "  </svg>"
     )
@@ -249,15 +258,17 @@ def girl_layer(art: IconArt, girl: str, box: tuple[float, float, float, float]) 
 
 def background_inner(art: IconArt, name: str) -> tuple[str, int, int]:
     """Inner content + (width, height) of a background SVG asset."""
-    text = (art.backgrounds / name).read_text(encoding="utf-8")
+    text = (art.backgrounds / name).read_text(encoding="utf-8-sig")
     if art.colors:
         text = text.replace('fill="#ffffff"', f'fill="{art.colors[0]}"')
         text = text.replace(f'fill="{DARK_HEX}"', f'fill="{art.colors[1]}"')
-    m = re.search(r'<svg\b[^>]*viewBox="0 0 (\d+(?:\.\d+)?) (\d+(?:\.\d+)?)"[^>]*>', text)
+    root = ET.fromstring(text)
+    m = re.fullmatch(r"0 0 (\d+(?:\.\d+)?) (\d+(?:\.\d+)?)", root.get("viewBox", ""))
     assert m, f"cannot parse viewBox of {name}"
     w, h = float(m.group(1)), float(m.group(2))
-    inner = re.sub(r"^.*?>\s*", "", text, count=1, flags=re.S)
-    inner = re.sub(r"\s*</svg>\s*$", "", inner, flags=re.S)
+    # Editor exports include XML declarations and root-scoped namespaces.
+    # Parse away the prolog and retain child namespaces when embedding.
+    inner = "".join(ET.tostring(child, encoding="unicode") for child in root)
     return inner, int(w), int(h)
 
 
@@ -299,17 +310,80 @@ def commit_layer(commit: str, bg: str) -> str:
     )
 
 
+def drag_bottom_nodes(path: ET.Element, *, cutoff: float, band: float, distance: float) -> None:
+    """Drag lower nodes and curve handles, tapering to zero above the bottom band."""
+    y_scale, y_offset = 1.0, 0.0
+    transform = path.get("transform")
+    if transform:
+        matrix = re.fullmatch(r"matrix\(([^)]+)\)", transform)
+        if matrix is None:
+            raise ValueError("bottom node edits require an axis-aligned matrix")
+        _, b, c, y_scale, _, y_offset = map(float, re.split(r"[\s,]+", matrix[1].strip()))
+        if b != 0 or c != 0 or y_scale <= 0:
+            raise ValueError("bottom node edits require an upright axis-aligned matrix")
+
+    # The brand exports use explicit absolute M/L/C commands. Reject other
+    # commands rather than silently corrupting relative coordinates or arcs.
+    tokens = re.findall(r"[A-Za-z]|[-+]?(?:\d*\.\d+|\d+\.?\d*)(?:[eE][-+]?\d+)?", path.attrib["d"])
+    counts = {"M": 2, "L": 2, "C": 6, "z": 0, "Z": 0}
+    index = 0
+    while index < len(tokens):
+        command = tokens[index]
+        if command not in counts:
+            raise ValueError("bottom node edits require explicit absolute M/L/C commands")
+        count = counts[command]
+        if index + count >= len(tokens):
+            raise ValueError("incomplete SVG path command")
+        for offset in range(2, count + 1, 2):
+            token_index = index + offset
+            raw_y = float(tokens[token_index])
+            amount = min(1.0, max(0.0, (raw_y * y_scale + y_offset - cutoff) / band))
+            if amount:
+                weight = amount * amount * (3 - 2 * amount)
+                tokens[token_index] = f"{raw_y + distance * weight / y_scale:.12g}"
+        index += count + 1
+    path.set("d", " ".join(tokens))
+
+
 def compose_svg(art: IconArt, girl: str, bg: str) -> str:
     """Full svg text: background + girl layer, in the background's native
     coordinate space (resvg scales to whatever output size is requested, so
     the composition is size-agnostic — no manual box scaling)."""
     inner, w, h = background_inner(art, bg)
+    background = ET.fromstring(f"<g>{inner}</g>")
+    tile = background.find("{http://www.w3.org/2000/svg}rect")
+    assert tile is not None, f"no background rectangle in {bg}"
+    geometry = {key: float(tile.attrib[key]) for key in ("x", "y", "width", "height", "rx")}
+    thickness = geometry["width"] * BORDER_FRACTION
+    # An inward stroke keeps the outer platform geometry unchanged. Subtracting
+    # the same inset from rx (not scaling rx) keeps the corner thickness uniform.
+    inset = {"x": 1, "y": 1, "width": -2, "height": -2, "rx": -1}
+    silhouette = ET.Element("rect", {key: str(value) for key, value in geometry.items()})
+    for key, value in geometry.items():
+        tile.set(key, str(value + inset[key] * thickness / 2))
+    tile.set("stroke", "#000000" if girl == "black" else "#ffffff")
+    tile.set("stroke-width", str(thickness))
+    inner = "".join(ET.tostring(child, encoding="unicode") for child in background)
+    clip = ET.tostring(silhouette, encoding="unicode")
+    box = GIRL_BOXES[bg]
+    portrait = ET.fromstring(girl_layer(art, girl, box, align="xMidYMax"))
+    _, y, portrait_width, portrait_height = box
+    _, by, bw, bh = girl_bbox(art, girl)
+    scale = min(portrait_width / bw, portrait_height / bh)
+    join_bottom = geometry["y"] + geometry["height"] - thickness + 10
+    drag_bottom_nodes(
+        portrait[0], cutoff=by + bh * 0.97, band=bh * 0.02,
+        distance=max(0.0, join_bottom - (y + portrait_height)) / scale,
+    )
+    # Keep the fitted viewBox fixed, but let edited nodes reach into the border.
+    portrait.set("overflow", "visible")
     badge = f"  {commit_layer(art.commit, bg)}\n" if art.commit else ""
     return (
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}">\n'
+        f'  <defs><clipPath id="icon-silhouette">{clip}</clipPath></defs>\n'
         f"  {inner.strip()}\n"
-        f"  {girl_layer(art, girl, GIRL_BOXES[bg])}\n"
         f"{badge}"
+        f'  <g clip-path="url(#icon-silhouette)">{ET.tostring(portrait, encoding="unicode")}</g>\n'
         "</svg>\n"
     )
 
@@ -437,8 +511,7 @@ def build_art(source: Path) -> tuple[IconArt, IconArt]:
         if not re.fullmatch(r"[a-f0-9]{40}", commit):
             raise ValueError("HERMES_BUILD_COMMIT requires an exact full 40-character SHA")
         return art, IconArt(source, colors=("#e34850", "#4a1117"), commit=commit)
-    # Match the desktop/feed identity, including historical date-only tags.
-    if re.search(r"-canary\.20\d{6}(?:\d{6})?$", tag):
+    if _CANARY_TAG_RE.match(tag.strip()):
         return art, IconArt(source, colors=("#f5cc32", "#443808"))
     return art, art
 

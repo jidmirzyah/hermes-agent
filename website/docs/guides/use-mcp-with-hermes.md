@@ -7,7 +7,7 @@ description: "A practical guide to connecting MCP servers to Hermes Agent, filte
 # Use MCP with Hermes
 
 Python dependency commands on this page use a
-[PM-prepared source checkout](/reference/package-management#developer-workflow).
+[PM-prepared source checkout](../reference/package-management.md#developer-workflow).
 After a dependency change, reactivate the checkout and restart Hermes.
 
 This guide shows how to actually use MCP with Hermes Agent in day-to-day workflows.

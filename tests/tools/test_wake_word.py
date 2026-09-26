@@ -19,7 +19,7 @@ import pytest
 import pm
 import importlib
 
-pm_ensure = importlib.import_module("pm.ensure")
+pm_ensure = importlib.import_module("pm.install")
 import tools.wake_word as ww
 
 
@@ -449,74 +449,6 @@ def test_bundled_hey_hermes_model_ships_on_disk():
     assert os.path.exists(path), path
     assert os.path.getsize(path) > 1024, path
 
-
-# ── sherpa-onnx open-vocabulary engine ───────────────────────────────────
-
-
-def _install_fake_sherpa(monkeypatch, tmp_path):
-    """Fake sherpa_onnx + a fake model dir so the engine builds offline."""
-    calls = {"text2token": [], "spotter": [], "results": []}
-
-    model_dir = tmp_path / "kws-model"
-    model_dir.mkdir()
-    for name in (
-        "tokens.txt",
-        "bpe.model",
-        "encoder-epoch-12-avg-2-chunk-16-left-64.onnx",
-        "decoder-epoch-12-avg-2-chunk-16-left-64.onnx",
-        "joiner-epoch-12-avg-2-chunk-16-left-64.onnx",
-    ):
-        (model_dir / name).write_bytes(b"x")
-
-    class _FakeStream:
-        def accept_waveform(self, sample_rate, samples):
-            pass
-
-    class _FakeSpotter:
-        def __init__(self, **kwargs):
-            calls["spotter"].append(kwargs)
-
-        def create_stream(self):
-            return _FakeStream()
-
-        def is_ready(self, stream):
-            return bool(calls["results"])
-
-        def decode_stream(self, stream):
-            pass
-
-        def get_result(self, stream):
-            return calls["results"].pop(0) if calls["results"] else ""
-
-        def reset_stream(self, stream):
-            pass
-
-    def _fake_text2token(phrases, tokens, tokens_type, bpe_model):
-        calls["text2token"].append(list(phrases))
-        return [p.split() for p in phrases]
-
-    sherpa = types.ModuleType("sherpa_onnx")
-    sherpa.KeywordSpotter = _FakeSpotter
-    sherpa.text2token = _fake_text2token
-    monkeypatch.setitem(sys.modules, "sherpa_onnx", sherpa)
-    monkeypatch.setattr(pm, "ensure_import", lambda *a, **k: None)
-
-    # numpy is an optional voice-extra dep, lazy-installed at runtime — CI's
-    # hermetic slices don't have it. process() only calls asarray(...)/32768,
-    # so a minimal stub keeps these tests runnable without the real package.
-    if "numpy" not in sys.modules:
-        class _FakeArr(list):
-            def __truediv__(self, other):
-                return self
-
-        np_stub = types.ModuleType("numpy")
-        np_stub.float32 = "float32"
-        np_stub.asarray = lambda x, dtype=None: _FakeArr(x)
-        monkeypatch.setitem(sys.modules, "numpy", np_stub)
-    return calls, model_dir
-
-
-# ── Multi-profile phrase routing ─────────────────────────────────────────
 
 
 # ── Detector loop ────────────────────────────────────────────────────────

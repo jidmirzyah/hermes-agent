@@ -1,10 +1,5 @@
-// msix-shared.mjs — the shared MSIX-distribution building blocks used by
-// BOTH the out-of-store feed generator (apps/desktop/scripts/gen-appinstaller.mjs)
-// and the release job that stages the feed (scripts/stage-msixbundle.mjs).
-//
-// The two call sites must agree on every name/URL that Windows keys on — the
-// .appinstaller's MainBundle identity and the bundle URI — so the XML
-// builder and the version/filename derivations live here, once.
+// Native MSIX identity/version derivation and artifact content types.
+// App Installer XML and feed publication belong to scripts.bundles.release_artifacts.
 
 import fs from 'node:fs'
 import path from 'node:path'
@@ -12,6 +7,34 @@ import { execFileSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 
 const require = createRequire(import.meta.url)
+
+/** Build-only structured bridge; never read by the installed runtime.
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {import('../apps/desktop/electron/install-stamp.js').ChannelBuildRequest | null}
+ */
+export function channelBuildRequest(env = process.env) {
+  if (!env._HERMES_CHANNEL_REQUEST_JSON) return null
+  const value = JSON.parse(env._HERMES_CHANNEL_REQUEST_JSON)
+  if (env.HERMES_DESKTOP_VARIANT !== 'bundled') throw new Error('Channel builds support only bundled packaging')
+  if (env.HERMES_BUILD_COMMIT || env.HERMES_PAYLOAD_TAG) throw new Error('Channel request conflicts with commit or tag identity')
+  // The bundled toolchain already supplies Python. Reuse the authoritative
+  // validator rather than maintaining a third protocol decoder for packaging.
+  const validator = [
+    'import sys',
+    'sys.path.insert(0, sys.argv[1])',
+    'from hermes_cli.release_channels import decode_json',
+    'from scripts.bundles.desktop_prepare import validate_channel_request',
+    'validate_channel_request(decode_json(sys.stdin.buffer.read()))'
+  ].join('; ')
+  execFileSync(env.HERMES_PYTHON || 'python', ['-I', '-S', '-c', validator, path.resolve(import.meta.dirname, '..')], {
+    env, input: env._HERMES_CHANNEL_REQUEST_JSON, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 30_000
+  })
+  if (env.HERMES_PAYLOAD_VERSION && env.HERMES_PAYLOAD_VERSION !== value.version) throw new Error('Channel package version conflicts with prepared request')
+  Object.freeze(value.identity)
+  Object.freeze(value.bundleEnv)
+  return Object.freeze(value)
+}
+
 
 // The out-of-store MSIX publisher — the ATS signing cert subject, which is
 // what Windows compares against the package manifest publisher at install.
@@ -48,52 +71,6 @@ export function contentTypeFor(filename) {
     }
   }
   return undefined
-}
-
-/**
- * @param {unknown} value any value to XML-escape
- * @returns {string}
- */
-function escapeAttr(value) {
-  return String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
-}
-
-/**
- * Build an .appinstaller document for a channel.
- *
- * @param {{
- *   baseUrl: string             // feed host root (no trailing slash)
- *   variantChannelPath: string  // e.g. "win32/", "win32/light/", "win32/canary/"
- *   identityName: string        // package Identity Name (e.g. "NousResearch.HermesBundled")
- *   version: string             // 4-part MSIX version, e.g. "1.2.3.0"
- *   bundleFilename: string      // the universal .msixbundle filename in the feed dir
- *   descriptorFilename?: string // defaults to the channel's .appinstaller name
- * }} o
- * @returns {string} the .appinstaller XML
- */
-export function buildAppInstaller(o) {
-  const directory = [o.baseUrl.replace(/\/+$/, ''), o.variantChannelPath.replace(/^\/+|\/+$/g, '')].filter(Boolean).join('/')
-  const bundleUrl = `${directory}/${o.bundleFilename}`
-  const descriptor = o.descriptorFilename || `${o.variantChannelPath.replace(/\/+$/, '').split('/').pop()}.appinstaller`
-  const appinstallerUri = `${directory}/${descriptor}`
-
-  return [
-    '<?xml version="1.0" encoding="utf-8"?>',
-    '<AppInstaller',
-    `  Uri="${escapeAttr(appinstallerUri)}"`,
-    `  Version="${escapeAttr(o.version)}"`,
-    '  xmlns="http://schemas.microsoft.com/appx/appinstaller/2017/2">',
-    '  <MainBundle',
-    `    Name="${escapeAttr(o.identityName)}"`,
-    `    Publisher="${escapeAttr(OUT_OF_STORE_PUBLISHER)}"`,
-    `    Version="${escapeAttr(o.version)}"`,
-    `    Uri="${escapeAttr(bundleUrl)}" />`,
-    '  <UpdateSettings>',
-    '    <OnLaunch HoursBetweenUpdateChecks="12" />',
-    '  </UpdateSettings>',
-    '</AppInstaller>',
-    ''
-  ].join('\n')
 }
 
 // The canary tag base + embedded UTC stamp: v0.27.2-canary.20260829034013
@@ -225,6 +202,27 @@ export function storeManifestTemplate(template, version) {
   return template.replace('${version}', version)
 }
 
+/** MsixTarget derives its quad from app semver even when shortVersion is set.
+ * Bake the admitted quad into the already staged nonstable template instead.
+ * @param {string} desktopDir
+ * @param {import('../apps/desktop/electron/install-stamp.js').ChannelBuildRequest} request
+ */
+export function stageChannelManifest(desktopDir, request) {
+  const file = path.join(desktopDir, 'build/msix-manifest.xml')
+  const template = fs.readFileSync(path.join(desktopDir, 'assets/msix-manifest.xml'), 'utf8')
+  const payload = JSON.parse(fs.readFileSync(path.join(desktopDir, 'build/agent-payload/manifest.json'), 'utf8'))
+  const { appExecutionAliasApplications } = require(path.join(desktopDir, 'scripts/before-build.mjs'))
+  const applications = appExecutionAliasApplications(payload.launchers, request.identity)
+  if (template.split('${version}').length !== 2) throw new Error('Channel MSIX template must have one version macro')
+  fs.writeFileSync(file, template.replace('${version}', request.windowsVersion)
+    .replace('</Applications>', `${applications}\n  </Applications>`), 'utf8')
+  // The legacy hook emits one multi-alias extension when artifact/app names agree.
+  // Channels always use separate applications for distinct CLI entrypoints.
+  const extensions = path.join(desktopDir, 'build/msix-extensions.xml')
+  const xml = fs.readFileSync(extensions, 'utf8')
+  fs.writeFileSync(extensions, xml.replace(/<uap5:Extension\b[^>]*Category="windows\.appExecutionAlias"[^>]*>[\s\S]*?<\/uap5:Extension>/g, ''), 'utf8')
+}
+
 /**
  * Resolve the app identity for a desktop build from the app dir: the product
  * identity + package version. Pure-ish (reads product-identity.cjs and
@@ -239,6 +237,11 @@ export function appIdentity(desktopDir, tag = process.env.HERMES_PAYLOAD_TAG || 
   const identity = require(path.join(desktopDir, 'product-identity.cjs'))
   const pkg = JSON.parse(fs.readFileSync(path.join(desktopDir, 'package.json'), 'utf8'))
   const repoRoot = path.resolve(desktopDir, '..', '..')
+  const request = channelBuildRequest()
+  if (request) {
+    if (tag) throw new Error('Channel builds must not select a release tag')
+    return { identity, version: request.windowsVersion, fileVersion: request.version, name: identity.artifactNamePascal }
+  }
   // Commit artifacts retain app semver but do not advance an update channel.
   if (process.env.HERMES_BUILD_COMMIT) {
     if (tag) throw new Error('Commit-only builds must not set HERMES_PAYLOAD_TAG')

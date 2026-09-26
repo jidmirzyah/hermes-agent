@@ -7,7 +7,7 @@ description: "Your first conversation with Hermes Agent — from install to chat
 # Hermes Agent Quickstart
 
 Python dependency commands on this page use a
-[PM-prepared source checkout](/reference/package-management#developer-workflow).
+[PM-prepared source checkout](../reference/package-management.md#developer-workflow).
 After a dependency change, reactivate the checkout and restart Hermes.
 
 This guide gets you from zero to a working Hermes setup that survives real use. Install, choose a provider, verify a working chat, and know exactly what to do when something breaks.

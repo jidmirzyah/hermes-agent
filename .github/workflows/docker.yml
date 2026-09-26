@@ -202,11 +202,21 @@ jobs:
       # (The release path DOES pay that cost — see the save steps below —
       # because publish must push the exact tested bytes, not a rebuild.)
       # ---------------------------------------------------------------------
+      # The stamp above marks the checkout as a docker distribution, and PM
+      # then expects the image's packaged runtime. The runner is not the
+      # image: park the stamp while the test toolchain is provisioned, then
+      # put it back — tests/docker compares the image's provenance against it.
+      - name: Park the image install stamp while provisioning the runner toolchain
+        run: mv install-stamp.json "$RUNNER_TEMP/install-stamp.json"
+
       - name: Set up locked Python and test dependencies
         uses: ./.github/actions/setup-pm
         with:
           extras: '["dev"]'
           prune-python-cache: true
+
+      - name: Restore the image install stamp for the docker tests
+        run: mv "$RUNNER_TEMP/install-stamp.json" install-stamp.json
 
       - name: Run docker integration tests
         env:

@@ -18,71 +18,44 @@ def test_release_tag_uses_the_semver_version():
     assert release.release_tag_for_version("0.20.0") == "v0.20.0"
 
 
-def test_last_tag_prefers_semver_over_newer_looking_legacy_calver(monkeypatch):
-    monkeypatch.setattr(
-        release,
-        "git",
-        lambda *_args: "v2026.7.20\nv0.20.0\nv0.19.0",
-    )
+@pytest.fixture
+def release_repo(tmp_path, monkeypatch):
+    from tests.scripts.test_release_build_commit import git
 
-    assert release.get_last_tag() == "v0.20.0"
-
-
-def test_last_tag_falls_back_to_legacy_calver_history(monkeypatch):
-    monkeypatch.setattr(release, "git", lambda *_args: "v2026.7.20\nv2026.7.7")
-
-    assert release.get_last_tag() == "v2026.7.20"
-
-
-class _FakeResult:
-    def __init__(self, stdout: str = "", returncode: int = 0):
-        self.stdout = stdout
-        self.returncode = returncode
-        self.stderr = ""
-
-
-def _remotes(monkeypatch, names: list[str]):
-    monkeypatch.setattr(
-        release, "git_result", lambda *_args, **_kw: _FakeResult("\n".join(names))
-    )
-
-
-def test_single_remote_is_used_without_a_flag(monkeypatch):
-    _remotes(monkeypatch, ["origin"])
-
-    assert release.resolve_push_remote(None) == "origin"
-
-
-def test_multiple_remotes_require_an_explicit_flag(monkeypatch):
-    _remotes(monkeypatch, ["fork", "origin"])
-
-    with pytest.raises(SystemExit, match="pass --remote"):
-        release.resolve_push_remote(None)
-
-
-def test_explicit_remote_is_honored_among_many(monkeypatch):
-    _remotes(monkeypatch, ["fork", "origin"])
-
-    assert release.resolve_push_remote("fork") == "fork"
-
-
-def test_unknown_remote_is_rejected(monkeypatch):
-    _remotes(monkeypatch, ["fork", "origin"])
-
-    with pytest.raises(SystemExit, match="not configured"):
-        release.resolve_push_remote("upstream")
-
-
-def test_no_remotes_is_rejected(monkeypatch):
-    _remotes(monkeypatch, [])
-
-    with pytest.raises(SystemExit, match="no git remotes"):
-        release.resolve_push_remote(None)
-
-
-def test_github_repo_parsed_from_ssh_and_https_urls(tmp_path, monkeypatch):
-    subprocess.run(['git', 'init', '-q', str(tmp_path)], check=True)
+    monkeypatch.setenv('GIT_CONFIG_GLOBAL', str(tmp_path / 'absent-config'))
+    monkeypatch.setenv('GIT_CONFIG_NOSYSTEM', '1')
+    git(tmp_path, 'init', '-q', '-b', 'main')
+    git(tmp_path, 'config', 'user.name', 'Fixture')
+    git(tmp_path, 'config', 'user.email', 'fixture@example.invalid')
+    git(tmp_path, 'commit', '--allow-empty', '-qm', 'fixture')
     monkeypatch.setattr(release, 'REPO_ROOT', tmp_path)
+    return lambda *args: git(tmp_path, *args)
+
+
+def test_real_tag_order_and_remote_selection(release_repo):
+    git = release_repo
+    assert release.get_last_tag() is None and release.get_last_canary_tag() is None
+    for tag in ('v2026.7.7', 'v2026.7.20'):
+        git('tag', tag)
+    assert release.get_last_tag() == 'v2026.7.20'
+    for tag in ('v0.9.0', 'v0.20.0', 'v0.19.0', 'v0.21.0-canary.20260818090000',
+                'v0.21.0-canary.20260818171500', 'v0.21.0-canary.20260818'):
+        git('tag', tag)
+    assert release.get_last_tag() == 'v0.20.0'
+    assert release.get_last_canary_tag() == 'v0.21.0-canary.20260818171500'
+    with pytest.raises(SystemExit, match='no git remotes'):
+        release.resolve_push_remote(None)
+    git('remote', 'add', 'origin', 'https://github.com/o/r')
+    assert release.resolve_push_remote(None) == 'origin'
+    git('remote', 'add', 'fork', 'https://github.com/f/r')
+    with pytest.raises(SystemExit, match='pass --remote'):
+        release.resolve_push_remote(None)
+    assert release.resolve_push_remote('fork') == 'fork'
+    with pytest.raises(SystemExit, match='not configured'):
+        release.resolve_push_remote('upstream')
+
+
+def test_github_repo_parsed_from_ssh_and_https_urls(tmp_path, release_repo):
     urls = {
         "fork": "git@github.com:ethernet8023/hermes-agent.git",
         "origin": "https://github.com/NousResearch/hermes-agent",

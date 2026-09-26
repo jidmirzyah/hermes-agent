@@ -14,7 +14,7 @@
 // <arch>-<channel>-mac.yml; on x64 it requests <channel>-mac.yml. The
 // channel comes from the release TAG (canary tags serve canary feeds) —
 // never hard-coded — and must be identical on both manifest sides
-// (validated in mac-bundled-manifest.cjs).
+// (validated in bundle-manifest.cjs).
 
 import { createHash } from 'node:crypto'
 import fs from 'node:fs'

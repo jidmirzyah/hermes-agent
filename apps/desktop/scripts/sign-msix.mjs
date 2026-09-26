@@ -25,6 +25,7 @@ import fs from 'node:fs'
 import { createRequire } from 'node:module'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { ensureWindowsBundleTools } from './windows-bundle-tools.mjs'
 
 const require = createRequire(import.meta.url)
 
@@ -45,6 +46,7 @@ const STORE_ARTIFACT_PREFIX = 'Store-'
  * variant is excluded too: it cannot carry an ATS signature and does not
  * need one.
  */
+/** @param {string} file @returns {boolean} */
 export function shouldSignFile(file) {
   if (path.basename(file).startsWith(STORE_ARTIFACT_PREFIX)) return false
   const lower = file.toLowerCase()
@@ -53,8 +55,7 @@ export function shouldSignFile(file) {
 
 /**
  * @param {NodeJS.ProcessEnv} [env]
- * @returns {{ type: 'azure' } & Record<string, string | undefined>} the
- *   win.sign azure configuration, composed from the environment.
+ * @returns {{ type: 'azure', endpoint: string | undefined, codeSigningAccountName: string | undefined, certificateProfileName: string | undefined, publisherName: string | undefined }}
  */
 export function azureConfigFromEnv(env = process.env) {
   return {
@@ -87,32 +88,48 @@ async function loadAzureManagerClass() {
   return mod.WindowsSignAzureManager
 }
 
-// One manager per process: electron-builder calls the hook once per file,
-// and the manager memoizes toolset downloads / dlib metadata behind it.
-let managerPromise = null
+// The packager owns both admission and the manager, including concurrent hooks.
+const signingOperation = Symbol('hermes.azureSigningOperation')
+/** @typedef {{ ensureTools?: typeof ensureWindowsBundleTools, loadManager?: typeof loadAzureManagerClass }} SigningDependencies */
 
-function azureManager(packager) {
-  if (managerPromise == null) {
-    managerPromise = (async () => {
-      const WindowsSignAzureManager = await loadAzureManagerClass()
-      // The manager's constructor re-derives the signing config from
-      // packager.platformOptions.sign and throws unless type === 'azure' —
-      // but our config's win.sign is the { type: 'signtool' } hook wiring.
-      // Shim the packager with the azure config composed from the
-      // environment; everything else (config.toolsets, buildResourcesDir,
-      // getTempFile) delegates to the real packager via the prototype.
-      const shim = Object.create(packager)
-      Object.defineProperty(shim, 'platformOptions', {
-        value: { ...packager.platformOptions, sign: azureConfigFromEnv() }
-      })
-      const manager = new WindowsSignAzureManager(shim)
-      // No-op on the modern signtool /dlib path (winCodeSign >= 1.3.0);
-      // installs the legacy PowerShell module otherwise.
-      await manager.initialize()
-      return manager
-    })()
-  }
-  return managerPromise
+/**
+ * @param {import('app-builder-lib').WinPackager} packager
+ * @param {SigningDependencies} dependencies
+ * @returns {Promise<{signFile: (options: {path: string, options: import('app-builder-lib').WindowsConfiguration}) => Promise<boolean>}>}
+ */
+function azureManager(packager, { ensureTools = ensureWindowsBundleTools, loadManager = loadAzureManagerClass }) {
+  /** @type {{value?: ReturnType<typeof azureManager>} | undefined} */
+  const existing = Object.getOwnPropertyDescriptor(packager, signingOperation)
+  if (existing?.value) return existing.value
+  const operation = (async () => {
+    if (process.env.HERMES_PREPARED_PACKAGING) {
+      const tools = await ensureTools({ signing: true, config: packager.config, resourcesDir: packager.buildResourcesDir })
+      const selection = packager.config.toolsets?.winCodeSign
+      const local = { url: `file://${path.join(packager.buildResourcesDir, 'prepared-packaging-tools/winCodeSign')}` }
+      if (JSON.stringify(selection) !== JSON.stringify(local)) {
+        throw new Error('Prepared signing requires the local Windows toolset; run preparation again')
+      }
+      process.env.DOTNET_ROOT = tools.dotnetRoot ?? undefined
+    }
+    const WindowsSignAzureManager = await loadManager()
+    // The manager's constructor re-derives the signing config from
+    // packager.platformOptions.sign and throws unless type === 'azure' —
+    // but our config's win.sign is the { type: 'signtool' } hook wiring.
+    // Shim the packager with the azure config composed from the
+    // environment; everything else (config.toolsets, buildResourcesDir,
+    // getTempFile) delegates to the real packager via the prototype.
+    const shim = Object.create(packager)
+    Object.defineProperty(shim, 'platformOptions', {
+      value: { ...packager.platformOptions, sign: azureConfigFromEnv() }
+    })
+    const manager = new WindowsSignAzureManager(shim)
+    // No-op on the modern signtool /dlib path (winCodeSign >= 1.3.0);
+    // installs the legacy PowerShell module otherwise.
+    await manager.initialize()
+    return manager
+  })()
+  Object.defineProperty(packager, signingOperation, { value: operation })
+  return operation
 }
 
 /**
@@ -122,10 +139,12 @@ function azureManager(packager) {
  * product exe (which must be signed after rcedit, not in the afterPack batch).
  *
  * @param {string} file
- * @param {any} packager WinPackager
+ * @param {import('app-builder-lib').WinPackager} packager
+ * @param {SigningDependencies} [dependencies]
+ * @returns {Promise<void>}
  */
-export async function azureSignFile(file, packager) {
-  const mgr = await azureManager(packager)
+export async function azureSignFile(file, packager, dependencies = {}) {
+  const mgr = await azureManager(packager, dependencies)
   // signFileWithDlib reads only options.path (plus the manager's own
   // signing config), so platformOptions is sufficient here.
   await mgr.signFile({ path: file, options: packager.platformOptions })
@@ -135,7 +154,8 @@ export async function azureSignFile(file, packager) {
  * The electron-builder custom sign hook.
  *
  * @param {{ path: string }} configuration CustomWindowsSignTaskConfiguration
- * @param {any} packager WinPackager
+ * @param {import('app-builder-lib').WinPackager} packager
+ * @returns {Promise<void>}
  */
 export default async function sign(configuration, packager) {
   if (path.basename(configuration.path).startsWith(STORE_ARTIFACT_PREFIX)) {

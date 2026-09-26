@@ -16,40 +16,39 @@
 from __future__ import annotations
 
 import base64
-import io
-import json
+import hashlib
+import html
+import http.client
 import os
-import re
-import socket
+import subprocess
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from types import SimpleNamespace
+from urllib.parse import parse_qs, urlsplit
+from xml.etree import ElementTree as ET
 
 import pytest
 
 from scripts.releases import r2
 from scripts.releases.r2 import (
     auth_header,
-    cache_control_for,
-    canary_doomed_keys,
     canonical_query,
     canonical_request,
-    channel_for_tag,
     channel_page_key_for,
     commit_page_key_for,
     commit_prefix_for,
-    content_type_for,
     encode_key_path,
-    feed_dir_for,
     feed_referenced_keys,
-    parse_list_xml,
     public_base_url,
     public_url_for,
-    publish_feed_uploads,
     referenced_feed_bundle_filenames,
     rfc3986_encode,
-    staging_key_for,
     stale_feed_bundle_keys,
 )
+
+from scripts.releases.r2_scope import R2Scope, channel_public_base
 
 AKID = "AKIDEXAMPLE"
 SECRET = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY"
@@ -64,80 +63,96 @@ def _auth(**kwargs):
     return auth_header(**kwargs)
 
 
+def test_disposable_scope_streams_lists_and_never_touches_production(r2_server, tmp_path, monkeypatch):
+    monkeypatch.setenv("R2_DISPOSABLE_RUN", "98765-1")
+    monkeypatch.setenv("GITHUB_REPOSITORY_ID", "12345")
+    scope = R2Scope.configured()
+    root = f"http://127.0.0.1:{r2_server.server_port}/hermes-releases"
+    monkeypatch.setenv("CLOUDFLARE_R2_PUBLIC_URL", root)
+    key = "releases/channel-builds/" + "a" * 32 + "/payload.bin"
+    r2_server.store[key] = (b"production sentinel", '"production"')
+    path = tmp_path / "payload.bin"
+    payload = b"x" * (5 * 1024 * 1024 + 1)
+    path.write_bytes(payload)
+    creds, base, bucket = r2.credentials()
+    r2.put_object(creds, base, bucket, key, path, NOW, "application/octet-stream",
+                  {"If-None-Match": "*"}, multipart_part_size=5 * 1024 * 1024)
+    # Same immutable bytes are reusable, but only inside this run's prefix.
+    r2.put_object(creds, base, bucket, key, path, NOW, None, {"If-None-Match": "*"})
+    assert r2.get_object(creds, base, bucket, key, NOW) == payload.decode()
+    digest = hashlib.sha256(payload).hexdigest()
+    r2.download_object(creds, base, bucket, key, tmp_path / "signed", NOW,
+                       expected_size=len(payload), expected_sha256=digest)
+    r2.download_public_object(channel_public_base(), key, tmp_path / "public",
+                              expected_size=len(payload), expected_sha256=digest)
+    assert (tmp_path / "signed").read_bytes() == (tmp_path / "public").read_bytes() == payload
+    assert r2.list_objects(prefix="releases/")["keys"] == [key]
+    assert r2_server.store[key][0] == b"production sentinel"
+    assert r2_server.store[scope.key(key)][0] == payload
+    for method, url, headers in r2_server.requests:
+        parsed = urlsplit(url)
+        if parsed.query and "list-type" in parsed.query:
+            assert parsed.path == "/hermes-releases"
+            assert parse_qs(parsed.query)["prefix"] == [scope.prefix + "releases/"]
+        else:
+            assert parsed.path.startswith("/hermes-releases/" + scope.prefix)
+        if method != "GET" or headers.get("authorization"):
+            assert headers["authorization"].startswith("AWS4-HMAC-SHA256 ")
+    before = list(r2_server.requests)
+    for bad in ("../escape", "/releases/x", "releases/%2e%2e/x", "releases//x"):
+        with pytest.raises(ValueError):
+            r2.put_object(creds, base, bucket, bad, b"x", NOW, None)
+    with pytest.raises(ValueError, match="bucket"):
+        r2.list_objects(creds=creds, base=base, bucket=bucket + "/ci-disposable")
+    with pytest.raises(ValueError, match="escaped"):
+        scope.logical_key("releases/channels/stable.json")
+    for bad in (root, "https://elsewhere.example", root + "/ci-disposable/999/98765-1"):
+        with pytest.raises(ValueError, match="authority"):
+            channel_public_base(bad)
+    monkeypatch.setenv("R2_DISPOSABLE_RUN", "../production")
+    with pytest.raises(ValueError):
+        r2.put_object(creds, base, bucket, key, b"x", NOW, None)
+    monkeypatch.delenv("R2_DISPOSABLE_RUN")
+    # Scoping is opt-in via R2_DISPOSABLE_RUN alone: there is no fork isolation
+    # to assert after the fork-conditional dispatch was dropped.
+    assert r2_server.requests == before
+    from scripts.releases.channel_disposable import probe
+    from scripts.releases.channels import ChannelPublisher, R2ChannelStore
+    unscoped = ChannelPublisher(R2ChannelStore(creds, base, bucket), "fixture/fork", root,
+                                authorize=lambda *_: None)
+    with pytest.raises(ValueError, match="disposable"):
+        probe(unscoped, "a" * 40, "1.2.3", "b" * 40)
+    assert r2_server.requests == before
+
+
 # ── SigV4 vectors ───────────────────────────────────────────────────────────
 
-def test_get_vanilla_matches_the_aws_test_suite_vector():
-    authz = _auth(
-        method="GET",
-        host="example.com",
-        path="/",
-        query="",
-        headers={"host": "example.com", "x-amz-date": NOW},
-        payload_hash=EMPTY_SHA,
-        region="us-east-1",
-        service="service",
-    )
-    assert authz == (
-        "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/service/aws4_request, "
-        "SignedHeaders=host;x-amz-date, "
-        "Signature=33399fd3d4a9d6104710c7c04005f7c959f8b1f8bf41b823587ed36b079e453f"
-    )
-
-
-def test_r2_put_payload_matches_botocore():
-    body_hash = "44ce7dd67c959e0d3524ffac1771dfbba87d2b6b4b4e99e42034a8b803f8b072"  # sha256("Welcome to Amazon S3.")
-    host = "abc123.r2.cloudflarestorage.com"
-    authz = _auth(
-        method="PUT",
-        host=host,
-        path="/hermes-releases/HermesBundled-0.28.0-win-x64.msix",
-        query="",
-        headers={"host": host, "x-amz-date": NOW, "x-amz-content-sha256": body_hash},
-        payload_hash=body_hash,
-    )
-    assert authz == (
-        "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/auto/s3/aws4_request, "
-        "SignedHeaders=host;x-amz-content-sha256;x-amz-date, "
-        "Signature=05ba50acfb54042fac330848af50877e5fb477c4f2063c2f77f9cc80855eb1e9"
-    )
-
-
-def test_r2_list_matches_botocore():
-    query = canonical_query(
-        {"list-type": "2", "prefix": "HermesBundled-0.28.0-", "max-keys": "1000"}
-    )
-    assert query == "list-type=2&max-keys=1000&prefix=HermesBundled-0.28.0-"
-    host = "abc123.r2.cloudflarestorage.com"
-    authz = _auth(
-        method="GET",
-        host=host,
-        path="/hermes-releases",
-        query=query,
-        headers={"host": host, "x-amz-date": NOW, "x-amz-content-sha256": EMPTY_SHA},
-        payload_hash=EMPTY_SHA,
-    )
-    assert authz == (
-        "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/auto/s3/aws4_request, "
-        "SignedHeaders=host;x-amz-content-sha256;x-amz-date, "
-        "Signature=3ec423c452a318664c85fbcc25667ad07201aedce688e3bb6b345b4baaa39d90"
-    )
-
-
-def test_r2_delete_matches_botocore():
-    host = "abc123.r2.cloudflarestorage.com"
-    authz = _auth(
-        method="DELETE",
-        host=host,
-        path="/hermes-releases/HermesBundled-0.28.0-canary.20260818-win-arm64.msix",
-        query="",
-        headers={"host": host, "x-amz-date": NOW, "x-amz-content-sha256": EMPTY_SHA},
-        payload_hash=EMPTY_SHA,
-    )
-    assert authz == (
-        "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/auto/s3/aws4_request, "
-        "SignedHeaders=host;x-amz-content-sha256;x-amz-date, "
-        "Signature=ec5ccb76f701193b28aaca052cabbf2f084e9c71ffc64b872fa51d4e70dc6e55"
-    )
+@pytest.mark.parametrize('method,path,query,payload,scope,signature', [
+    ('GET', '/', {}, EMPTY_SHA, 'us-east-1/service',
+     '33399fd3d4a9d6104710c7c04005f7c959f8b1f8bf41b823587ed36b079e453f'),
+    ('PUT', '/hermes-releases/HermesBundled-0.28.0-win-x64.msix', {},
+     '44ce7dd67c959e0d3524ffac1771dfbba87d2b6b4b4e99e42034a8b803f8b072', 'auto/s3',
+     '05ba50acfb54042fac330848af50877e5fb477c4f2063c2f77f9cc80855eb1e9'),
+    ('GET', '/hermes-releases', {'list-type': '2', 'prefix': 'HermesBundled-0.28.0-', 'max-keys': '1000'},
+     EMPTY_SHA, 'auto/s3', '3ec423c452a318664c85fbcc25667ad07201aedce688e3bb6b345b4baaa39d90'),
+    ('DELETE', '/hermes-releases/HermesBundled-0.28.0-canary.20260818-win-arm64.msix', {},
+     EMPTY_SHA, 'auto/s3', 'ec5ccb76f701193b28aaca052cabbf2f084e9c71ffc64b872fa51d4e70dc6e55'),
+])
+def test_independent_sigv4_vectors(method, path, query, payload, scope, signature):
+    host = 'example.com' if scope == 'us-east-1/service' else 'abc123.r2.cloudflarestorage.com'
+    headers = {'host': host, 'x-amz-date': NOW}
+    signed = 'host;x-amz-date'
+    if scope == 'auto/s3':
+        headers['x-amz-content-sha256'] = payload
+        signed = 'host;x-amz-content-sha256;x-amz-date'
+    encoded = canonical_query(query)
+    if query:
+        assert encoded == 'list-type=2&max-keys=1000&prefix=HermesBundled-0.28.0-'
+    region, service = scope.split('/')
+    assert _auth(method=method, host=host, path=path, query=encoded, headers=headers,
+                 payload_hash=payload, region=region, service=service) == (
+        f'AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/{scope}/aws4_request, '
+        f'SignedHeaders={signed}, Signature={signature}')
 
 
 # ── Encoding / layout helpers ───────────────────────────────────────────────
@@ -151,48 +166,6 @@ def test_encode_key_path_encodes_segment_wise_preserves_separators():
     assert encode_key_path("HermesBundled-0.28.0-win-x64.msix") == "HermesBundled-0.28.0-win-x64.msix"
     assert encode_key_path("a b/c d") == "a%20b/c%20d"
 
-
-def test_parse_list_xml_extracts_keys_truncation_token_entities():
-    xml = (
-        '<?xml version="1.0" encoding="UTF-8"?>\n'
-        '<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">\n'
-        "  <Name>hermes-releases</Name>\n  <Prefix></Prefix>\n"
-        "  <KeyCount>3</KeyCount>\n  <MaxKeys>1000</MaxKeys>\n"
-        "  <IsTruncated>true</IsTruncated>\n"
-        "  <Contents><Key>HermesBundled-0.28.0-win-x64.msix</Key>"
-        "<LastModified>2026-08-18T00:00:00Z</LastModified><Size>123</Size></Contents>\n"
-        "  <Contents><Key>a&amp;b.msix</Key>"
-        "<LastModified>2026-08-18T00:00:00Z</LastModified><Size>1</Size></Contents>\n"
-        "  <Contents><Key>latest.yml</Key>"
-        "<LastModified>2026-08-18T00:00:00Z</LastModified><Size>2</Size></Contents>\n"
-        "  <NextContinuationToken>abc+def/=</NextContinuationToken>\n"
-        "</ListBucketResult>"
-    )
-    parsed = parse_list_xml(xml)
-    assert parsed["keys"] == ["HermesBundled-0.28.0-win-x64.msix", "a&b.msix", "latest.yml"]
-    assert parsed["truncated"] is True
-    assert parsed["nextToken"] == "abc+def/="
-
-
-def test_canary_doomed_keys_dates_by_the_key_suffix():
-    keys = [
-        "releases/tag/v0.28.0/HermesBundled-0.28.0-win-x64.msix",  # stable — never doomed
-        "releases/tag/v0.28.0-canary.20260801/HermesBundled-0.28.0-canary.20260801-win-x64.msix",
-        "releases/tag/v0.28.0-canary.20260818/HermesBundled-0.28.0-canary.20260818-win-x64.msix",  # today — kept
-        "releases/tag/v0.28.0-canary.20260801/HermesBundled-0.28.0-canary.20260801-win-x64.msix.blockmap",
-        "latest.yml",
-        "canary.yml",
-    ]
-    assert canary_doomed_keys(keys, "20260814") == [
-        "releases/tag/v0.28.0-canary.20260801/HermesBundled-0.28.0-canary.20260801-win-x64.msix",
-        "releases/tag/v0.28.0-canary.20260801/HermesBundled-0.28.0-canary.20260801-win-x64.msix.blockmap",
-    ]
-
-
-def test_channel_for_tag_maps_stable_vs_canary():
-    assert channel_for_tag("v0.28.0") == "stable"
-    assert channel_for_tag("v0.28.0-canary.20260818101010") == "canary"
-    assert channel_for_tag("v0.28.0-canary.20260818") == "canary"
 
 
 def test_relative_artifact_path_rejects_windows_reserved_names_without_ntpath(monkeypatch):
@@ -224,13 +197,6 @@ def test_relative_artifact_path_rejects_windows_reserved_names_without_ntpath(mo
         assert r2.relative_artifact_path(good) == good
 
 
-def test_staging_key_and_feed_dir_layout_keys():
-    assert staging_key_for("v0.28.0", "HermesBundled-0.28.0-win-x64.msix") == (
-        "releases/tag/v0.28.0/HermesBundled-0.28.0-win-x64.msix"
-    )
-    assert feed_dir_for("win32", "stable") == "releases/win32/stable"
-    assert feed_dir_for("darwin", "canary") == "releases/darwin/canary"
-
 
 def test_download_page_keys_and_public_urls():
     assert channel_page_key_for("stable") == "releases/stable/index.html"
@@ -257,38 +223,43 @@ def test_public_base_url_precedence(monkeypatch):
     assert public_base_url("https://explicit.example.com/") == "https://explicit.example.com"
 
 
-def test_content_type_for_maps_msix_and_appinstaller():
-    assert content_type_for("HermesBundled-0.28.0-win-x64.msix") == "application/msix"
-    assert content_type_for("HermesBundled-0.28.0-win.msixbundle") == "application/msixbundle"
-    assert content_type_for("stable.appinstaller") == "application/appinstaller"
-    assert content_type_for("releases/stable/index.html") == "text/html; charset=utf-8"
-    assert content_type_for("HermesBundled-0.28.0-mac-x64.dmg") is None
-    assert content_type_for("latest-mac.yml") is None
-    # Case-insensitive on the suffix.
-    assert content_type_for("X.APPINSTALLER") == "application/appinstaller"
-    assert content_type_for("INDEX.HTML") == "text/html; charset=utf-8"
+def test_channel_public_base_defaults_to_production(monkeypatch):
+    # Unscoped channel administration names the same documented production
+    # origin the commit-build path falls back to; the public URL is not a
+    # secret, so a local command should not have to hand-set it.
+    monkeypatch.delenv("CLOUDFLARE_R2_PUBLIC_URL", raising=False)
+    monkeypatch.delenv("R2_DISPOSABLE_RUN", raising=False)
+    assert channel_public_base() == "https://hermes-assets.nousresearch.com"
+    monkeypatch.setenv("CLOUDFLARE_R2_PUBLIC_URL", "https://cdn.example.com")
+    assert channel_public_base() == "https://cdn.example.com"
+    assert channel_public_base("https://explicit.example.com/") == "https://explicit.example.com"
 
 
-def test_apt_mutable_metadata_revalidates_immutable_bytes_cache():
-    feed = "releases/termux/canary"
-    for name in [
-        "key.asc",
-        "dists/hermes-canary/InRelease",
-        "dists/hermes-canary/Release",
-        "dists/hermes-canary/main/binary-aarch64/Packages.gz",
-    ]:
-        assert cache_control_for(f"{feed}/{name}") == "no-store"
-    assert cache_control_for(f"{feed}/dists/hermes-canary/main/binary-aarch64/by-hash/SHA256/abcd") == (
-        "public, max-age=31536000, immutable"
-    )
-    assert cache_control_for(f"{feed}/pool/h/hermes-agent_1.2.3_aarch64.deb") == (
-        "public, max-age=31536000, immutable"
-    )
-    assert cache_control_for("releases/win32/stable/stable.appinstaller") == "no-store"
-    # Downloads pages are mutable pointers, like feed manifests.
-    assert cache_control_for("releases/stable/index.html") == "no-store"
-    assert cache_control_for("releases/canary/index.html") == "no-store"
-    assert cache_control_for(f"releases/commit/{'a' * 40}/index.html") == "no-store"
+@pytest.mark.parametrize('key,content_type,immutable', [
+    ('releases/tag/v1.2.3/app.msix', 'application/msix', None),
+    ('releases/tag/v1.2.3/app.msixbundle', 'application/msixbundle', None),
+    ('releases/win32/stable/X.APPINSTALLER', 'application/appinstaller', None),
+    ('releases/win32/stable/stable.appinstaller', 'application/appinstaller', False),
+    ('releases/stable/INDEX.HTML', 'text/html; charset=utf-8', False),
+    ('releases/canary/index.html', 'text/html; charset=utf-8', False),
+    (f'releases/commit/{"a" * 40}/index.html', 'text/html; charset=utf-8', False),
+    ('releases/tag/v1.2.3/app.dmg', None, None),
+    ('releases/tag/v1.2.3/latest-mac.yml', None, None),
+    ('releases/termux/canary/key.asc', 'text/plain', False),
+    ('releases/termux/canary/dists/hermes-canary/InRelease', 'text/plain', False),
+    ('releases/termux/canary/dists/hermes-canary/Release', 'text/plain', False),
+    ('releases/termux/canary/dists/hermes-canary/main/binary-aarch64/Packages.gz', 'application/gzip', False),
+    ('releases/termux/canary/dists/hermes-canary/main/binary-aarch64/by-hash/SHA256/abcd', None, True),
+    ('releases/termux/canary/pool/h/package.deb', 'application/vnd.debian.binary-package', True),
+])
+def test_object_headers_on_real_upload(tmp_path, r2_server, key, content_type, immutable):
+    file = tmp_path / 'content'
+    file.write_bytes(b'header transport fixture')
+    r2.put(tag='', key=key, file=file, key_is_full=True)
+    assert r2_server.store[key][0] == file.read_bytes()
+    headers = next(headers for method, _, headers in r2_server.requests if method == 'PUT')
+    assert headers.get('Content-Type') == content_type
+    assert headers.get('Cache-Control') == {None: None, False: 'no-store', True: 'public, max-age=31536000, immutable'}[immutable]
 
 
 def test_canonical_request_reads_mixed_case_header_values():
@@ -308,47 +279,6 @@ def test_canonical_request_reads_mixed_case_header_values():
     assert "content-type:application/msix" in canon
     assert "undefined" not in canon
     assert "content-type;host;x-amz-content-sha256;x-amz-date" in canon
-
-
-# ── C22: artifact first, feed pointer last ──────────────────────────────────
-
-def test_publish_feed_uploads_bundle_before_pointer():
-    calls = []
-    publish_feed_uploads(
-        {
-            "channelDir": "releases/win32/canary",
-            "appinstallerName": "canary.appinstaller",
-            "bundleFilename": "HermesBundled-0.27.2.9-win.msixbundle",
-            "bundleFile": "C:/rel/HermesBundled-0.27.2.9-win.msixbundle",
-            "appinstallerFile": "C:/rel/canary.appinstaller",
-        },
-        lambda key, file: calls.append([key, file]),
-    )
-    assert calls == [
-        ["releases/win32/canary/HermesBundled-0.27.2.9-win.msixbundle", "C:/rel/HermesBundled-0.27.2.9-win.msixbundle"],
-        ["releases/win32/canary/canary.appinstaller", "C:/rel/canary.appinstaller"],
-    ]
-
-
-def test_publish_feed_uploads_never_writes_pointer_when_bundle_fails():
-    calls = []
-
-    def upload(key, _file):
-        calls.append(key)
-        raise RuntimeError("R2 PUT -> 503")
-
-    with pytest.raises(RuntimeError):
-        publish_feed_uploads(
-            {
-                "channelDir": "releases/win32/stable",
-                "appinstallerName": "stable.appinstaller",
-                "bundleFilename": "HermesBundled-0.28.0.0-win.msixbundle",
-                "bundleFile": "bundle",
-                "appinstallerFile": "feed",
-            },
-            upload,
-        )
-    assert calls == ["releases/win32/stable/HermesBundled-0.28.0.0-win.msixbundle"]
 
 
 # ── C22: canary feed-dir retention (fail-closed, keep-days grace) ───────────
@@ -385,86 +315,16 @@ def test_feed_referenced_keys_protects_bundle_and_absolute_tag_uris():
 
 
 CANARY_DIR = "releases/win32/canary"
-OLD_MS = 1785542400  # 2026-08-01T00:00:00Z
-FRESH_MS = 1788480000  # 2026-09-03T00:00:00Z
 CUTOFF_MS = 1787356800  # 2026-08-21T00:00:00Z
-
-
-def _canary_keys(extra=()):
-    return [
-        f"{CANARY_DIR}/canary.appinstaller",
-        f"{CANARY_DIR}/HermesBundled-0.27.2.9-win.msixbundle",  # referenced
-        f"{CANARY_DIR}/HermesBundled-0.27.1.12000-win.msixbundle",  # stale
-        f"{CANARY_DIR}/HermesBundled-0.27.2.99-win.msixbundle",  # uploaded, not yet pointed
-        "releases/win32/stable/stable.appinstaller",
-        "releases/win32/stable/HermesBundled-0.28.0.0-win.msixbundle",  # referenced
-        "releases/win32/stable/HermesBundled-0.27.0.0-win.msixbundle",  # stale stable
-        *extra,
-    ]
-
-
-def _last_modified_for(keys, overrides=None):
-    lm = {k: OLD_MS for k in keys}
-    lm.update(overrides or {})
-    return lm
-
-
-def test_stale_feed_bundle_keys_old_unreferenced_doomed_referenced_and_fresh_kept():
-    keys = _canary_keys()
-    lm = _last_modified_for(keys, {f"{CANARY_DIR}/HermesBundled-0.27.2.99-win.msixbundle": FRESH_MS})
-    doomed = stale_feed_bundle_keys(keys, {CANARY_DIR: [CANARY_FEED_XML]}, lm, CUTOFF_MS)
-    assert doomed == [f"{CANARY_DIR}/HermesBundled-0.27.1.12000-win.msixbundle"]
-
-
-def test_stale_feed_bundle_keys_stable_dirs_never_pruned():
-    keys = _canary_keys()
-    lm = _last_modified_for(keys, {f"{CANARY_DIR}/HermesBundled-0.27.2.99-win.msixbundle": FRESH_MS})
-    stable_feed = CANARY_FEED_XML.replace("0.27.2.9", "0.28.0.0").replace(
-        "HermesBundled-0.27.2.9-win", "HermesBundled-0.28.0.0-win"
-    )
-    feeds = {CANARY_DIR: [CANARY_FEED_XML], "releases/win32/stable": [stable_feed]}
-    doomed = stale_feed_bundle_keys(keys, feeds, lm, CUTOFF_MS)
-    assert doomed == [f"{CANARY_DIR}/HermesBundled-0.27.1.12000-win.msixbundle"]
-
-
-@pytest.mark.parametrize(
-    "bad",
-    [
-        "",
-        "<html>boom</html>",
-        None,
-        '<Foo Uri="https://x/HermesBundled-1-win.msixbundle" />',
-        '<MainPackage Uri="https://x/old.msixbundle" />',
-        "<AppInstaller><MainBundle Uri=\"https://x/old.msixbundle\" />",
-    ],
-)
-def test_stale_feed_bundle_keys_malformed_manifest_blocks_dir(bad):
-    keys = _canary_keys()
-    assert stale_feed_bundle_keys(keys, {CANARY_DIR: [bad]}, _last_modified_for(keys), CUTOFF_MS) == []
-
-
-def test_stale_feed_bundle_keys_union_protected_one_bad_blocks_all():
-    second = CANARY_FEED_XML.replace("0.27.2.9", "0.27.3.0").replace(
-        "HermesBundled-0.27.2.9-win", "HermesBundled-0.27.3.0-win"
-    )
-    extra = [f"{CANARY_DIR}/second.appinstaller", f"{CANARY_DIR}/HermesBundled-0.27.3.0-win.msixbundle"]
-    keys = _canary_keys(extra)
-    lm = _last_modified_for(keys, {f"{CANARY_DIR}/HermesBundled-0.27.2.99-win.msixbundle": FRESH_MS})
-    # Union of both feeds: both referenced bundles kept, the rest pruned.
-    assert stale_feed_bundle_keys(keys, {CANARY_DIR: [CANARY_FEED_XML, second]}, lm, CUTOFF_MS) == [
-        f"{CANARY_DIR}/HermesBundled-0.27.1.12000-win.msixbundle"
-    ]
-    # ONE unreadable/unrecognized manifest in the dir blocks feed retention.
-    assert stale_feed_bundle_keys(keys, {CANARY_DIR: [CANARY_FEED_XML, None]}, lm, CUTOFF_MS) == []
-    assert stale_feed_bundle_keys(keys, {CANARY_DIR: [CANARY_FEED_XML, ""]}, lm, CUTOFF_MS) == []
 
 
 @pytest.mark.parametrize("unknown", [None, float("nan"), float("inf")])
 def test_stale_feed_bundle_keys_missing_lastmodified_keeps_object(unknown):
-    keys = _canary_keys()
+    keys = [f'{CANARY_DIR}/unreferenced.msixbundle']
     metadata = {key: unknown for key in keys}
     doomed = stale_feed_bundle_keys(keys, {CANARY_DIR: [CANARY_FEED_XML]}, metadata, CUTOFF_MS)
     assert doomed == []
+    assert stale_feed_bundle_keys(keys, {CANARY_DIR: [None]}, {keys[0]: 0}, CUTOFF_MS) == []
 
 
 # ── Real loopback HTTP protocol tests ───────────────────────────────────────
@@ -487,13 +347,13 @@ class _R2StubHandler(BaseHTTPRequestHandler):
         store = self.server.store  # type: ignore[attr-defined]
         self.server.requests.append(("GET", self.path, dict(self.headers)))  # type: ignore[attr-defined]
         if "list-type=2" in self.path:
-            body = self.server.listing_xml()  # type: ignore[attr-defined]
+            body = self.server.listing_xml(parse_qs(urlsplit(self.path).query))  # type: ignore[attr-defined]
             self._send(200, body, {"content-type": "application/xml"})
             return
         key = self._key()
         if key in store:
-            body, ctype = store[key]
-            headers = {"etag": '"abc"'}
+            body, etag = store[key]
+            headers = {"etag": etag}
             if self.headers.get("Range"):
                 headers["content-range"] = f"bytes 0-0/{len(body)}"
                 self._send(206, body[:1], headers)
@@ -524,18 +384,75 @@ class _R2StubHandler(BaseHTTPRequestHandler):
         if self.headers.get("Transfer-Encoding", "").lower() == "chunked":
             data = self._read_chunked()
         key = self._key()
+        query = parse_qs(urlsplit(self.path).query)
+        if key == getattr(server, 'fail_put', None):
+            return self._send(400, b'Interrupted upload')
+        if "partNumber" in query:
+            state = server.multipart
+            assert query["uploadId"] == ["a+/="]
+            assert self.headers["x-amz-content-sha256"] == hashlib.sha256(data).hexdigest()
+            number = int(query["partNumber"][0])
+            state.attempts[number] = state.attempts.get(number, 0) + 1
+            if state.failure == "part":
+                return self._send(400, b"InvalidRequest")
+            if number == 2 and state.attempts[number] == 1:
+                return self._send(503, b"")
+            etag = '"' + hashlib.md5(data).hexdigest() + '"'
+            state.parts[number] = (data, etag)
+            return self._send(200, b"", {"ETag": etag})
         if self.headers.get("If-None-Match") == "*" and key in server.store:
             self._send(412, b"Precondition Failed")
             return
-        if self.headers.get("If-Match") and self.headers["If-Match"] != server.store.get(key, (b"",))[1]:
+        if self.headers.get('If-Match') and key == getattr(server, 'race_key', None):
+            server.store[key] = (server.store[key][0], '"raced"')
+        if self.headers.get("If-Match") and self.headers["If-Match"] != server.store.get(key, (b"", None))[1]:
             self._send(412, b"Precondition Failed")
             return
         server.store[key] = (data, self.headers.get("If-Match", '"new"'))
+        if key == getattr(server, 'corrupt_put', None):
+            # Keep HEAD size verification valid; only the readback content lies.
+            server.store[key] = (b'x' * len(data), '"corrupt"')
         self._send(200, b"")
+
+    def do_POST(self):
+        server, state = self.server, self.server.multipart
+        server.requests.append(("POST", self.path, dict(self.headers)))
+        query = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
+        body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        assert self.headers["x-amz-content-sha256"] == hashlib.sha256(body).hexdigest()
+        key = self._key()
+        if "uploads" in query:
+            state.created += 1
+            state.parts = {}
+            if state.reject_existing and key in server.store:
+                return self._send(412, b"")
+            return self._send(200, b'<InitiateMultipartUploadResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><UploadId>a+/=</UploadId></InitiateMultipartUploadResult>')
+        assert query["uploadId"] == ["a+/="]
+        state.completed += 1
+        if state.failure == "complete" or (state.failure == "transient" and state.completed == 1):
+            code = "InvalidPart" if state.failure == "complete" else "InternalError"
+            return self._send(200, f"<Error><Code>{code}</Code></Error>")
+        if state.failure == "disconnect" and state.completed == 1:
+            self.close_connection = True
+            return
+        if self.headers.get("If-None-Match") == "*" and key in server.store:
+            return self._send(412, b"")
+        parts = ET.fromstring(body).findall("{*}Part")
+        numbers = [int(part.findtext("{*}PartNumber", "0")) for part in parts]
+        assert numbers == sorted(state.parts)
+        assert [part.findtext("{*}ETag") for part in parts] == [state.parts[n][1] for n in numbers]
+        server.store[key] = (b"".join(state.parts[n][0] for n in numbers), '"multipart"')
+        if state.failure == "lost-response" and state.completed == 1:
+            self.close_connection = True
+            return
+        self._send(200, b'<CompleteMultipartUploadResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><ETag>done</ETag></CompleteMultipartUploadResult>')
 
     def do_DELETE(self):
         server = self.server  # type: ignore[attr-defined]
         server.requests.append(("DELETE", self.path, dict(self.headers)))
+        if "uploadId=" in self.path:
+            server.multipart.aborted += 1
+            return self._send(204, b"")
         key = self._key()
         server.store.pop(key, None)
         self._send(204, b"")
@@ -567,12 +484,24 @@ def r2_server(monkeypatch):
     server = ThreadingHTTPServer(("127.0.0.1", 0), _R2StubHandler)
     server.store = {}
     server.requests = []
+    server.page_size = 1000
+    server.last_modified = {}
+    server.multipart = SimpleNamespace(parts={}, attempts={}, failure=None, created=0,
+                                       completed=0, aborted=0, reject_existing=False)
 
-    def listing_xml():
-        parts = ["<?xml version='1.0'?><ListBucketResult><IsTruncated>false</IsTruncated>"]
-        for key, (body, _etag) in server.store.items():
-            lm = "2026-08-01T00:00:00Z"
-            parts.append(f"<Contents><Key>{key}</Key><LastModified>{lm}</LastModified></Contents>")
+    def listing_xml(query):
+        keys = sorted(key for key in server.store if key.startswith(query.get('prefix', [''])[0]))
+        token = query.get('continuation-token', ['0'])[0]
+        start = int(token.removeprefix('page+/='))
+        end = start + server.page_size
+        truncated = end < len(keys)
+        parts = [f"<ListBucketResult><IsTruncated>{str(truncated).lower()}</IsTruncated>"]
+        for key in keys[start:end]:
+            lm = server.last_modified.get(key, '2026-08-01T00:00:00Z')
+            modified = f'<LastModified>{lm}</LastModified>' if lm is not None else ''
+            parts.append(f'<Contents><Key>{html.escape(key)}</Key>{modified}</Contents>')
+        if truncated:
+            parts.append(f'<NextContinuationToken>page+/={end}</NextContinuationToken>')
         parts.append("</ListBucketResult>")
         return "".join(parts)
 
@@ -588,6 +517,65 @@ def r2_server(monkeypatch):
     yield server
     server.shutdown()
     server.server_close()
+    thread.join(timeout=5)
+
+
+@pytest.mark.parametrize("failure", [None, "part", "complete", "transient", "disconnect", "lost-response"])
+def test_multipart_publication_is_atomic_and_retryable(r2_server, tmp_path, failure):
+    path = tmp_path / "bundle.msixbundle"
+    payload = b"a" * (5 * 1024 * 1024) + b"b" * (5 * 1024 * 1024) + b"last"
+    path.write_bytes(payload)
+    state = r2_server.multipart
+    state.failure, state.reject_existing = failure, failure is not None
+    key = "releases/stable/bundle.msixbundle"
+    creds, base, bucket = r2.credentials()
+
+    def upload():
+        r2.put_object(creds, base, bucket, key, path, r2.amz_timestamp(),
+                      "application/msixbundle", {"If-None-Match": "*"}, multipart_part_size=5 * 1024 * 1024)
+
+    if failure in {"part", "complete"}:
+        with pytest.raises(r2.R2RequestError):
+            upload()
+        assert key not in r2_server.store and state.aborted == 1
+        assert not any(method == "HEAD" for method, _, _ in r2_server.requests)
+        return
+    upload()
+    assert r2_server.store[key][0] == payload
+    assert state.attempts[2] >= 2
+    assert state.created == (2 if failure else 1)
+    for method, _, headers in r2_server.requests:
+        assert headers["authorization"].startswith("AWS4-HMAC-SHA256 ")
+        if method == "POST":
+            assert headers["If-None-Match"] == "*"
+    metadata = next(headers for method, url, headers in r2_server.requests if "uploads=" in url)
+    assert metadata["Content-Type"] == "application/msixbundle" and metadata["Cache-Control"] == "no-store"
+    upload()
+    path.write_bytes(payload[:-1] + b"!")
+    with pytest.raises(ValueError, match="checksum mismatch"):
+        upload()
+    assert r2_server.store[key][0] == payload
+
+
+def test_cli_reuses_an_immutable_multipart_object(r2_server, tmp_path):
+    path = tmp_path / "bundle.msixbundle"
+    payload = b"x" * (64 * 1024 * 1024 + 1)
+    path.write_bytes(payload)
+    r2_server.store["releases/tag/v1.0.0/bundle.msixbundle"] = (payload, '"existing"')
+    r2_server.multipart.reject_existing = True
+    # Redirect only sockets: CLI and sibling imports must keep one exception identity.
+    script = (
+        "import http.client, runpy, sys\n"
+        f"http.client.HTTPSConnection = lambda *a, **k: http.client.HTTPConnection('127.0.0.1', {r2_server.server_port})\n"
+        "sys.argv = ['r2', *sys.argv[1:]]\n"
+        "runpy.run_module('scripts.releases.r2', run_name='__main__')\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script, "put", "--tag", "v1.0.0", "--key", path.name, "--file", str(path), "--immutable"],
+        cwd=Path(__file__).resolve().parents[2], env=os.environ, capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert [method for method, _, _ in r2_server.requests] == ["POST", "GET", "HEAD"]
 
 
 def test_put_streams_a_file_and_verifies_size(r2_server):
@@ -671,57 +659,50 @@ def test_put_immutable_conflict_with_corrupt_remote_fails(r2_server):
     assert r2_server.store[key][0] == b"corrupt different bytes"
 
 
-def test_list_prints_keys_and_paginates(r2_server, capsys):
-    r2_server.store["releases/tag/v0.28.0/a.msix"] = (b"x", '"e"')
-    r2_server.store["releases/tag/v0.28.0/b.yml"] = (b"y", '"e"')
-    r2.list_objects(prefix="releases/tag/v0.28.0/")
-    # (list_objects returns; the CLI prints)
-    from scripts.releases.r2 import list_objects as _lo
-
-    result = _lo(prefix="releases/tag/v0.28.0/")
-    assert sorted(result["keys"]) == ["releases/tag/v0.28.0/a.msix", "releases/tag/v0.28.0/b.yml"]
-    assert "list-type=2" in [r for r in r2_server.requests if r[0] == "GET"][0][1]
-
-
-def test_prune_canaries_dry_run_issues_no_delete(r2_server, capsys, monkeypatch):
-    old_bundle = f"{CANARY_DIR}/HermesBundled-0.27.1.12000-win.msixbundle"
-    referenced = f"{CANARY_DIR}/HermesBundled-0.27.2.9-win.msixbundle"
-    r2_server.store[f"{CANARY_DIR}/canary.appinstaller"] = (CANARY_FEED_XML.encode(), '"e"')
-    r2_server.store[referenced] = (b"bundle", '"e"')
-    r2_server.store[old_bundle] = (b"stale", '"e"')
-    r2_server.store["releases/tag/v0.27.2-canary.20260801000000/old.zip"] = (b"z", '"e"')
-
-    monkeypatch.setattr(r2.time, "time", lambda: 1788547200.0)  # 2026-09-04
-    r2.prune(keep_days=14, dry_run=True)
-    out = capsys.readouterr().out
-    assert f"would delete r2:{old_bundle}" in out
-    assert "would delete r2:releases/tag/v0.27.2-canary.20260801000000/old.zip" in out
-    assert f"would delete r2:{referenced}" not in out
-    assert "would delete" not in out.split("appinstaller")[0] if ".appinstaller" in out else True
-    assert not any(r[0] == "DELETE" for r in r2_server.requests)
+def test_list_cli_paginates_and_decodes_keys(r2_server, capsys):
+    r2_server.page_size = 1
+    keys = ['releases/tag/v1.2.3/a&b.msix', 'releases/tag/v1.2.3/nested space/b.yml']
+    r2_server.store.update({key: (b'x', '"e"') for key in keys})
+    r2_server.store['outside.bin'] = (b'outside', '"e"')
+    r2_server.last_modified[keys[0]] = '2026-08-18T00:00:00.123Z'
+    result = r2.list_objects(prefix='releases/tag/v1.2.3/')
+    assert result == {'keys': keys, 'lastModified': {keys[0]: 1787011200, keys[1]: 1785542400}}
+    queries = [parse_qs(urlsplit(path).query) for method, path, _ in r2_server.requests if method == 'GET']
+    assert len(queries) == 2 and queries[1]['continuation-token'] == ['page+/=1']
+    r2.main(['list', '--prefix', 'releases/tag/v1.2.3/'])
+    assert capsys.readouterr().out.splitlines() == keys
 
 
-def test_prune_canaries_real_delete_only_the_doomed(r2_server, capsys, monkeypatch):
-    old_bundle = f"{CANARY_DIR}/HermesBundled-0.27.1.12000-win.msixbundle"
-    referenced = f"{CANARY_DIR}/HermesBundled-0.27.2.9-win.msixbundle"
-    r2_server.store[f"{CANARY_DIR}/canary.appinstaller"] = (CANARY_FEED_XML.encode(), '"e"')
-    r2_server.store[referenced] = (b"bundle", '"e"')
-    r2_server.store[old_bundle] = (b"stale", '"e"')
-    monkeypatch.setattr(r2.time, "time", lambda: 1788547200.0)  # 2026-09-04
-    r2.prune(keep_days=14, dry_run=False)
-    assert old_bundle not in r2_server.store
-    assert referenced in r2_server.store
-    assert f"{CANARY_DIR}/canary.appinstaller" in r2_server.store
-
-
-def test_prune_fails_closed_when_manifest_unreadable(r2_server, monkeypatch):
-    r2_server.store[f"{CANARY_DIR}/canary.appinstaller"] = (b"<html>ServiceUnavailable</html>", '"e"')
-    r2_server.store[f"{CANARY_DIR}/HermesBundled-0.27.1.12000-win.msixbundle"] = (b"stale", '"e"')
-    monkeypatch.setattr(r2.time, "time", lambda: 1788547200.0)  # 2026-09-04
-    with pytest.raises(RuntimeError, match="refusing to prune"):
-        r2.prune(keep_days=14, dry_run=False)
-    # Nothing was deleted.
-    assert f"{CANARY_DIR}/HermesBundled-0.27.1.12000-win.msixbundle" in r2_server.store
+@pytest.mark.parametrize('bad_feed', [None, b'', b'<html>boom</html>',
+    b'<Foo Uri="https://x/old.msixbundle" />', b'<MainPackage Uri="https://x/old.msixbundle" />',
+    b'<AppInstaller><MainBundle Uri="https://x/old.msixbundle" />'])
+def test_real_prune_retention_and_second_feed_failure(r2_server, capsys, bad_feed):
+    tag_reference = 'releases/tag/v0.27.2-canary.20260801/live.msixbundle'
+    second = f'<AppInstaller><MainBundle Uri="https://cdn.example/{tag_reference}" /></AppInstaller>'
+    doomed = {f'{CANARY_DIR}/old.msixbundle', 'releases/tag/v0.27.2-canary.20260801000000/old.zip'}
+    kept = {f'{CANARY_DIR}/HermesBundled-0.27.2.9-win.msixbundle', f'{CANARY_DIR}/live.msixbundle',
+            f'{CANARY_DIR}/fresh.msixbundle', f'{CANARY_DIR}/unknown.msixbundle', tag_reference,
+            'releases/win32/stable/old.msixbundle', 'releases/unknown/old.msixbundle',
+            'releases/tag/v0.28.0/old.zip', 'releases/tag/v0.28.0-canary.20260904/today.zip'}
+    r2_server.store.update({key: (b'artifact', '"e"') for key in doomed | kept})
+    r2_server.store[f'{CANARY_DIR}/canary.appinstaller'] = (CANARY_FEED_XML.encode(), '"e"')
+    r2_server.store[f'{CANARY_DIR}/second.appinstaller'] = (second.encode() if bad_feed is None else bad_feed, '"e"')
+    r2_server.store['releases/win32/stable/stable.appinstaller'] = (CANARY_FEED_XML.encode(), '"e"')
+    r2_server.last_modified[f'{CANARY_DIR}/fresh.msixbundle'] = '2026-09-03T00:00:00Z'
+    r2_server.last_modified[f'{CANARY_DIR}/unknown.msixbundle'] = None
+    r2_server.page_size = 3
+    before = dict(r2_server.store)
+    if bad_feed is not None:
+        with pytest.raises(RuntimeError, match='refusing to prune'):
+            r2.prune(keep_days=14, now_epoch=1788547200)
+        assert r2_server.store == before
+        assert not any(method == 'DELETE' for method, _, _ in r2_server.requests)
+        return
+    r2.prune(keep_days=14, dry_run=True, now_epoch=1788547200)
+    assert {line.removeprefix('(dry-run) would delete r2:') for line in capsys.readouterr().out.splitlines()} == doomed
+    assert r2_server.store == before and not any(method == 'DELETE' for method, _, _ in r2_server.requests)
+    r2.prune(keep_days=14, now_epoch=1788547200)
+    assert set(r2_server.store) == set(before) - doomed
 
 
 def test_cli_usage_rejects_unknown_flags(capsys):
@@ -731,7 +712,21 @@ def test_cli_usage_rejects_unknown_flags(capsys):
         r2.main(["put", "--wat", "x"])
 
 
-def test_verify_remote_artifact_streams_without_buffering(r2_server):
+@pytest.fixture
+def bounded_reads(monkeypatch):
+    real_read = http.client.HTTPResponse.read
+    reads = []
+
+    def bounded_read(response, amount=None):
+        assert amount is not None and 0 < amount <= 1024 * 1024
+        reads.append(amount)
+        return real_read(response, amount)
+
+    monkeypatch.setattr(http.client.HTTPResponse, 'read', bounded_read)
+    return reads
+
+
+def test_verify_remote_artifact_streams_without_buffering(r2_server, bounded_reads):
     """REAL streaming proof: the hash is computed over socket-sized chunks
     against the live loopback server — the artifact is never materialized
     whole (a 2GiB artifact would OOM the buffered path)."""
@@ -749,6 +744,7 @@ def test_verify_remote_artifact_streams_without_buffering(r2_server):
         expected_size=len(payload),
         digest=base64.b64encode(hashlib.sha512(payload).digest()).decode("ascii"),
     )
+    assert len(bounded_reads) > 1
     # Mismatched digest is rejected.
     with pytest.raises(ValueError, match="checksum mismatch"):
         r2.verify_remote_artifact(
@@ -760,7 +756,7 @@ def test_verify_remote_artifact_streams_without_buffering(r2_server):
         )
 
 
-def test_download_streams_verified_bytes_and_preserves_destination_on_failure(r2_server, tmp_path, monkeypatch):
+def test_download_streams_verified_bytes_and_preserves_destination_on_failure(r2_server, tmp_path, monkeypatch, bounded_reads):
     import hashlib
     import http.client
 
@@ -770,22 +766,14 @@ def test_download_streams_verified_bytes_and_preserves_destination_on_failure(r2
     target = tmp_path / "downloads" / "package.msix"
     target.parent.mkdir()
     target.write_bytes(b"previous complete file")
-    real_read = http.client.HTTPResponse.read
-    reads = []
 
-    def bounded_read(response, amount=None):
-        assert amount is not None and amount <= 1024 * 1024
-        reads.append(amount)
-        return real_read(response, amount)
-
-    monkeypatch.setattr(http.client.HTTPResponse, "read", bounded_read)
     args = dict(creds={"access_key_id": AKID, "secret_key": SECRET},
                 base=f"http://127.0.0.1:{r2_server.server_port}", bucket="hermes-releases",
                 key=key, file=target, now=NOW, expected_size=len(payload),
                 expected_sha256=hashlib.sha256(payload).hexdigest())
     r2.download_object(**args)
     assert target.read_bytes() == payload
-    assert len(reads) > 1
+    assert len(bounded_reads) > 1
     assert all("authorization" in headers for _, _, headers in r2_server.requests)
 
     original_get = _R2StubHandler.do_GET
@@ -817,37 +805,6 @@ def test_download_streams_verified_bytes_and_preserves_destination_on_failure(r2
     assert target.read_bytes() == payload
     assert list(target.parent.iterdir()) == [target]
 
-
-def test_put_accepts_pathlib_paths(r2_server):
-    import pathlib
-    import tempfile
-
-    payload = b"pathlib input"
-    with tempfile.NamedTemporaryFile(delete=False) as handle:
-        handle.write(payload)
-        path = pathlib.Path(handle.name)
-    try:
-        r2.put("v0.28.0", "pathlib.bin", path)
-    finally:
-        os.unlink(path)
-    assert r2_server.store["releases/tag/v0.28.0/pathlib.bin"][0] == payload
-
-
-def test_parse_list_xml_handles_fractional_and_plain_timestamps():
-    parsed = parse_list_xml(
-        "<ListBucketResult>"
-        "<Contents><Key>a</Key><LastModified>2026-08-18T00:00:00.123Z</LastModified></Contents>"
-        "<Contents><Key>b</Key><LastModified>2026-08-18T00:00:00Z</LastModified></Contents>"
-        "</ListBucketResult>"
-    )
-    from datetime import datetime, timezone
-
-    assert parsed["lastModified"]["a"] == int(
-        datetime(2026, 8, 18, 0, 0, 0, 123000, tzinfo=timezone.utc).timestamp()
-    )
-    assert parsed["lastModified"]["b"] == int(
-        datetime(2026, 8, 18, tzinfo=timezone.utc).timestamp()
-    )
 
 
 def test_canonical_header_whitespace_is_collapsed():

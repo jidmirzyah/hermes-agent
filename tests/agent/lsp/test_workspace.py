@@ -106,3 +106,15 @@ def test_normalize_path_expands_tilde(monkeypatch):
         expected_base = "/home/user"
     p = normalize_path("~/x.py")
     assert p == os.path.abspath(os.path.join(expected_base, "x.py"))
+
+
+def test_find_git_worktree_cache_is_capped(tmp_path: Path, monkeypatch):
+    """The start-dir cache resets past _WORKSPACE_CACHE_CAP instead of growing per distinct dir touched."""
+    import agent.lsp.workspace as ws
+
+    monkeypatch.setattr(ws, "_WORKSPACE_CACHE_CAP", 4)
+    for i in range(6):
+        d = tmp_path / f"d{i}"
+        d.mkdir()
+        assert find_git_worktree(str(d)) is None
+    assert len(ws._workspace_cache) <= 4

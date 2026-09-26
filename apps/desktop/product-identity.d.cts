@@ -17,7 +17,9 @@ interface ProductIdentity {
   cliName: string
   /** OS-level app identity w/ org prefix. e.g. "NousResearch.HermesLight" */
   msixAppIdWithOrg: string
-  /** electron-updater feed channel this build publishes to. Stable tags:
+  /** R2 identity token on channel builds; absent on legacy products. */
+  readonly token?: string
+  /** Channel subscription for channel builds; legacy electron-updater label otherwise. Stable tags:
    *  "latest" | "light"; canary tags: "canary" | "light-canary". Null
    *  for Store and commit builds (no release feed). */
   readonly channel: string | null

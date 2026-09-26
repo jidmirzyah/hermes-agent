@@ -50,8 +50,6 @@ from tools.tts_tool_plugins import (
 from tools.tts_tool_openai import _generate_deepinfra_tts, _generate_openai_tts, _has_openai_audio_backend
 
 
-# MERGE-CHECK: pm (our branch) replaces upstream's removed tools.lazy_deps; upstream lazy_deps
-# feature ids mapped to the pm extras they install.
 _PM_FEATURE_ALIASES = {"tts.edge": "edge-tts", "tts.elevenlabs": "tts-premium", "tts.mistral": "mistral"}
 
 # --- Lazy SDK importers -- providers import only when used (headless boxes lack PortAudio etc.) ---
@@ -63,8 +61,6 @@ def _sdk_importer(module: str, attr: Optional[str] = None, feature: Optional[str
     the raw import still raises cleanly. sounddevice also raises OSError without PortAudio."""
     def _import():
         if feature:
-            # MERGE-CHECK: upstream refactor wins; pm.ensure_import replaces the removed
-            # tools.lazy_deps feature-install (pm extras: tts.edge->edge-tts etc.)
             with contextlib.suppress(Exception):
                 from pm import ensure_import as _pm_ensure
                 _pm_ensure(_PM_FEATURE_ALIASES.get(feature, feature))
@@ -512,28 +508,82 @@ def _xai_requirements() -> bool:
 
 # Must mirror text_to_speech_tool dispatch: unrelated cloud credentials never make the Edge
 # default usable, and an explicit provider is checked on its own.
+#
+# PASSIVE ONLY: every entry answers from availability/credentials and never installs. The SDK
+# importers (`_import_edge_tts`/`_import_elevenlabs`/`_import_mistral_client`) call
+# ``pm.ensure_import`` on import, so reaching them from here turned ``check_tts_requirements``
+# — the ``text_to_speech`` tool's ``check_fn`` — into an installer that ran during every tool
+# listing.
 _BUILTIN_REQUIREMENTS: Dict[str, Callable[[], bool]] = {
-    "edge": lambda: _importable(_import_edge_tts) or _check_neutts_available(),
-    "elevenlabs": lambda: _importable(_import_elevenlabs) and bool(_resolve_provider_key("ELEVENLABS_API_KEY", "elevenlabs")),
+    "edge": lambda: _pm_extra_available("edge-tts") or _check_neutts_available(),
+    "elevenlabs": lambda: _pm_extra_available("tts-premium") and bool(_resolve_provider_key("ELEVENLABS_API_KEY", "elevenlabs")),
     "openai": lambda: _package_installed("openai") and _has_openai_audio_backend(),
     "deepinfra": lambda: _package_installed("openai") and bool(_resolve_provider_key("DEEPINFRA_API_KEY", "deepinfra")),
     "minimax": _minimax_requirements,
     "xai": _xai_requirements,
     "gemini": lambda: bool(_resolve_provider_key("GEMINI_API_KEY", "gemini") or _resolve_provider_key("GOOGLE_API_KEY", "gemini")),
-    "mistral": lambda: _importable(_import_mistral_client) and bool(_resolve_provider_key("MISTRAL_API_KEY", "mistral")),
+    "mistral": lambda: _pm_extra_available("mistral") and bool(_resolve_provider_key("MISTRAL_API_KEY", "mistral")),
     "neutts": lambda: _check_neutts_available(),
     "kittentts": lambda: _check_kittentts_available(),
     "piper": lambda: _check_piper_available()}
 
 
+def _pm_extra_available(extra: str) -> bool:
+    """Whether the extra's anchor is importable, by pm's own answer for it.
+
+    Not ``find_spec`` on a hand-written module name: ``pm.extras`` owns the extra→anchor table and
+    counts a module already in ``sys.modules`` as installed, which is how every other feature in
+    the tree reports availability.
+    """
+    try:
+        from pm.extras import available
+    except Exception:
+        return False
+    return bool(available(extra))
+
+# Providers whose SDK pm installs on first use: provider -> the credential it needs REGARDLESS of
+# the install (an install cannot conjure a key; None = none). Extra names come from
+# ``_PM_FEATURE_ALIASES`` (upstream's ``tts.<provider>`` ids), so that table stays their one
+# source. The install belongs to synthesis (``_select_builtin_engine`` and the command/streaming
+# paths), never to a requirement check — so a missing-but-installable SDK counts as READY here.
+_SDK_ON_DEMAND: Dict[str, Optional[str]] = {
+    "edge": None,
+    "elevenlabs": "ELEVENLABS_API_KEY",
+    "mistral": "MISTRAL_API_KEY"}
+
+
+def _ready_after_first_use_install(provider: str) -> bool:
+    """True when the SDK is absent but pm may install it at first synthesis AND this machine
+    could actually get it (platform gate open) AND the provider's own credential is present.
+    Installs nothing itself."""
+    if provider not in _SDK_ON_DEMAND:
+        return False
+    feature = _PM_FEATURE_ALIASES.get(f"tts.{provider}")
+    if feature is None:
+        return False
+    key_env = _SDK_ON_DEMAND[provider]
+    if key_env and not _resolve_provider_key(key_env, provider):
+        return False
+    try:
+        from pm.install import lazy_installs_allowed
+        from pm.extras import extra_supported
+    except Exception:
+        return False
+    return extra_supported(feature) and bool(lazy_installs_allowed())
+
+
 def check_tts_requirements() -> bool:
-    """Return whether the explicitly resolved TTS provider can run."""
+    """Return whether the explicitly resolved TTS provider can run — now, or after the
+    first-use SDK install that synthesis performs. This is the ``text_to_speech`` tool's
+    ``check_fn``, so it runs on every tool listing and must never install."""
     tts_config = _load_tts_config()
     provider = _get_provider(tts_config)
     if _resolve_command_provider_config(provider, tts_config) is not None:
         return True
     check = _BUILTIN_REQUIREMENTS.get(provider)
-    return check() if check is not None else _plugin_provider_is_available(provider)
+    if check is not None:
+        return bool(check()) or _ready_after_first_use_install(provider)
+    return _plugin_provider_is_available(provider)
 
 
 # --- Registry ---

@@ -13,15 +13,29 @@ backend the desktop connects to.
 
 ## Feed contract
 
-`apps/desktop/update-feed.json` defines each channel directory and filename.
-The desktop CJS adapter and Python publisher read these same facts.
-The builder writes that URL into `app-update.yml`. The client uses this file
-unless `updates.desktop_feed_base_url` supplies an explicit bucket-base URL.
+Channel registration lives in R2 at `releases/channels/NAME.json`, not in a
+checked-in channel map. Channel bundles resolve that record and its digest-bound
+build manifest before selecting an immutable native feed. The admitted request
+keeps the application identity stable across builds and records the source commit
+separately from the increasing native package version.
+
+Existing tagged clients retain their native feed URLs. The generic
+`apps/desktop/update-feed.cjs` adapter computes these legacy paths; it does not
+register channels. The builder writes the legacy URL into `app-update.yml`;
+`updates.desktop_feed_base_url` can supply an explicit bucket-base URL.
 
 - Stable: `releases/darwin/stable/stable-mac.yml`
 - Canary: `releases/darwin/canary/canary-mac.yml`
 - Light: the same paths with `light/` between `darwin/` and the channel.
 - Artifacts: `releases/tag/TAG/FILENAME`, shared by download links and feeds.
+- Channel-build artifacts and native metadata: `releases/channel-builds/BUILD_ID/`.
+
+Retirement is a different operation from a native update: the old channel points
+to a qualified official destination, not to a differently named package in its
+own native feed. The explicit migration action must preserve user state and
+verify destination readiness before removing the preview application. Keeping
+the qualified receiver manifest immutable lets an offline preview migrate after
+the destination channel has advanced; the destination subsequently owns updates.
 
 The current workflow builds the bundled variant, on ARM64 and Intel runners.
 Light has separate client/feed routing but no release matrix leg in this change.

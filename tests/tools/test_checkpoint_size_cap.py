@@ -27,22 +27,48 @@ def history(tmp_path, monkeypatch):
     return base, project, manager
 
 
-@pytest.mark.parametrize("entry", ["maintenance", "snapshot"])
-def test_size_cap_retains_every_snapshot_after_the_only_large_one(history, entry):
+def test_maintenance_size_cap_retains_every_snapshot_after_the_only_large_one(history):
     base, project, manager = history
     store = checkpoints._store_path(base)
     assert checkpoints._dir_size_bytes(store) > 1024 * 1024
-    expected = [f"small-{index}" for index in reversed(range(5))]
-    if entry == "maintenance":
-        result = checkpoints.prune_checkpoints(retention_days=0, checkpoint_base=base, max_total_size_mb=1)
-        assert result["errors"] == 0
-    else:
-        manager.max_total_size_mb = 1
-        (project / "new.txt").write_text("new snapshot", encoding="utf-8")
-        manager.new_turn()
+    result = checkpoints.prune_checkpoints(retention_days=0, checkpoint_base=base, max_total_size_mb=1)
+    assert result["errors"] == 0
+    assert [row["reason"] for row in manager.list_checkpoints(str(project))] == [f"small-{i}" for i in reversed(range(5))]
+    assert checkpoints._dir_size_bytes(store) <= 1024 * 1024
+    assert (project / "small.txt").read_text(encoding="utf-8") == "4"
+
+
+def test_snapshot_over_cap_drops_one_round_and_leaves_the_gc_to_the_prune(history):
+    """A checkpoint never waits on ``git gc``: over the cap it rewrites the ref once and marks
+    the store gc-pending; the periodic prune reclaims the objects and clears the marker."""
+    from tools.checkpoint_pruning import GC_PENDING_NAME
+
+    base, project, manager = history
+    store = checkpoints._store_path(base)
+    manager.max_total_size_mb = 1
+    gc_calls = []
+    original = checkpoints._run_git
+
+    def count_gc(args, *rest, **kwargs):
+        if args[0] == "gc":
+            gc_calls.append(args)
+        return original(args, *rest, **kwargs)
+
+    (project / "new.txt").write_text("new snapshot", encoding="utf-8")
+    manager.new_turn()
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(checkpoints, "_run_git", count_gc)
         assert manager.ensure_checkpoint(str(project), "newest")
-        expected.insert(0, "newest")
-    assert [row["reason"] for row in manager.list_checkpoints(str(project))] == expected
+    assert gc_calls == []
+    assert (store / GC_PENDING_NAME).exists()
+    assert [row["reason"] for row in manager.list_checkpoints(str(project))] == \
+        ["newest"] + [f"small-{i}" for i in reversed(range(5))]
+    # Objects are still in the pack until the prune runs.
+    assert checkpoints._dir_size_bytes(store) > 1024 * 1024
+
+    result = checkpoints.prune_checkpoints(retention_days=0, checkpoint_base=base, max_total_size_mb=1)
+    assert result["errors"] == 0
+    assert not (store / GC_PENDING_NAME).exists()
     assert checkpoints._dir_size_bytes(store) <= 1024 * 1024
     assert (project / "small.txt").read_text(encoding="utf-8") == "4"
 
@@ -98,7 +124,9 @@ def test_maintenance_stops_on_failed_git_without_losing_a_second_snapshot(histor
         assert result["deleted_stale"] == 0
 
 
-def test_snapshot_pruning_does_not_enter_size_pass_after_failed_count_reclaim(history, monkeypatch, caplog):
+def test_snapshot_pruning_stops_at_a_failed_count_rewrite(history, monkeypatch, caplog):
+    """A count trim that cannot rewrite its ref aborts the take-path pruning before the size
+    round runs — never a partial history, never a second rewrite on top of a failed one."""
     _, project, manager = history
     manager.max_snapshots = 5
     manager.max_total_size_mb = 1
@@ -107,19 +135,24 @@ def test_snapshot_pruning_does_not_enter_size_pass_after_failed_count_reclaim(hi
     original = checkpoints._run_git
     changed_refs = []
 
-    def refuse_gc(args, *rest, **kwargs):
-        if args[0] == "gc":
-            return False, "", "injected reclamation failure"
+    def refuse_rewrite(args, *rest, **kwargs):
+        # The rewrite re-creates commits under their original dates; the snapshot's own
+        # commit-tree carries no extra_env.
+        if args[0] == "commit-tree" and kwargs.get("extra_env"):
+            return False, "", "injected rewrite failure"
         result = original(args, *rest, **kwargs)
         if args[0] == "update-ref" and result[0]:
             changed_refs.append(args)
         return result
 
-    monkeypatch.setattr(checkpoints, "_run_git", refuse_gc)
+    monkeypatch.setattr(checkpoints, "_run_git", refuse_rewrite)
     assert manager.ensure_checkpoint(str(project), "latest")
-    assert len(changed_refs) == 2  # The new checkpoint plus one count trim.
-    assert "injected reclamation failure" in caplog.text
-    assert len(manager.list_checkpoints(str(project))) == 5
+    assert len(changed_refs) == 1  # The new checkpoint only; the trim failed before update-ref.
+    assert "injected rewrite failure" in caplog.text
+    store = checkpoints._store_path(checkpoints.CHECKPOINT_BASE)
+    ref = checkpoints._ref_name(checkpoints._project_hash(str(project)))
+    ok, out, _ = original(["rev-list", "--count", ref], store, str(project))
+    assert ok and int(out) == 7  # Nothing trimmed: the failed rewrite left history whole.
 
 
 def test_restore_keeps_its_target_alive_while_taking_the_safety_snapshot(history):

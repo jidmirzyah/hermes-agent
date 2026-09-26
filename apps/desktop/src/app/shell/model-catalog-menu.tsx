@@ -2,7 +2,16 @@ import type { ModelOptionProvider, ModelOptionsResult } from '@hermes/shared'
 import { DEFAULT_REASONING_EFFORT } from '@hermes/shared'
 import { useStore } from '@nanostores/react'
 import { useQuery } from '@tanstack/react-query'
-import { createContext, type ReactNode, useContext, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  createContext,
+  type ReactElement,
+  type ReactNode,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState
+} from 'react'
 
 import { Codicon } from '@/components/ui/codicon'
 import { DisclosureCaret } from '@/components/ui/disclosure-caret'
@@ -21,17 +30,21 @@ import { HighlightMatches } from '@/components/ui/highlight-matches'
 import { usePointerQuiet } from '@/components/ui/keyboard-first'
 import { Skeleton } from '@/components/ui/skeleton'
 import type { HermesGateway } from '@/hermes'
-import { getLocalModelsStatus } from '@/hermes'
 import { useI18n } from '@/i18n'
 import { isSubmitEnter } from '@/lib/ime'
 import { catalogProviderMatches, modelOptionsQueryKey, requestModelOptions } from '@/lib/model-options'
 import { displayModelName, modelDisplayParts } from '@/lib/model-status-label'
 import { reasoningEffortLabel } from '@/lib/reasoning-effort'
 import { foldIncludes, normalize } from '@/lib/text'
-import { useStoreSelector } from '@/lib/use-session-slice'
 import { cn } from '@/lib/utils'
 import { $localModelsEnabled } from '@/store/local-models-flag'
-import { $localRuntimeJobs, runningModelDownloads, watchLocalRuntimeJobs } from '@/store/local-runtime-jobs'
+import {
+  type LocalModelsOwner,
+  runningModelDownloads,
+  useLocalModelsOwner,
+  useLocalModelsStatus,
+  useLocalRuntimeJobs
+} from '@/store/local-runtime-jobs'
 import {
   $visibleModels,
   collapseModelFamilies,
@@ -43,7 +56,7 @@ import {
 } from '@/store/model-visibility'
 import { $collapsedProviders, toggleCollapsedProvider } from '@/store/provider-collapse'
 import { $defaultReasoningEffort } from '@/store/session'
-import type { LocalModelLoadProgress } from '@/types/hermes'
+import type { LocalModelLoadProgress, LocalRuntimeJob } from '@/types/hermes'
 
 import { type FastControl, ModelEditSubmenu, resolveFastControl } from './model-edit-submenu'
 
@@ -132,12 +145,12 @@ export function ModelCatalogMenu({
   profile = 'default',
   request,
   sessionId = null
-}: ModelCatalogMenuProps) {
+}: ModelCatalogMenuProps): ReactElement {
   const { t } = useI18n()
   const copy = t.shell.modelMenu
   const copyPicker = t.modelPicker
   const closeMenu = useContext(ModelMenuCloseContext)
-  const [search, setSearch] = useState('')
+  const [search, setSearch] = useState<string>('')
   const collapsedProviders = useStoreCollapsed()
   const defaultEffort = useDefaultEffort()
   // Which models the user curated in Edit Models. Read HERE rather than taken
@@ -166,13 +179,8 @@ export function ModelCatalogMenu({
   // over the router's SSE stream). Polled only while this menu is mounted
   // (it unmounts on close); errors read as "nothing loading" — remote-only
   // installs have no local-models routes.
-  const localStatus = useQuery({
-    queryKey: ['local-models-loading', profile],
-    queryFn: () => getLocalModelsStatus(),
-    enabled: localModelsEnabled,
-    refetchInterval: 2_000,
-    retry: false
-  })
+  const owner: LocalModelsOwner = useLocalModelsOwner(profile, ownerConnectionId)
+  const localStatus = useLocalModelsStatus(owner, localModelsEnabled)
 
   const loadingModels: Record<string, LocalModelLoadProgress> = localStatus.data?.loading ?? {}
 
@@ -184,12 +192,15 @@ export function ModelCatalogMenu({
   // (breaking open submenus and focus — the #72163 class). Subscribe to a
   // STABLE identity projection instead: it changes only when a download
   // starts or ends. Each row selects its own percent scalar.
-  const downloadsKey = useStoreSelector($localRuntimeJobs, jobs =>
+  const downloadsKey: string = useLocalRuntimeJobs(
+    owner,
+    (jobs: readonly LocalRuntimeJob[]): string =>
+      localModelsEnabled
+        ? runningModelDownloads(jobs)
+            .map(job => `${job.job_id}\u0000${job.target}`)
+            .join('\u0001')
+        : '',
     localModelsEnabled
-      ? runningModelDownloads(jobs)
-          .map(job => `${job.job_id}\u0000${job.target}`)
-          .join('\u0001')
-      : ''
   )
 
   const downloads = useMemo(
@@ -203,30 +214,6 @@ export function ModelCatalogMenu({
           }),
     [downloadsKey]
   )
-
-  useEffect(() => {
-    if (localModelsEnabled) {
-      watchLocalRuntimeJobs()
-    }
-  }, [localModelsEnabled])
-
-  // A finished download turns into a real selectable model: refetch the
-  // catalog so the placeholder row is replaced while the menu is open.
-  const refetchOptions = modelOptions.refetch
-
-  useEffect(() => {
-    let prevActive = runningModelDownloads($localRuntimeJobs.get()).length > 0
-
-    return $localRuntimeJobs.listen(next => {
-      const active = runningModelDownloads(next).length > 0
-
-      if (prevActive && !active) {
-        void refetchOptions()
-      }
-
-      prevActive = active
-    })
-  }, [refetchOptions])
 
   const error = modelOptions.error
     ? modelOptions.error instanceof Error
@@ -602,7 +589,7 @@ export function ModelCatalogMenu({
                 {!collapsed &&
                   slug === LOCAL_PROVIDER_SLUG &&
                   shownDownloads.map(job => (
-                    <DownloadingModelRow jobId={job.jobId} key={job.jobId} target={job.target} />
+                    <DownloadingModelRow jobId={job.jobId} key={job.jobId} owner={owner} target={job.target} />
                   ))}
               </DropdownMenuGroup>
             )
@@ -613,7 +600,7 @@ export function ModelCatalogMenu({
                 {copyPicker.localDownloadsHeading}
               </DropdownMenuLabel>
               {shownDownloads.map(job => (
-                <DownloadingModelRow jobId={job.jobId} key={job.jobId} target={job.target} />
+                <DownloadingModelRow jobId={job.jobId} key={job.jobId} owner={owner} target={job.target} />
               ))}
             </DropdownMenuGroup>
           )}
@@ -677,7 +664,15 @@ const LOCAL_PROVIDER_SLUG = 'llamacpp'
 // same byte progress the Local Models pane shows. Percent is selected HERE,
 // per row, so the 700ms byte ticks repaint this leaf only — the menu tree
 // above subscribes to download identity, not progress.
-function DownloadingModelRow({ jobId, target }: { jobId: string; target: string }) {
+function DownloadingModelRow({
+  owner,
+  jobId,
+  target
+}: {
+  owner: LocalModelsOwner
+  jobId: string
+  target: string
+}): ReactElement {
   const { t } = useI18n()
   const copyPicker = t.modelPicker
   const copyLocal = t.settings.localModels
@@ -685,11 +680,18 @@ function DownloadingModelRow({ jobId, target }: { jobId: string; target: string 
   // The row's own scalar slice: percent for live rows, status for the
   // paused fork (a paused download must stay listed with its Paused pill,
   // not vanish — progress loss is information loss).
-  const percent = useStoreSelector($localRuntimeJobs, jobs => jobs.find(job => job.job_id === jobId)?.percent ?? null)
+  const percent: number | null = useLocalRuntimeJobs(
+    owner,
+    (jobs: readonly LocalRuntimeJob[]): number | null =>
+      jobs.find((job: LocalRuntimeJob): boolean => job.job_id === jobId)?.percent ?? null,
+    false
+  )
 
-  const paused = useStoreSelector(
-    $localRuntimeJobs,
-    jobs => jobs.find(job => job.job_id === jobId)?.status === 'paused'
+  const paused: boolean = useLocalRuntimeJobs(
+    owner,
+    (jobs: readonly LocalRuntimeJob[]): boolean =>
+      jobs.find((job: LocalRuntimeJob): boolean => job.job_id === jobId)?.status === 'paused',
+    false
   )
 
   return (

@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
-from plugins.web._common import BaseWebSearchProvider, keyless_extract, keyless_search, lazy_ensure, search_fail, search_ok, setup_schema
+from plugins.web._common import BaseWebSearchProvider, keyless_extract, keyless_search, search_fail, search_ok, setup_schema
 from tools import managed_tool_gateway as _gateway
 from tools import tool_backend_helpers as _backend_helpers
 from tools.url_safety import is_safe_url

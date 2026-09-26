@@ -7,7 +7,7 @@ description: "Text-to-speech and voice message transcription across all platform
 # Voice & TTS
 
 Python dependency commands on this page use a
-[PM-prepared source checkout](/reference/package-management#developer-workflow).
+[PM-prepared source checkout](../../reference/package-management.md#developer-workflow).
 After a dependency change, reactivate the checkout and restart Hermes.
 
 Hermes Agent supports both text-to-speech output and voice message transcription across all messaging platforms.

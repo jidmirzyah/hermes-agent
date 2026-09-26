@@ -202,7 +202,9 @@ class Facts:
         a fact written before identity existed all count as NOT installed
         and force a reinstall. ``None`` keeps the version+path check."""
         fact = self._packages.get(name)
-        if not fact:
+        if not fact or "entry" not in fact:
+            # State facts (``record_state``: venv stamp + extras) share this
+            # file with tool facts but own no store entry.
             return False
         if expected_version is not None and fact.get("version") != expected_version:
             return False

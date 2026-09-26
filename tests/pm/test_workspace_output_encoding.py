@@ -9,8 +9,9 @@ import sys
 
 import pytest
 
+import pm
 import pm.workspace as ws
-from pm.package import InstallError
+from pm.package import InstallError, Runner
 
 
 @pytest.fixture
@@ -42,7 +43,9 @@ def test_uv_failure_retains_utf8_build_diagnostic(
     diagnostic = "🔍 cryptography: OpenSSL headers not found"
     raw = diagnostic.encode("utf-8") + suffix + b"\n"
     expected = diagnostic + ("�" if suffix else "")
-    monkeypatch.setattr(ws, "_generate_pyproject", lambda *a, **k: (tmp_path, False))
+    core = tmp_path / "core"
+    core.mkdir()
+    (core / "pyproject.toml").write_text('[project]\nname="test-core"\nversion="1"\n')
     from pm.environment import PythonEnvironment
 
     environment = PythonEnvironment(
@@ -62,8 +65,8 @@ def test_uv_failure_retains_utf8_build_diagnostic(
 
     monkeypatch.setattr("pm.environment.subprocess.run", run_uv)
     with pytest.raises(InstallError) as excinfo:
-        ws.lock_and_sync([], venv_dir=environment.destination, root=tmp_path,
-                         source=tmp_path, environment=environment)
+        ws.lock_and_sync([], [], root=tmp_path / "workspace", source=core,
+                         seed_lock=None, environment=environment)
 
     assert type(excinfo.value) is InstallError  # A build error is not a resolver conflict.
     assert excinfo.value.cause == f"uv {stage} exited 17: {expected}"
@@ -80,19 +83,40 @@ def test_node_sidecar_retains_output_and_exit_status(
     if install_cmd == "ci":
         (tmp_path / "package-lock.json").write_text("{}", encoding="utf-8")
     monkeypatch.setattr(
-        importlib.import_module("pm.ensure"), "lazy_installs_allowed", lambda: True
+        importlib.import_module("pm.install"), "lazy_installs_allowed", lambda: True
     )
     diagnostic = "🔍 node-gyp: build toolchain unavailable"
     raw = diagnostic.encode("utf-8") + b"\xff\n"
     completed = []
+    npm_dir = tmp_path / "pm-bin"
+    npm_dir.mkdir()
+    npm = npm_dir / ("npm.cmd" if os.name == "nt" else "npm")
+    npm.write_text("process boundary fixture", encoding="utf-8")
+    npm.chmod(0o755)
+    context = Runner("npm", dict(os.environ, PATH=str(npm_dir)))
+    acquisitions = []
+
+    def acquire(name, **kwargs):
+        acquisitions.append((name, kwargs))
+        return context
 
     def run_npm(cmd, **kwargs):
+        assert cmd == [str(npm), install_cmd, "--no-audit", "--no-fund"]
+        assert kwargs["env"] == context.env
+        assert kwargs["cwd"] == str(tmp_path)
+        # Keep the real Runner and decoding path; only replace npm's process
+        # with a Python child that emits controlled bytes and an exit status.
         result = legacy_locale_child(**{stream: raw}, returncode=returncode, **kwargs)
         completed.append(result)
         return result
 
-    error = ws.install_node_sidecar(tmp_path, npm_bin=sys.executable, runner=run_npm)
+    monkeypatch.setattr(pm, "ensure", acquire)
+    monkeypatch.setattr("pm.package.subprocess.run", run_npm)
+    error = ws.install_node_sidecar(tmp_path)
 
+    assert acquisitions == [("npm", {"explicit": False})]
+    assert len(completed) == 1
+    assert completed[0].returncode == returncode
     expected = diagnostic + "�"
     if returncode:
         assert error == f"npm {install_cmd} exited {returncode}: {expected}"

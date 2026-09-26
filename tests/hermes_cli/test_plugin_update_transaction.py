@@ -76,7 +76,7 @@ def installed(admission_env, monkeypatch, request):
 @pytest.mark.parametrize("failure", ["dependencies", "version", "publication", "manifest"])
 def test_failed_update_keeps_code_metadata_config_and_environment(installed, monkeypatch, failure):
     from hermes_cli import plugins_cmd
-    from hermes_cli.runtime_paths import selected_venv
+    from pm.environments import selected_venv
     from pm import paths
     from pm.lock import Facts
 
@@ -108,7 +108,7 @@ def test_failed_update_keeps_code_metadata_config_and_environment(installed, mon
 def test_successful_update_publishes_matching_code_and_durable_workspace(installed):
     import tomllib
     from hermes_cli import plugins_cmd
-    from hermes_cli.runtime_paths import selected_venv
+    from pm.environments import selected_venv
     from pm import paths
     from pm.lock import Facts
     from pm.packages import Venv

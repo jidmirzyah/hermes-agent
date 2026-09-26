@@ -4,22 +4,23 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import shutil
 import subprocess
 import sys
-import threading
+import time
 from pathlib import Path
 
-from pm.ensure import _facts, _lockfile, _store, ensure, stage_only
+from pm import termux_libs
+from pm.install import _facts, _lockfile, _store, ensure, stage_only
 from pm.operations import lock_project
 from pm.package import InstallError
 from pm.paths import repo_root
-from pm.registry import get_package
+from pm.registry import get_package, source_install_packages
 from pm.store import ALL_TARGETS, current_target, hash_url
-from pm.update import Resolved, resolve_package
+from pm.update import Resolved, resolve_package, reuse_index_responses
 
 
+@reuse_index_responses()
 def cmd_lock(args) -> int:
     """--bump <name> <version>: resolve every target's archives, hash them,
     write. A target with one archive pins the object; several pin a list.
@@ -59,45 +60,94 @@ def _fmt_bytes(n: int) -> str:
     return f"{n / (1024 * 1024):.1f} MiB"
 
 
+def _progress_stream():
+    """Stream for in-place progress, or None off a terminal. Prefer stdout;
+    fall back to stderr because activate.ps1 pipes stdout through Out-Host
+    while stderr stays on the console."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            if stream.isatty():
+                return stream
+        except (AttributeError, ValueError):
+            continue
+    return None
+
+
+def _interactive() -> bool:
+    return _progress_stream() is not None
+
+
 def _live_progress(name: str):
     """Per-package progress for ensure(): download as % + MiB, unpack as a
-    phase line. Throttled to ~4 MiB steps — a slow line proves it's moving
-    in a piped (CI) log without flooding it (a 1 MiB tick on a 1.5 GiB
-    model would be ~1,500 lines)."""
+    phase line. On a terminal the line redraws in place (~10 Hz); in a piped
+    (CI) log each tick prints its own line, throttled to ~4 MiB steps so a
+    slow line proves it's moving without flooding the log (a 1 MiB tick on a
+    1.5 GiB model would be ~1,500 lines). ``finish()`` returns the cursor to
+    a clean line so the caller's status glyph starts on its own row."""
     last = 0
+    last_time = 0.0
+    stream = _progress_stream()
+
+    def write(line: str) -> None:
+        if stream is not None:
+            stream.write("\r\x1b[2K" + line)
+            stream.flush()
+        else:
+            print(line, flush=True)
+
+    def finish() -> None:
+        if stream is not None:
+            stream.write("\r\x1b[2K")
+            stream.flush()
 
     def report(stage: str, done: int, total: int, label: str) -> None:
-        nonlocal last
+        nonlocal last, last_time
         if stage == "unpack":
             last = 0
-            print(f"  {name}: unpacking{(' ' + label) if label else ''}", flush=True)
+            last_time = 0.0
+            write(f"  {name}: unpacking{(' ' + label) if label else ''}")
             return
         if total <= 0:
             return
-        if done >= total or done - last >= 4 * 1024 * 1024:
-            last = done
-            print(
-                f"  {name}: {done / total * 100:5.1f}%  {_fmt_bytes(done)} / {_fmt_bytes(total)}",
-                flush=True,
-            )
+        if done < total:
+            if stream is not None:
+                now = time.monotonic()
+                if now - last_time < 0.1:
+                    return
+                last_time = now
+            elif done - last < 4 * 1024 * 1024:
+                return
+        last = done
+        write(f"  {name}: {done / total * 100:5.1f}%  {_fmt_bytes(done)} / {_fmt_bytes(total)}")
 
+    report.finish = finish  # type: ignore[attr-defined]
     return report
 
 
 def _install_names(names: list[str], target: str | None = None) -> int:
+    from pm.install import _install_operation
+
     failed = 0
-    for name in names:
-        try:
-            if target is not None:
-                # Cross-target staging: publish the entry, touch no facts.
-                entry = stage_only(name, target)
-                print(f"✓ {name} (staged for {target}: {entry.name})")
-            else:
-                ensure(name, explicit=True, progress=_live_progress(name))
-                print(f"✓ {name}", flush=True)
-        except InstallError as e:
-            print(f"✗ {e}", flush=True)
-            failed += 1
+    with _install_operation() as operation:
+        for name in names:
+            progress = _live_progress(name)
+            try:
+                if target is not None:
+                    # Cross-target staging: publish the entry, touch no facts.
+                    entry = stage_only(name, target)
+                    print(f"✓ {name} (staged for {target}: {entry.name})")
+                else:
+                    ensure(name, explicit=True, progress=progress, _operation=operation)
+                    if name == "python":
+                        from hermes_cli.venv_sync import publish_launchers
+
+                        publish_launchers(repo_root(), create=False)
+                    progress.finish()
+                    print(f"✓ {name}", flush=True)
+            except InstallError as e:
+                progress.finish()
+                print(f"✗ {e}", flush=True)
+                failed += 1
     return failed
 
 
@@ -114,12 +164,10 @@ def cmd_install(args) -> int:
             return 1
     # Source-install launchers require the store interpreter, even though
     # Python remains optional when provisioning individual tools.
-    names = args.names or [
-        n for n in _lockfile().names() if not get_package(n).optional or n == "python"
-    ]
+    names = args.names or source_install_packages(_lockfile().names())
     failed = _install_names(names, target=cross_target)
     if not args.names:
-        from pm.ensure import sync_venv
+        from pm.install import sync_venv
 
         try:
             # Default the venv to the [all] feature set — the same thing
@@ -136,7 +184,7 @@ def cmd_install(args) -> int:
 
 
 def cmd_env(args) -> int:
-    from pm.ensure import env_for
+    from pm.install import env_for
 
     names = args.names or _lockfile().names()
     print(json.dumps(env_for(*names), indent=2, sort_keys=True))
@@ -144,7 +192,7 @@ def cmd_env(args) -> int:
 
 
 def cmd_doctor(args) -> int:
-    from pm.ensure import _identity, _installed_location
+    from pm.install import _identity, _installed_location
     from pm.store import tree_digest
 
     lockfile = _lockfile()
@@ -241,47 +289,32 @@ def cmd_gc(args) -> int:
 
 
 def _run_live(cmd: list[str], *, cwd, env, timeout: int = 3600) -> tuple[int, str]:
-    """Run cmd with its output streamed through our stdout — a long uv
-    venv build must prove liveness in a piped (CI) log, not vanish until
-    exit — while still capturing the tail for the failure message. A
-    reader thread drains output so proc.wait(timeout) keeps the wall-clock
-    kill the old subprocess.run(timeout=) had. Returns (returncode, last
-    ~2k chars of combined output)."""
-    proc = subprocess.Popen(
-        cmd, cwd=cwd, env=env, stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT, text=True, bufsize=1, errors="replace",
-    )
-    tail = ""
-    lock = threading.Lock()
+    """Stream CI progress with the Python engine's bounded drain and diagnostic tail."""
+    from pm.environment import _run_streaming
 
-    def drain() -> None:
-        nonlocal tail
-        for line in proc.stdout:
-            print(line, end="", flush=True)
-            with lock:
-                tail = (tail + line)[-2000:]
-
-    thread = threading.Thread(target=drain, daemon=True)
-    thread.start()
     try:
-        code = proc.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait()
-        raise RuntimeError(f"{cmd[0]} timed out after {timeout}s")
-    thread.join()
-    with lock:
-        return code, tail
+        result = _run_streaming(cmd, cwd=cwd, env=env, timeout=timeout, output=sys.stdout)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"{cmd[0]} timed out after {timeout}s") from exc
+    return result.returncode, result.stderr
 
 
 def cmd_update(args) -> int:
-    """`hermes pm update [names...] [--check] [--target T] [--uv] [--npm]`.
+    """`hermes pm update [names...] [--check] [--target T] [--uv] [--npm] [--termux]`.
 
     Resolve each package's latest via its own latest_versions() hook,
     intersect across targets, and (real mode) re-pin the lockfile + install
     the changed ones. --check is dry-run: hits upstream indexes, writes
     nothing. --uv / --npm also refresh uv.lock (+sync venv) / package-lock.
+    --termux is its own repair pass: it repins only the pool archives the
+    rolling termux-main pool has retired under our pins.
     """
+    if args.termux:
+        ignored = [name for name, given in (("names", args.names), ("--target", args.target),
+                                            ("--uv", args.uv), ("--npm", args.npm)) if given]
+        if ignored:
+            print(f"::warning::--termux repairs the termux pool pins only; ignoring {', '.join(ignored)}")
+        return _termux_pass(check=args.check)
     lockfile = _lockfile()
     names = args.names or [n for n in lockfile.names() if not get_package(n).internal or n == "uv"]
     if args.target and not args.check:
@@ -347,7 +380,7 @@ def cmd_update(args) -> int:
         if failed:
             return 1
         try:
-            from pm.ensure import sync_venv
+            from pm.install import sync_venv
             sync_venv(explicit=True)
             print("✓ venv")
         except InstallError as e:
@@ -364,14 +397,14 @@ def cmd_update(args) -> int:
             return 1
         print("✓ uv.lock refreshed")
         try:
-            from pm.ensure import sync_venv
+            from pm.install import sync_venv
             sync_venv(explicit=True)
             print("✓ venv")
         except InstallError as e:
             print(f"✗ {e}")
             return 1
     if args.npm:
-        from pm.ensure import env_for, installed_package
+        from pm.install import env_for, installed_package
         from pm.packages import npm_env
         from pm.paths import writable_store_root
 
@@ -389,10 +422,43 @@ def cmd_update(args) -> int:
     return 0
 
 
+def _termux_pass(*, check: bool) -> int:
+    """Repin the pool archives Termux has retired under our pins.
+
+    The bionic lock rows and the runtime-lib table have no shared version axis
+    to resolve (each pins what its own supplier ships), so this is a repair,
+    not an update: only rows whose archive is gone are touched.
+    """
+    table = termux_libs.load_table()
+    lockfile = _lockfile()
+    total = len(termux_libs.pins(table, lockfile))
+    stale = termux_libs.retired(table, lockfile, termux_libs.index())
+    if not stale:
+        print(f"termux pins: {total} rows still served by the pool")
+        return 0
+    unresolved = [entry for entry in stale if entry.replacement is None]
+    width = max(len(entry.pin.name) for entry in stale)
+    for entry in stale:
+        if entry.replacement is None:
+            print(f"{entry.pin.name:<{width}}  {entry.pin.version}: the pool no longer carries it")
+        else:
+            print(f"{entry.pin.name:<{width}}  {entry.pin.version} → {entry.replacement.version}")
+    if check:
+        return 1
+    applied = termux_libs.repair(table, lockfile, stale)
+    if applied:
+        termux_libs.save_table(table)
+        lockfile.save()
+        print(f"✓ {applied} termux pins repinned; restage the bionic payload to pick them up")
+    return 1 if unresolved else 0
+
+
+@reuse_index_responses()
 def _pin_artifacts(package, decision, current: dict) -> dict:
     """Retain unresolved targets and reuse hashes for unchanged artifact URLs."""
     per_target = decision.per_target or {t: decision.version for t in ALL_TARGETS}
     artifacts = dict(current)
+    hashes: dict[str, str] = {}
     for target, version in per_target.items():
         if package.missing_reason(target) is not None:
             continue
@@ -404,8 +470,13 @@ def _pin_artifacts(package, decision, current: dict) -> dict:
             urls = package.fetch_urls(version, target)
         if urls == [row["url"] for row in old]:
             continue
-        pinned = [{"url": url, "sha256": known.get(url) or package.known_sha256(version, url) or hash_url(url)}
-                  for url in urls]
+        pinned = []
+        for url in urls:
+            digest = known.get(url) or hashes.get(url)
+            if not digest:
+                digest = package.known_sha256(version, url) or hash_url(url)
+                hashes[url] = digest
+            pinned.append({"url": url, "sha256": digest})
         artifacts[target] = pinned[0] if len(pinned) == 1 else pinned
     return artifacts
 
@@ -485,7 +556,7 @@ def main(argv=None) -> int:
     p = sub.add_parser("bundle", help="stage a payload (repo+store+facts+relocatable venv) into --out")
     p.add_argument("--out", required=True)
     p.add_argument("--ref", help="git ref for the repo snapshot (default HEAD)")
-    p.add_argument("--cache", type=Path, help="persistent uv build cache (default: output sibling .uv-cache)")
+    p.add_argument("--cache", type=Path, help="persistent build cache (default: UV_CACHE_DIR or PM's shared cache)")
     p.set_defaults(func=cmd_bundle)
 
     p = sub.add_parser("status", help="print the latest pm sync receipt (machine-readable)")
@@ -497,6 +568,9 @@ def main(argv=None) -> int:
     p.add_argument("--target", help="resolve for a different target instead of this machine (e.g. win32-arm64)")
     p.add_argument("--uv", action="store_true", help="also refresh uv.lock + venv (uv update + sync)")
     p.add_argument("--npm", action="store_true", help="also refresh package-lock.json (npm update)")
+    p.add_argument("--termux", action="store_true",
+                   help="repin the termux pool archives the pool has retired (the runtime-lib "
+                        "table + the bionic lock rows); --check reports without writing")
     p.set_defaults(func=cmd_update)
 
     args = parser.parse_args(argv)

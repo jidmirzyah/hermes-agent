@@ -58,8 +58,7 @@ except ImportError:
         from pm import ensure_import
         ensure_import("web")
         from fastapi import (
-            FastAPI, File, Form, HTTPException, Query, Request, UploadFile,
-            WebSocket, WebSocketDisconnect,
+            FastAPI, HTTPException, Request,
         )
         from fastapi.middleware.cors import CORSMiddleware
         from fastapi.responses import JSONResponse

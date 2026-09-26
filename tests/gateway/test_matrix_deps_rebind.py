@@ -22,47 +22,15 @@ def _fake_mautrix_types():
     """Minimal mautrix.types with the 8 names the adapter imports/binds."""
     mod = types.ModuleType("mautrix.types")
 
-    class EventType:
-        ROOM_MESSAGE = "m.room.message"
-        REACTION = "m.reaction"
-
-    class UserID(str):
-        pass
-
-    class RoomID(str):
-        pass
-
-    class EventID(str):
-        pass
-
-    class ContentURI(str):
-        pass
-
-    class RoomCreatePreset:
-        PRIVATE = "private_chat"
-
-    class PresenceState:
-        ONLINE = "online"
-
-    class TrustState:
-        UNVERIFIED = 0
-
-    mod.EventType = EventType
-    mod.UserID = UserID
-    mod.RoomID = RoomID
-    mod.EventID = EventID
-    mod.ContentURI = ContentURI
-    mod.RoomCreatePreset = RoomCreatePreset
-    mod.PresenceState = PresenceState
-    mod.TrustState = TrustState
+    for name in ("EventType", "UserID", "RoomID", "EventID", "ContentURI",
+                 "RoomCreatePreset", "PresenceState", "TrustState"):
+        setattr(mod, name, object())
     return mod
 
 
 @pytest.fixture
 def fresh_dependency_boundary(monkeypatch):
-    """Simulate a fresh install: ``missing()`` reports a gap, the install is a
-    no-op success, and ``from mautrix.types import ...`` resolves against a fake."""
-    monkeypatch.setattr(pm_extras, "missing", lambda extra: ("asyncpg",))
+    """Exercise the real importer after PM admits the SDK."""
     monkeypatch.setattr(pm_extras, "ensure_import", lambda *a, **kw: None)
     monkeypatch.delenv("MATRIX_E2EE_MODE", raising=False)
     monkeypatch.delenv("MATRIX_ENCRYPTION", raising=False)
@@ -94,3 +62,20 @@ def test_failed_install_returns_false_with_hint_and_never_raises(
         with caplog.at_level("WARNING", logger="plugins.platforms.matrix.adapter"):
             assert matrix_adapter.ensure_matrix_deps() is False
     assert any("required packages not installed" in r.message for r in caplog.records)
+
+
+def test_interactive_setup_explicitly_syncs_matrix(tmp_path, monkeypatch):
+    import pm
+    from hermes_cli import cli_output, config
+
+    answers = iter(["https://matrix.example.test", "test-token", "@bot:example.test", "@owner:example.test", "!home:example.test"])
+    monkeypatch.setattr(cli_output, "prompt", lambda *args, **kwargs: next(answers))
+    monkeypatch.setattr(cli_output, "prompt_yes_no", lambda *args, **kwargs: False)
+    monkeypatch.setattr(config, "get_env_value", lambda key: None)
+    monkeypatch.setattr(config, "save_env_value", lambda *args: None)
+    calls = []
+    monkeypatch.setattr(pm, "sync_venv", lambda extras, **kwargs: calls.append((extras, kwargs)))
+    monkeypatch.setattr(pm, "ensure_import", lambda *args: pytest.fail("setup used implicit installation"))
+    monkeypatch.setattr(pm_extras, "missing", lambda extra: ("asyncpg",))
+    matrix_adapter.interactive_setup()
+    assert calls == [(["matrix"], {"explicit": True})]

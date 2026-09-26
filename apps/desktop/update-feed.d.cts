@@ -2,11 +2,11 @@ interface DarwinFeed {
   /** Feed directory key under the public bucket, no trailing slash.
    *  e.g. "releases/darwin/stable" | "releases/darwin/light/canary" */
   directory: string
-  /** Normalized channel. "stable" | "canary" */
-  channel: 'stable' | 'canary'
+  /** Validated slug; existence is resolved through R2. */
+  channel: string
   /** electron-updater manifest filename. e.g. "stable-mac.yml" */
   fileName: string
-  /** True only for the canary channel. */
+  /** Legacy nonstable feeds admit prereleases. */
   allowPrerelease: boolean
 }
 
@@ -15,6 +15,7 @@ interface DarwinFeed {
  * pipeline. `light` selects the Light-variant feed directory.
  * The generic-provider feed URL is PUBLIC_URL + '/' + directory + '/' + fileName.
  */
-declare function darwinFeed(channel: 'stable' | 'canary', light?: boolean): DarwinFeed
+declare function darwinFeed(channel: string, light?: boolean): DarwinFeed
 
-export = { darwinFeed }
+declare const contract: { darwinFeed: typeof darwinFeed }
+export = contract

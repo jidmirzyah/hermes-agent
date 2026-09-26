@@ -1,11 +1,6 @@
-"""Which plugins are enabled, per profile — pm's read of the plugins
-config (order-preserving for the incumbent-wins tiebreak).
+"""Read every profile's enabled plugins in config order for the shared union.
 
-pm needs two things the plugins_cmd helpers don't give: EVERY profile's
-enabled list (the union is per-install, cross-profile) and the list
-ORDER (config order = enable recency; enabling appends). Writes go
-through the same config.yaml the plugins CLI owns — pm never invents a
-second authority for enabled state.
+Plugin admission owns writes; discovery never edits a profile's selection.
 """
 
 from __future__ import annotations
@@ -16,16 +11,17 @@ from typing import Any, Optional
 
 def _profiles_root() -> Path:
     # Plugin discovery and dependency publication must use the same home root.
-    from hermes_cli.runtime_paths import dependency_home_root
+    from pm.environments import dependency_home_root
 
     return dependency_home_root() / "profiles"
 
 
-def _read_home_config(home: Path) -> Optional[dict[str, Any]]:
-    """Read a selection once; only an absent file means an unknown home.
+def read_home_selection(home: Path) -> Optional[dict[str, Any]]:
+    """The plugin/memory selection a home's config.yaml declares (None: no config yet).
 
-    An unreadable selection must not shrink the next dependency generation.
-    Empty YAML is an explicit empty configuration, as in the CLI loader.
+    The public reader for anything that must agree with what PM installs for that home.
+    An unreadable selection raises rather than shrinking the next dependency generation;
+    empty YAML is an explicit empty configuration, as in the CLI loader.
     """
     config_path = home / "config.yaml"
     try:
@@ -91,9 +87,10 @@ def _is_directory(path: Path) -> bool:
         raise ValueError(f"could not inspect plugin directory: {path}") from exc
 
 
-def _all_homes() -> list[Path]:
-    """Enumerate the complete union or refuse; a partial scan cannot remove members."""
-    from hermes_cli.runtime_paths import dependency_home_root
+def dependency_homes() -> list[Path]:
+    """Every home whose selection feeds the shared venv: the default home plus each profile.
+    Enumerates the complete union or refuses; a partial scan cannot remove members."""
+    from pm.environments import dependency_home_root
 
     homes = [dependency_home_root()]
     root = _profiles_root()
@@ -107,7 +104,7 @@ def _all_homes() -> list[Path]:
     return homes
 
 
-def enabled_plugins_ordered(*, proposed_home=None, enabled=None, disabled=None) -> dict[Path, list[str]]:
+def enabled_plugins_ordered(*, proposed_home=None, enabled=None, disabled=None, installing: Path | None = None) -> dict[Path, list[str]]:
     """plugins_dir → ordered enabled list, per home. Keyed by the
     PLUGINS DIR (where the member dirs live), not the home itself.
 
@@ -117,14 +114,14 @@ def enabled_plugins_ordered(*, proposed_home=None, enabled=None, disabled=None) 
     the union. Admission refuses a conflicting candidate without changing
     the active environment or disabling an existing provider."""
     out: dict[Path, list[str]] = {}
-    for home in _all_homes():
+    for home in dependency_homes():
         # ONE parse per home feeds both queries (enabled + provider).
-        config = _read_home_config(home)
+        config = read_home_selection(home)
         config = config or {}
         if proposed_home is not None and home.resolve() == Path(proposed_home).resolve():
             config = {**config, "plugins": {"enabled": list(enabled or ()), "disabled": list(disabled or ())}}
         names = _enabled_from_config(config)
-        provider = _provider_from_config(home, config)
+        provider = _provider_from_config(home, config, installing=installing)
         if provider and provider not in names:
             names.append(provider)
         if names:
@@ -132,53 +129,12 @@ def enabled_plugins_ordered(*, proposed_home=None, enabled=None, disabled=None) 
     return out
 
 
-def _provider_from_config(home: Path, config: dict[str, Any]) -> Optional[str]:
+def _provider_from_config(home: Path, config: dict[str, Any], *, installing: Path | None = None) -> Optional[str]:
     """The ``memory.provider`` key of an already-parsed config, when its
     plugin dir exists (no dir = not a member)."""
     provider = (config.get("memory") or {}).get("provider")
     if not provider or not provider.strip():
         return None
     name = provider.strip()
-    return name if _is_directory(home / "plugins" / name) else None
-
-
-def disable_plugins(names: list[str]) -> dict[str, list[str]]:
-    """Remove names from EVERY home's enabled list (an operator or
-    caller decision names the plugin, not the profile — disable where
-    it's enabled). There is NO automatic bisect in pm today; this is
-    the explicit write-back path. Returns per-home what was removed.
-
-    Writes go through utils.atomic_roundtrip_yaml_update — the same
-    atomic, comment-preserving round-trip writer the plugins CLI's
-    config path uses — pointed at that home's config.yaml (explicit
-    home scope; pm never derives the target from ambient state). A
-    write failure RAISES: a disable that didn't land must never be
-    reported as removed. An EXISTING home config that can't be parsed
-    also raises — silently skipping it would report success while the
-    plugin stays enabled in that home.
-    """
-    removed: dict[str, list[str]] = {}
-    if not names:
-        return removed
-    name_set = set(names)
-
-    for home in _all_homes():
-        config_path = home / "config.yaml"
-        config = _read_home_config(home)
-        if config is None:
-            continue
-        plugins_cfg = config.get("plugins")
-        if not isinstance(plugins_cfg, dict):
-            continue
-        enabled = plugins_cfg.get("enabled")
-        if not isinstance(enabled, list):
-            continue
-        hit = [n for n in enabled if isinstance(n, str) and n in name_set]
-        if not hit:
-            continue
-        kept = [n for n in enabled if not (isinstance(n, str) and n in name_set)]
-        import utils
-
-        utils.atomic_roundtrip_yaml_update(config_path, "plugins.enabled", kept)
-        removed[str(home)] = hit
-    return removed
+    return name if (_is_directory(home / "plugins" / name) or
+                    (installing is not None and (home / "plugins" / name).resolve() == installing.resolve())) else None

@@ -67,6 +67,14 @@ export async function bundleElectronMain({ source, out, stamp, dev = false }) {
     format: 'cjs',
     outfile: join(out, 'electron-preload.js'),
   })
+  // Preview-pane <webview> guest preload; main.ts hands this path to the
+  // preview webview via will-attach-webview.
+  await build({
+    ...common,
+    entryPoints: [join(source, 'apps/desktop/electron/preview-guest-preload-entry.ts')],
+    format: 'cjs',
+    outfile: join(out, 'preview-guest-preload.js'),
+  })
 }
 
 if (isMain(import.meta.url)) {

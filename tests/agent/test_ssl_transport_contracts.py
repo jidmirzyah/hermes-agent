@@ -74,8 +74,9 @@ def test_provider_ca_reaches_the_real_probe_transport(local_tls, monkeypatch, pr
 
     url, bundle = local_tls
     monkeypatch.setattr(model_metadata, "detect_local_server_type", lambda *args, **kwargs: None)
-    settings = {"ssl_ca_cert": certifi.where()}
-    monkeypatch.setattr("hermes_cli.config.get_custom_provider_tls_settings", lambda base_url: dict(settings))
+    settings = {"name": "loopback", "base_url": url, "ssl_ca_cert": certifi.where()}
+    monkeypatch.setattr("hermes_cli.config.get_compatible_custom_providers", lambda config=None: [dict(settings)])
+    monkeypatch.setenv("SSL_CERT_FILE", "/missing-ambient.pem")
 
     def discover():
         if probe == "metadata":
@@ -86,38 +87,41 @@ def test_provider_ca_reaches_the_real_probe_transport(local_tls, monkeypatch, pr
     settings["ssl_ca_cert"] = str(bundle)
     assert discover() == ["test-model"]
 
-    # Model probing must use the same resolver as chat, not a path whose TLS
-    # semantics change after truststore's process-wide injection.
-    seen = []
-    original = ssl_verify.resolve_httpx_verify
-
-    def record(**kwargs):
-        context = original(**kwargs)
-        seen.append(context)
-        return context
-
-    monkeypatch.setattr(ssl_verify, "resolve_httpx_verify", record)
+    settings["ssl_ca_cert"] = certifi.where()
+    settings["ssl_verify"] = False
     assert discover() == ["test-model"]
-    assert seen and seen[-1] is original(ca_bundle=str(bundle))
 
 
-@pytest.mark.parametrize("variable", ["SSL_CERT_FILE", "SSL_CERT_DIR"])
+@pytest.mark.parametrize("variable", ["HERMES_CA_BUNDLE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "SSL_CERT_FILE", "SSL_CERT_DIR"])
 def test_ambient_ca_cannot_break_the_shared_client(variable, tmp_path, monkeypatch):
+    from run_agent import AIAgent
+
     monkeypatch.setenv(variable, str(tmp_path / "missing-ca"))
+    for _ in range(2):
+        assert ssl_verify.install_truststore() is True
     verify = ssl_verify.resolve_httpx_verify()
     with httpx.Client(verify=verify) as client:
-        assert not client.is_closed
-    client = process_bootstrap.build_keepalive_http_client("https://example.invalid", verify=verify)
+        context = client._transport._pool._ssl_context
+        assert context.verify_mode == ssl.CERT_REQUIRED and context.check_hostname
+        assert type(context).__module__.startswith("truststore")
+    client = AIAgent._build_keepalive_http_client("https://example.invalid", verify=verify)
     assert client is not None
     client.close()
 
 
-def test_pinned_clients_share_transport_not_close_state(local_tls):
+@pytest.mark.parametrize("insecure", [False, True])
+def test_pinned_clients_share_transport_not_close_state(local_tls, insecure):
+    from run_agent import AIAgent
     url, bundle = local_tls
-    first = ssl_verify.resolve_httpx_verify(ca_bundle=str(bundle))
-    second = ssl_verify.resolve_httpx_verify(ca_bundle=str(bundle))
+    first = ssl_verify.resolve_httpx_verify(ca_bundle=str(bundle), ssl_verify=not insecure)
+    second = ssl_verify.resolve_httpx_verify(ca_bundle=str(bundle), ssl_verify=not insecure)
+    if not insecure:
+        assert isinstance(first, _original_SSLContext)
+        assert not type(first).__module__.startswith("truststore")
+        assert first.verify_mode == ssl.CERT_REQUIRED and first.check_hostname
+        assert len(first.get_ca_certs()) == 1
     assert first is second
-    a = process_bootstrap.build_keepalive_http_client(url, verify=first)
+    a = AIAgent._build_keepalive_http_client(url, verify=first)
     b = process_bootstrap.build_keepalive_http_client(url, verify=second)
     assert a is not None and b is not None
     try:

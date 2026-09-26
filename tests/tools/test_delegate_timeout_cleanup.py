@@ -31,6 +31,8 @@ class _SlowUnwindingChild:
 
     def run_conversation(self, **_kwargs):
         self.started.set()
+        # Generous bounds: these gate on events the test sets promptly; a tight bound only
+        # turns a load-starved test thread into a spurious early exit that fires close().
         assert self.interrupted.wait(timeout=30)
         # Model the real child turn's finally path: it still performs session
         # activity/SQLite cleanup after the parent requests interruption.

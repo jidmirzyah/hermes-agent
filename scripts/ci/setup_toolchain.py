@@ -18,10 +18,23 @@ from pm.paths import lockfile_path
 from pm.registry import walk
 from pm.store import current_target
 
+_ROOTS = {"python": ["uv"], "node": ["npm"], "all": ["npm", "uv"]}
 
-def packages(toolchain: str) -> list[str]:
-    roots = {"python": ["python", "uv"], "node": ["npm"], "all": ["python", "uv", "npm"]}
-    return sorted(package.name for package in walk(roots[toolchain]))
+
+def parse_package_list(value: str) -> list[str]:
+    """Comma-separated extra PM tools (e.g. `ffmpeg`) beyond the toolchain roots."""
+    if value == "":
+        return []
+    for name in value.split(","):
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name.strip()):
+            raise argparse.ArgumentTypeError(f"invalid pm tool name: {name!r}")
+    return sorted({name.strip() for name in value.split(",")})
+
+
+def packages(toolchain: str, extra: list[str] | None = None) -> list[str]:
+    # walk() resolves the deps-first closure, so an extra tool's dependencies
+    # (ffmpeg -> none) come along without listing them.
+    return sorted(package.name for package in walk(_ROOTS[toolchain] + (extra or [])))
 
 
 def file_commands(destination: str, values: dict) -> None:
@@ -56,7 +69,7 @@ def prepare(args) -> None:
     home = args.home.resolve()
     lock = Lockfile(lockfile_path())
     target = current_target()
-    names = packages(args.toolchain)
+    names = packages(args.toolchain, args.packages)
     values = {
         "packages": json.dumps(names), "target": target, "arch": target.split("-")[1],
         "store": str(home / "tools"),
@@ -66,6 +79,9 @@ def prepare(args) -> None:
         if not version or not lock.artifacts(name, target):
             raise ValueError(f"{name} has no pinned artifact for {target}")
         values[f"{name}-version"] = version.partition("+")[0] if name == "python" else version
+    # Cache-key fragment for the tools cache: empty when no extras, so every
+    # existing key stays byte-identical.
+    values["extra-packages"] = "".join(f"-{name}" for name in (args.packages or []))
     # The OS image belongs in the uv cache identity: built wheels can link
     # against its system libraries. Unlike npm's cache, these are not just JS.
     values["os-version"] = platform.platform()
@@ -103,7 +119,7 @@ def archive_inputs(args) -> None:
     from scripts.ci.archive_inputs import Archive, pinned_inputs, stage_inputs
     from scripts.releases import r2
 
-    pins = pinned_inputs(repo_root(), target=current_target(), packages=set(packages(args.toolchain)))
+    pins = pinned_inputs(repo_root(), target=current_target(), packages=set(packages(args.toolchain, args.packages)))
     stage_inputs(pins, archive=Archive(*r2.credentials()), store=Store(args.home.resolve() / "tools"))
 
 
@@ -112,14 +128,15 @@ def install(args) -> None:
 
     from pm import build_requirements_environment
     from pm.cli import _live_progress
-    from pm.ensure import ensure, env_for
+    from pm.install import ensure, env_for
     from pm.lock import Facts
+    from pm.package import compose_env
     from pm.packages import uv_cache_dir
     from pm.paths import facts_path, store_root
     from pm.registry import get_package
 
-    names = packages(args.toolchain)
-    for name in names:
+    names = packages(args.toolchain, args.packages)
+    for name in _ROOTS[args.toolchain] + args.packages:
         ensure(name, explicit=True, progress=_live_progress(name))
     facts = Facts(facts_path())
     target = current_target()
@@ -128,11 +145,17 @@ def install(args) -> None:
         name: get_package(name).binary(store_root() / facts.get(name)["entry"], target)
         for name in public_names
     }
-    environment = env_for(*public_names)
-    path = env_for(*public_names, base_env={})["PATH"].split(os.pathsep)
+    environment = env_for(*public_names, base_env={})
+    path = environment["PATH"].split(os.pathsep)
+    environment = compose_env([environment])
     exported = {}
     outputs = {f"{name}-path": str(binaries[name]) for name in public_names}
     if "python" in names:
+        # uv is PM-internal (never on a user's PATH), but the test suites this
+        # toolchain serves drive real uv through shutil.which("uv").
+        uv = get_package("uv").binary(store_root() / facts.get("uv")["entry"], target)
+        path.append(str(uv.parent))
+        outputs["uv-path"] = str(uv)
         # Keep third-party CI tooling out of the verified interpreter store.
         # PM prepares the empty command environment through its normal builder.
         commands = args.home.resolve() / "python" / facts.get("python")["entry"]
@@ -164,7 +187,7 @@ def dependencies(args) -> None:
         return
     import tomllib
 
-    from hermes_cli.runtime_paths import selected_venv
+    from pm.environments import selected_venv
     from pm import build_environment, check_project_lock, sync_venv
     from pm.paths import repo_root
 
@@ -203,6 +226,7 @@ def main() -> None:
     parser.add_argument("--toolchain", choices=["python", "node", "all"], default="python")
     parser.add_argument("--home", type=Path, required=True)
     parser.add_argument("--extras", type=parse_extras, default="")
+    parser.add_argument("--packages", type=parse_package_list, default=[], help="extra PM tools beyond the toolchain roots (e.g. ffmpeg)")
     args = parser.parse_args()
     if args.toolchain == "node" and args.extras is not None:
         parser.error("extras require the python or all toolchain")

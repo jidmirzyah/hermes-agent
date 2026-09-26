@@ -38,7 +38,7 @@ def test_get_git_banner_state_reads_origin_and_head(tmp_path):
             raise AssertionError(f"unexpected command: {cmd}")
         return results[key]
 
-    with patch("hermes_cli.banner.subprocess.run", side_effect=fake_run):
+    with patch("hermes_cli.source_check.subprocess.run", side_effect=fake_run):
         state = banner.get_git_banner_state(repo_dir)
 
     assert state == {"upstream": "b2f477a3", "local": "af8aad31", "ahead": 3}
@@ -234,7 +234,8 @@ def test_check_via_local_git_insteadof_rewrite_routes_to_ssh_fastpath(tmp_path, 
     monkeypatch.setenv("USERPROFILE", str(home))  # Git for Windows resolves global config here too
 
     calls = []
-    real_run = banner.subprocess.run
+    from hermes_cli import source_check
+    real_run = source_check.subprocess.run
 
     def spy_run(args, **kwargs):
         calls.append((list(args), kwargs))
@@ -242,10 +243,10 @@ def test_check_via_local_git_insteadof_rewrite_routes_to_ssh_fastpath(tmp_path, 
             raise AssertionError(f"a GitHub origin must be probed via the API, not git {args[1]}")
         return real_run(args, **kwargs)
 
-    monkeypatch.setattr(banner.subprocess, "run", spy_run)
-    monkeypatch.setattr(banner, "_github_branch_tip", lambda slug, branch: head_sha)
+    monkeypatch.setattr(source_check.subprocess, "run", spy_run)
+    monkeypatch.setattr(source_check, "_branch_tip", lambda *args: (head_sha, False))
 
-    behind = banner._check_via_local_git(repo_dir)
+    behind = source_check.check_for_updates(install_root=repo_dir, branch="main").get("behind")
 
     # Same upstream tip as HEAD: the SSH fast path concludes "not behind".
     assert behind == 0

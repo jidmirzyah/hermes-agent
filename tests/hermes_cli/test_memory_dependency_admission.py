@@ -12,9 +12,9 @@ import pytest
 import hermes_yaml as yaml
 
 from hermes_cli import memory_setup
-from hermes_cli.runtime_paths import selected_venv
+from pm.environments import selected_venv
 from pm import paths
-from tests.pm.test_workspace_build_inputs import _wheel
+from tests.pm._fixtures import _wheel
 
 
 @pytest.mark.parametrize('picker', [False, True])
@@ -58,7 +58,7 @@ def test_setup_requires_dependencies_and_keeps_the_existing_union(tmp_path, monk
     monkeypatch.setenv('HERMES_HOME', str(home))
     monkeypatch.setenv('HERMES_RUNTIME_DIR', str(tmp_path / 'tools'))
     monkeypatch.setattr(paths, 'repo_root', lambda: core)
-    ensure = importlib.import_module('pm.ensure')
+    ensure = importlib.import_module('pm.install')
     monkeypatch.setattr(ensure, 'lazy_installs_allowed', lambda: True)
     monkeypatch.setattr("pm._uv._toolchain", lambda **kwargs: (Path(uv), Path(sys.executable)))
     # Keep the public client and real engine; only tool acquisition is injected.

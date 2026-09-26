@@ -11,8 +11,10 @@ import re
 import sys
 import time
 from datetime import datetime, timezone
-from typing import Callable, Iterable
+from typing import Callable, Iterable, cast
 from urllib.parse import quote, urlparse
+
+from scripts.releases.r2_scope import R2Scope
 
 REGION = "auto"
 SERVICE = "s3"
@@ -322,6 +324,52 @@ def download_object(
     creds: dict[str, str], base: str, bucket: str, key: str, file: Path, now: str,
     *, expected_size: int, expected_sha256: str,
 ) -> None:
+    url = R2Scope.configured().object_url(base, bucket, key)
+    parsed = urlparse(url)
+    def headers(attempt: int) -> dict[str, str]:
+        return r2_headers("GET", parsed.netloc, parsed.path, "", EMPTY_SHA,
+                          now if attempt == 1 else amz_timestamp(), creds)
+    _download_url(url, file, headers, expected_size=expected_size, expected_sha256=expected_sha256)
+
+
+def public_artifact_url(base: str, key: str) -> str:
+    """Public reads never carry credentials or follow redirects out of the archive."""
+    parsed = urlparse(base)
+    if (not parsed.hostname or parsed.username is not None or parsed.password is not None
+            or parsed.query or parsed.fragment or parsed.params
+            or any(c in base for c in ('%', '\\')) or any(ord(c) <= 32 for c in base)
+            or any(part in ('.', '..') for part in parsed.path.split('/'))
+            or not (parsed.scheme == 'https' or (parsed.scheme == 'http'
+                    and parsed.hostname in ('127.0.0.1', 'localhost', '::1')))):
+        raise ValueError('Invalid public artifact base URL')
+    return public_url_for(base, relative_artifact_path(key))
+
+
+def read_public_receipt(base: str, key: str) -> dict:
+    url = public_artifact_url(base, key)
+    parsed = urlparse(url)
+    conn = _connection(url, timeout=60.0)
+    try:
+        conn.request('GET', parsed.path)
+        response = conn.getresponse()
+        if response.status != 200:
+            raise R2RequestError('GET', parsed.path, response.status)
+        # Receipts are metadata, never an unbounded binary download.
+        body = response.read(4 * 1024 * 1024 + 1)
+        if len(body) > 4 * 1024 * 1024:
+            raise ValueError('Public handoff receipt exceeds metadata limit')
+        return json.loads(body)
+    finally:
+        conn.close()
+
+
+def download_public_object(base: str, key: str, file: Path, *, expected_size: int, expected_sha256: str) -> None:
+    _download_url(public_artifact_url(base, key), file, lambda _attempt: {},
+                  expected_size=expected_size, expected_sha256=expected_sha256)
+
+
+def _download_url(url: str, file: Path, request_headers: Callable[[int], dict[str, str]],
+                  *, expected_size: int, expected_sha256: str) -> None:
     """Publish a download locally only after its exact receipt matches."""
     import tempfile
 
@@ -329,15 +377,12 @@ def download_object(
         raise ValueError("Invalid artifact size or SHA256")
     file = Path(file)
     file.parent.mkdir(parents=True, exist_ok=True)
-    url = f"{base}/{bucket}/{encode_key_path(key)}"
     parsed = urlparse(url)
     for attempt in range(1, 4):
-        headers = r2_headers("GET", parsed.netloc, parsed.path, "", EMPTY_SHA,
-                             now if attempt == 1 else amz_timestamp(), creds)
         conn = _connection(url, timeout=600.0)
         temporary = None
         try:
-            conn.request("GET", parsed.path, headers=headers)
+            conn.request("GET", parsed.path, headers=request_headers(attempt))
             response = conn.getresponse()
             if response.status != 200:
                 raise R2RequestError("GET", parsed.path, response.status)
@@ -347,9 +392,11 @@ def download_object(
                 while chunk := response.read(1024 * 1024):
                     digest.update(chunk)
                     size += len(chunk)
+                    if size > expected_size:
+                        raise ValueError(f"Artifact checksum mismatch: {parsed.path}")
                     output.write(chunk)
             if size != expected_size or digest.hexdigest() != expected_sha256:
-                raise ValueError(f"Artifact checksum mismatch: {key}")
+                raise ValueError(f"Artifact checksum mismatch: {parsed.path}")
             temporary.replace(file)
             return
         except R2RequestError as error:
@@ -394,7 +441,9 @@ def _stream_and_hash(url: str, creds: dict[str, str], now: str, algorithm: str):
 
 def channel_for_tag(tag: str) -> str:
     """'stable' for a stable tag, 'canary' for a -canary.<ts> tag."""
-    return "canary" if re.search(r"-canary\.20\d{6}(?:\d{6})?$", tag) else "stable"
+    from hermes_cli.update_channel import is_canary_tag
+
+    return "canary" if is_canary_tag(tag) else "stable"
 
 
 def staging_key_for(tag: str, filename: str) -> str:
@@ -461,9 +510,9 @@ DEFAULT_PUBLIC_URL = "https://hermes-assets.nousresearch.com"
 
 
 def public_base_url(explicit: str | None = None) -> str:
-    return (
+    return R2Scope.configured().public_base(
         explicit or os.environ.get("CLOUDFLARE_R2_PUBLIC_URL") or DEFAULT_PUBLIC_URL
-    ).rstrip("/")
+    )
 
 
 def public_url_for(base_url: str, key: str) -> str:
@@ -487,6 +536,10 @@ def feed_dir_for(platform: str, channel: str) -> str:
 
 def cache_control_for(key: str) -> str | None:
     """APT indexes are mutable; by-hash indexes and versioned packages are not."""
+    if key.startswith("releases/channels/"):
+        return "no-store"
+    if key.startswith(("releases/channel-builds/", "releases/channel-identities/")):
+        return "public, max-age=31536000, immutable"
     if key.endswith((".appinstaller", ".html")) or key.startswith("releases/stable/") or (key.startswith("releases/darwin/") and key.endswith("-mac.yml")):
         return "no-store"
     if not key.startswith("releases/termux/"):
@@ -515,6 +568,7 @@ def required_env(name: str) -> str:
 
 def credentials() -> tuple[dict[str, str], str, str]:
     """(creds, base, bucket) from the R2 env vars. No secrets are printed."""
+    R2Scope.configured()  # Fail closed on a malformed disposable lease.
     creds = {
         "access_key_id": required_env("CLOUDFLARE_R2_ACCESS_KEY_ID"),
         "secret_key": required_env("CLOUDFLARE_R2_SECRET_ACCESS_KEY"),
@@ -538,11 +592,13 @@ def put_object(
     content_type: str | None,
     conditions: dict[str, str] | None = None,
     fetcher: Callable[..., Response] | None = None,
+    *,
+    multipart_part_size: int = 64 * 1024 * 1024,
 ) -> None:
-    """`payload` is a FILE PATH (streamed — the msixbundle is ~2.7GB; str or
-    os.PathLike accepted) or a small in-memory bytes body (feed manifests
-    from finalize). A 412 on an immutable path PUT verifies the remote bytes
-    match before treating the conflict as success."""
+    """Stream file paths, using multipart for large artifacts, or send bytes.
+
+    Immutable conflicts must match the local digest before reuse.
+    """
     conditions = conditions or {}
     is_path = isinstance(payload, (str, os.PathLike))
     if is_path:
@@ -565,11 +621,16 @@ def put_object(
     if cache_control:
         extra["Cache-Control"] = cache_control
 
-    url = f"{base}/{bucket}/{encode_key_path(key)}"
+    url = R2Scope.configured().object_url(base, bucket, key)
     last_error: Exception | None = None
     response: Response | None = None
     for _ in range(3):
         try:
+            if is_path and size > multipart_part_size:
+                from .r2_multipart import upload_file
+
+                upload_file(url, cast(str, payload), size, creds, content_type, extra, multipart_part_size)
+                break
             response = (
                 fetcher(method="PUT", url=url, body_hash=body_hash, body=body,
                         content_length=size, extra_headers=extra)
@@ -706,6 +767,8 @@ def list_objects(
     if creds is None:
         creds, base, bucket = credentials()
     assert creds is not None and base is not None and bucket is not None
+    scope = R2Scope.configured()
+    prefix = scope.listing_prefix(prefix)
     keys: list[str] = []
     last_modified: dict[str, int] = {}
     token: str | None = None
@@ -716,7 +779,7 @@ def list_objects(
         if token:
             params["continuation-token"] = token
         query = canonical_query(params)
-        url = f"{base}/{bucket}?{query}"
+        url = f"{scope.bucket_url(base, bucket)}?{query}"
         if fetcher is not None:
             response = fetcher(method="GET", url=url, body_hash=EMPTY_SHA)
             if response.status >= 400:
@@ -729,7 +792,8 @@ def list_objects(
         if not parsed["truncated"] or not parsed["nextToken"]:
             break
         token = parsed["nextToken"]
-    return {"keys": keys, "lastModified": last_modified}
+    return {"keys": [scope.logical_key(key) for key in keys],
+            "lastModified": {scope.logical_key(key): value for key, value in last_modified.items()}}
 
 
 def get_object(
@@ -737,7 +801,7 @@ def get_object(
     fetcher: Callable[..., Response] | None = None,
 ) -> str | None:
     """GET one object's body, or None when it does not exist / cannot be read."""
-    url = f"{base}/{bucket}/{encode_key_path(key)}"
+    url = R2Scope.configured().object_url(base, bucket, key)
     response = (
         fetcher(method="GET", url=url, body_hash=EMPTY_SHA)
         if fetcher is not None
@@ -748,10 +812,13 @@ def get_object(
 
 def canary_doomed_keys(keys: list[str], cutoff: str) -> list[str]:
     """Keys whose own canary date (YYYYMMDD in the name) is before `cutoff`."""
+    from hermes_cli.update_channel import _CANARY_TAG_RE
+
+    tag_re = re.compile(_CANARY_TAG_RE.pattern.strip("^$"))
     doomed = []
     for key in keys:
-        match = re.search(r"-canary\.(\d{8})", key)
-        if match and match.group(1) < cutoff:
+        match = tag_re.search(key)
+        if match and match.group(0).split("-canary.", 1)[1][:8] < cutoff:
             doomed.append(key)
     return doomed
 
@@ -904,7 +971,7 @@ def prune(
         if dry_run:
             print(f"(dry-run) would delete r2:{key}")
             continue
-        url = f"{base}/{bucket}/{encode_key_path(key)}"
+        url = R2Scope.configured().object_url(base, bucket, key)
         response = (
             fetcher(method="DELETE", url=url, body_hash=EMPTY_SHA)
             if fetcher is not None
@@ -1006,8 +1073,11 @@ def main(argv: list[str] | None = None) -> None:
 
 
 if __name__ == "__main__":
+    # Siblings import the canonical module; run the CLI on that same identity.
+    from scripts.releases.r2 import main as cli_main
+
     try:
-        main()
+        cli_main()
     except SystemExit:
         raise
     except Exception as err:  # pragma: no cover — CLI error surface

@@ -24,7 +24,8 @@ def layout(tmp_path, monkeypatch):
     for path in witnesses:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("keep", encoding="utf-8")
-    data = [home / "config.yaml", home / "sessions" / "session.json", home / "workspace" / "notes.txt"]
+    data = [home / "config.yaml", home / "sessions" / "session.json", home / "workspace" / "notes.txt",
+            home / ".env", home / "logs" / "file"]
     for path in data:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("{}" if path.suffix in {".yaml", ".json"} else "user data", encoding="utf-8")
@@ -40,8 +41,9 @@ def layout(tmp_path, monkeypatch):
 @pytest.mark.parametrize("mode", ["confirmed", "cancel", "dry-run"])
 def test_data_only_preserves_runtime_and_sibling_homes(layout, monkeypatch, mode):
     import json
-    from hermes_cli.runtime_paths import install_state_dir, runtime_facts_path, selected_venv
+    from pm.environments import install_state_dir, runtime_facts_path, selected_venv
 
+    monkeypatch.delattr(Path, "is_junction", raising=False)
     home, witnesses, data = layout
     source = uninstall.get_project_root()
     generation = install_state_dir(source) / "environments" / "selected"

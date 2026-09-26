@@ -1,63 +1,46 @@
-"""The collection guard against a test carrying two platforms() markers.
-
-A module-level gate stacked on a per-test gate ran on no host at all while
-both the full-suite and marked lanes reported green — the silent coverage
-loss the guard exists for. tests/conftest.py fails collection instead; this
-pins that behaviour so the guard can't be dropped silently.
-"""
-
-from __future__ import annotations
+"""Run the real collection hook; skip-all and unregistered guards must fail."""
+import os
+from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
-from tests.conftest import _reject_contradictory_platform_marks
 
-
-class _FakeItem:
-    """Stands in for a collected item: the guard reads only these two."""
-
-    def __init__(self, nodeid: str, *marks) -> None:
-        self.nodeid = nodeid
-        self._marks = list(marks)
-
-    def iter_markers(self, name=None):
-        if name is None:
-            return iter(self._marks)
-        return iter(m for m in self._marks if m.name == name)
-
-
-def test_single_platforms_marker_is_accepted():
-    items = [
-        _FakeItem("t.py::test_linux", pytest.mark.platforms("linux")),
-        _FakeItem("t.py::test_win", pytest.mark.platforms("windows", arch="arm64")),
-        _FakeItem("t.py::test_not", pytest.mark.platforms("not macos")),
-    ]
-    _reject_contradictory_platform_marks(items)  # must not raise
-
-
-def test_unmarked_and_non_platform_markers_are_accepted():
-    _reject_contradictory_platform_marks(
-        [
-            _FakeItem("t.py::test_plain"),
-            _FakeItem("t.py::test_slow", pytest.mark.slow),
-        ]
-    )
-
-
-def test_two_platforms_markers_fail_collection():
-    items = [
-        _FakeItem("t.py::test_ok", pytest.mark.platforms("linux")),
-        _FakeItem(
-            "t.py::test_bad",
-            pytest.mark.platforms("linux"),
-            pytest.mark.platforms("windows"),
-        ),
-    ]
-    with pytest.raises(pytest.UsageError) as excinfo:
-        _reject_contradictory_platform_marks(items)
-
-    message = str(excinfo.value)
-    assert "t.py::test_bad" in message
-    assert "at most one platforms()" in message
-    # The passing item must not be named — the error is a list of offenders.
-    assert "t.py::test_ok" not in message
+@pytest.mark.parametrize("invalid,message", [("", ""), ("stacked", "at most one platforms()"),
+                                               ("keyword", "unexpected keyword")])
+def test_native_collection_witnesses(tmp_path, invalid, message):
+    root = Path(__file__).resolve().parents[1]
+    host = {"linux": "linux", "darwin": "macos", "win32": "windows"}[sys.platform]
+    (tmp_path / "conftest.py").write_text(
+        f"import sys; sys.path.insert(0, {str(root)!r})\n"
+        "from tests.conftest import pytest_configure, pytest_collection_modifyitems\n", encoding="utf-8")
+    suite = "import pytest\nfrom pathlib import Path\n"
+    for name, marker in [
+        ("plain", ""), ("any", "@pytest.mark.platforms('any')"),
+        ("native", f"@pytest.mark.platforms({host!r})"),
+        ("foreign", f"@pytest.mark.platforms('not {host}')"),
+        ("arch", "@pytest.mark.platforms('any', arch='nonexistent-architecture')"),
+    ]:
+        suite += f"{marker}\ndef test_{name}():\n    Path({name!r}).touch()\n"
+    (tmp_path / "test_valid.py").write_text(suite, encoding="utf-8")
+    if invalid:
+        marker = "@pytest.mark.platforms('any')" if invalid == "stacked" else "@pytest.mark.platforms('any', bogus=True)"
+        module_mark = "pytestmark = pytest.mark.platforms('any')\n" if invalid == "stacked" else ""
+        (tmp_path / "test_bad.py").write_text(
+            f"import pytest\n{module_mark}{marker}\ndef test_bad():\n    raise AssertionError('must reject collection')\n",
+            encoding="utf-8")
+    result = subprocess.run([sys.executable, "-m", "pytest", "-q", "-o", "addopts=", str(tmp_path)],
+                            cwd=tmp_path, env={**os.environ, "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"},
+                            capture_output=True, text=True, timeout=30)
+    output = result.stdout + result.stderr
+    witnesses = {p.name for p in tmp_path.iterdir() if p.name in {"plain", "any", "native", "foreign", "arch"}}
+    if invalid:
+        assert result.returncode == 4, output
+        assert message in output and "test_bad.py::test_bad" in output
+        assert "test_valid.py::" not in output
+        assert not witnesses
+    else:
+        assert result.returncode == 0, output
+        assert "3 passed, 2 skipped" in output
+        assert witnesses == {"plain", "any", "native"}

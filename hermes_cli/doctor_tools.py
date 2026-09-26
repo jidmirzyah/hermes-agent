@@ -12,7 +12,7 @@ from pathlib import Path
 from hermes_cli.doctor_platform import _system_package_install_cmd
 from hermes_cli.doctor_report import Finding, _fail_and_issue, check_bool, check_info, check_ok, check_warn, doctor_check
 from hermes_cli.vercel_auth import describe_vercel_auth
-from hermes_constants import agent_browser_runnable, is_termux as _is_termux
+from hermes_constants import is_termux as _is_termux
 from tools.environments.docker import docker_runtime_name, docker_runtime_start_hint, find_docker
 
 
@@ -25,32 +25,17 @@ def _safe_which(cmd: str) -> str | None:
 
 
 def _pm_tool_path(name: str) -> Path | None:
-    """Answer a tool's binary from the pm store (facts.json), not PATH.
+    """Use PM's current selection, including writable payload extensions.
 
-    Doctor probes tools (git, rg, ...) that pinned installs run out of
-    the store; nothing puts the store on an interactive shell's PATH, so
-    a PATH-only probe reports a healthy managed install as "not found".
-    This answers from pm's registry/store/package authority: the recorded
-    entry's binary when it exists on disk, None when unstaged or the
-    recorded binary is gone (deleted = report missing, never guess).
-    Contract tests: tests/hermes_cli/test_doctor_pm_store_probe.py.
+    Old facts are diagnostic evidence, not an available runtime tool.
     """
     try:
-        import pm  # noqa: F401 — imports pm.packages, registering the definitions
-        from pm import paths, registry, store
-        from pm.lock import Facts
+        from pm import installed_package
 
-        fact = Facts(paths.facts_path()).get(name) or {}
-        entry_name = fact.get("entry")
-        if not entry_name:
-            return None
-        package = registry.get_package(name)
-        binary = package.binary(store.Store(paths.store_root()).entry(entry_name), store.current_target())
+        installed = installed_package(name)
     except Exception:
         return None
-    if binary is None or not binary.is_file():
-        return None
-    return binary
+    return installed.binary if installed is not None else None
 
 
 def _pm_package_for_command(command: str) -> str | None:
@@ -339,37 +324,28 @@ def _check_terminal_backend(should_fix: bool, f: Finding) -> None:
 
 
 def _check_agent_browser(should_fix: bool) -> bool:
-    """agent-browser resolution; returns True when browser tools will find a usable install.
-
-    Mirrors ``tools.browser_tool_install._find_agent_browser``'s own cascade (lazy npx or a global/Hermes-managed
-    install) so doctor can't diverge from the tools; validate=False keeps it a cheap, side-effect-free check.
-    """
+    """Read the runtime's installed selection; only --fix may acquire through PM."""
     try:
-        # agent-browser is no longer a root package.json dependency (#43564) — it resolves lazily via npx
-        # (or a global/Hermes-managed install) at first use.
-        from tools.browser_tool_install import _find_agent_browser, _is_npx_agent_browser_sentinel
+        from tools.browser_tool_install import _find_agent_browser
         resolved = _find_agent_browser(validate=False)
     except Exception:
         resolved = None
-    if resolved and _is_npx_agent_browser_sentinel(resolved):
-        check_ok("agent-browser", "(resolves via npx on first use)")
-        if should_fix:
-            # Can't tell whether npx's cache is warm — fire the same warm-up `hermes update` does.
-            from tools.browser_tool_install import warm_agent_browser_npx_cache
-            check_info("  Warmed npx cache for agent-browser" if warm_agent_browser_npx_cache()
-                       else "  Could not warm npx cache (offline or npx unavailable)")
-        return True
-    if resolved and agent_browser_runnable(resolved):
-        check_ok("agent-browser", "(browser automation)")
-        return True
+    if not resolved and should_fix and not _is_termux():
+        try:
+            import pm
+            from tools.browser_tool_install import _find_agent_browser
+            pm.ensure("agent-browser", explicit=True)
+            resolved = _find_agent_browser(validate=False)
+        except Exception as exc:
+            check_warn("agent-browser install failed", f"({exc})")
     if resolved:
-        # Almost always a dangling global symlink left by npm postinstall after `hermes update` wiped node_modules.
-        check_warn("agent-browser found but not runnable", f"(broken symlink at {resolved}? run: npx agent-browser --version)")
-    elif _is_termux():
+        check_ok("agent-browser", f"({resolved})")
+        return True
+    if _is_termux():
         _termux_browser_hints("agent-browser is not installed (expected in the tested Termux path)",
                               "Install it manually later with: npm install -g agent-browser && agent-browser install", node_installed=True)
     else:
-        check_warn("agent-browser not installed", "(requires npm/npx on PATH)")
+        check_warn("agent-browser not installed", "(run: hermes pm install agent-browser)")
     return False
 
 
@@ -429,13 +405,13 @@ def _check_node_and_browser(should_fix: bool, f: Finding) -> None:
     """Node.js, agent-browser resolution, Playwright Chromium, Lightpanda engine."""
     if _safe_which("node"):
         check_ok("Node.js")
-        if _check_agent_browser(should_fix) and not _is_termux():  # Chromium check is not a tested Termux path
-            _check_chromium()
     elif _is_termux():
         _termux_browser_hints("Node.js not found (browser tools are optional in the tested Termux path)",
                               "Install Node.js on Termux with: pkg install nodejs", node_installed=False)
     else:
-        check_warn("Node.js not found", "(optional, needed for browser tools)")
+        check_warn("Node.js not found", "(optional; PM agent-browser is a native executable)")
+    if _check_agent_browser(should_fix) and not _is_termux():
+        _check_chromium()
     _check_lightpanda()
 
 

@@ -144,6 +144,15 @@ def _provider_for_mode(tmp_path, monkeypatch, mode: str):
     return provider
 
 
+def test_initialize_does_not_upgrade_an_old_client(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr("importlib.metadata.version", lambda name: "0.0.1")
+    monkeypatch.setattr("pm.sync_venv", lambda *args, **kwargs: calls.append((args, kwargs)))
+    provider = _provider_for_mode(tmp_path, monkeypatch, "cloud")
+    assert provider._session_id == "test-session"
+    assert calls == [], "provider initialization must not replace the process dependency generation"
+
+
 def _assert_cloud_client_lazy_installed_before_import(tmp_path, monkeypatch, mode: str):
     """Cloud/local-external clients must ensure lazy deps before importing."""
     import builtins
@@ -1541,31 +1550,19 @@ class TestSharedEventLoopLifecycle:
 
         provider_b.shutdown()
 
-    def test_client_aclose_called_on_cloud_mode_shutdown(self, provider):
+    @pytest.mark.parametrize("mode", ["cloud", "local_embedded"])
+    def test_client_aclose_called_on_shutdown(self, provider, mode):
         """Per-provider session cleanup still runs even though the shared
         loop is preserved. Each provider's own aiohttp session is closed
         via ``self._client.aclose()``; only the (empty) shared loop survives.
         """
         assert provider._client is not None
         mock_client = provider._client
+        provider._mode = mode
 
         provider.shutdown()
 
-        mock_client.aclose.assert_called_once()
-        assert provider._client is None
-
-
-class TestShutdown:
-    def test_local_embedded_shutdown_closes_client_on_shared_loop(self, provider):
-        """The embedded client is hindsight_client.Hindsight (HTTP to the side-env
-        daemon): same aclose-on-shared-loop path as cloud."""
-        client = _make_mock_client()
-        provider._mode = "local_embedded"
-        provider._client = client
-
-        provider.shutdown()
-
-        client.aclose.assert_awaited_once()
+        mock_client.aclose.assert_awaited_once()
         assert provider._client is None
 
 
@@ -1639,69 +1636,6 @@ class TestPostSetupEnvEncoding:
         assert "﻿" not in content
 
 
-class TestClientAutoUpgradeRoutesThroughPm:
-    """The initialize()-time hindsight-client auto-upgrade must go through
-    pm.sync_venv (uv.lock owns the pin) — never a direct
-    `uv pip install --python sys.executable` subprocess, which fails with
-    EROFS/EACCES on immutable images (NS-605)."""
-
-    def _init_with_outdated_client(self, tmp_path, monkeypatch, error=None):
-        import importlib.metadata as md
-        import subprocess as subprocess_mod
-        import pm
-
-        config_path = tmp_path / "hindsight" / "config.json"
-        config_path.parent.mkdir(parents=True, exist_ok=True)
-        config_path.write_text(json.dumps({"mode": "cloud"}))
-        monkeypatch.setattr(
-            "plugins.memory.hindsight.get_hermes_home", lambda: tmp_path
-        )
-
-        # Simulate an installed-but-outdated client.
-        monkeypatch.setattr(md, "version", lambda name: "0.0.1")
-
-        calls = []
-
-        def fake_sync(extras=None, **kw):
-            calls.append(tuple(extras or ()))
-            if error is not None:
-                raise error
-
-        monkeypatch.setattr(pm, "sync_venv", fake_sync)
-
-        # Regression guard: no direct pip subprocess may run.
-        def _no_subprocess(*a, **kw):  # pragma: no cover - fails loudly
-            raise AssertionError(f"unexpected subprocess.run during auto-upgrade: {a}")
-        monkeypatch.setattr(subprocess_mod, "run", _no_subprocess)
-
-        provider = HindsightMemoryProvider()
-        provider.initialize(session_id="s", hermes_home=str(tmp_path), platform="cli")
-        return calls
-
-    def test_upgrade_syncs_extra_not_subprocess(self, tmp_path, monkeypatch):
-        calls = self._init_with_outdated_client(tmp_path, monkeypatch)
-        assert calls == [("hindsight",)]
-
-    def test_blocked_upgrade_is_nonfatal_and_surfaces_reason(
-        self, tmp_path, monkeypatch, caplog
-    ):
-        import logging
-
-        import pm as pm_pkg
-
-        with caplog.at_level(logging.WARNING):
-            calls = self._init_with_outdated_client(
-                tmp_path, monkeypatch,
-                error=pm_pkg.InstallError(
-                    "venv", "runtime installs are disabled on this deployment"
-                ),
-            )
-        assert len(calls) == 1  # attempted exactly once, init still completed
-        assert any("runtime installs are disabled" in r.getMessage()
-                   for r in caplog.records)
-
-
-
 class TestMultiplexBackgroundScope:
     """Under multiplex_profiles get_secret fails closed on an unscoped thread;
     the writer / daemon-start threads are spawned from a scoped context and
@@ -1761,3 +1695,24 @@ class TestMultiplexBackgroundScope:
                 t.join(timeout=5)
         assert created == ["p1-secret"]
         p.shutdown()
+
+
+def test_append_mode_trims_retained_turns_without_dropping_any(provider, monkeypatch):
+    """Append retains ship only the delta, so retained turns leave `_session_turns` (a never-ending
+    session no longer pins every turn) while every turn is still shipped exactly once."""
+    provider._auto_retain = True
+    provider._retain_every_n_turns = 3
+    monkeypatch.setattr(provider, "_ensure_writer", lambda: None)
+    monkeypatch.setattr(provider, "_register_atexit", lambda: None)
+    monkeypatch.setattr(provider, "_resolve_retain_target", lambda doc: ("doc", "append"))
+    shipped: list[str] = []
+    monkeypatch.setattr(provider, "_make_turn_retain_job",
+                        lambda turns, **kw: (lambda: shipped.extend(turns)))
+    provider._retain_queue = MagicMock(put=lambda job: job())
+
+    for i in range(7):
+        provider.sync_turn(f"user {i}", f"assistant {i}")
+
+    assert len(provider._session_turns) == 1  # only the un-retained tail (turn 7)
+    assert provider._last_retained_turn_count == 0
+    assert len(shipped) == 6 and len(set(shipped)) == 6

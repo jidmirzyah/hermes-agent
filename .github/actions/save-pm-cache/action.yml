@@ -1,5 +1,5 @@
 name: Save the PM Python dependency cache
-description: Prune dangling entries and save a rolling cache after the consumer, even when it failed.
+description: Prune to the lock and save a rolling cache after the consumer, even when it failed.
 inputs:
   python:
     description: Prepared Python used to invoke PM.
@@ -15,16 +15,18 @@ runs:
   steps:
     # Status checks are needed inside the composite too: the caller can
     # enter after a failed build. Never prune while cancellation kills uv.
-    - name: Prune dangling uv cache entries
+    - name: Prune cache entries outside the project lock
       id: prune
       if: ${{ !cancelled() }}
       shell: bash
       env:
         PM_PYTHON: ${{ inputs.python }}
         PM_CACHE: ${{ inputs.path }}
-      # Keep downloaded wheels as well as source-built wheels. Bundles copy
-      # this cache for offline installs; --ci would discard required inputs.
-      run: '"$PM_PYTHON" -m pm.build_env --prune-cache --cache "$PM_CACHE"'
+        PM_LOCK_SOURCE: ${{ github.workspace }}
+      # Exact-to-lock: downloaded wheels the lock resolves survive (bundles
+      # copy this cache for offline installs), while superseded pins do not
+      # accumulate. --ci was never usable here — it discards downloaded wheels.
+      run: '"$PM_PYTHON" -m pm.build_env --exact-lock --cache "$PM_CACHE" --lock-source "$PM_LOCK_SOURCE"'
     - name: Save reusable Python dependencies
       if: ${{ !cancelled() && steps.prune.outcome == 'success' }}
       uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

@@ -36,7 +36,7 @@ description: "如何为 Hermes Agent 做贡献 — 开发环境配置、代码�
 
 ### PM 开发环境
 
-[PM 开发工作流](/reference/package-management#developer-workflow) 包含首次准备、激活、日常使用、依赖更新和当前 bootstrap 限制。
+[PM 开发工作流](../reference/package-management.md#developer-workflow) 包含首次准备、激活、日常使用、依赖更新和当前 bootstrap 限制。
 请在准备环境前选择独立的开发 `HERMES_HOME`，避免实验代码迁移生产数据。
 
 成功准备后，每次在仓库根目录的新 shell 中激活已有环境。
@@ -62,7 +62,7 @@ PowerShell 开头的点和空格用于 dot-source，不能省略。
 
 ### 独立开发和测试环境 {#manual-development-and-test-environment}
 
-先按 [PM 开发工作流](/reference/package-management#developer-workflow) 准备 Python 3.14。
+先按 [PM 开发工作流](../reference/package-management.md#developer-workflow) 准备 Python 3.14。
 在该 checkout 中使用准备好的 Python，并保持相同的开发 `HERMES_HOME`。
 PM 必须能够启动，才能构建独立测试环境：
 
@@ -111,7 +111,7 @@ scripts/run_tests.sh
 
 ## 跨平台兼容性
 
-Hermes 支持 Linux、macOS、WSL2 和原生 Windows。Windows shell 由 PM 解析 Git Bash。Dashboard 聊天通过 pywinpty/ConPTY 支持原生 Windows，并非仅限 WSL2。平台和依赖限制见[平台支持](/getting-started/platform-support)。
+Hermes 支持 Linux、macOS、WSL2 和原生 Windows。Windows shell 由 PM 解析 Git Bash。Dashboard 聊天通过 pywinpty/ConPTY 支持原生 Windows，并非仅限 WSL2。平台和依赖限制见[平台支持](../getting-started/platform-support.md)。
 
 贡献代码时，请遵守以下规则：
 

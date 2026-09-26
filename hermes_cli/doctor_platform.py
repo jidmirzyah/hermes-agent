@@ -486,7 +486,7 @@ def _check_python_environment(should_fix: bool, f: Finding) -> None:
     # sys.path. Neither sys.prefix nor a stale PYTHONPATH proves activation.
     staged = _staged_venv_dir()
     if staged is not None:
-        from hermes_cli.runtime_paths import site_packages
+        from pm.environments import site_packages
 
         selected_site = site_packages(staged).resolve()
         running_here = selected_site.is_dir() and any(Path(entry).resolve() == selected_site for entry in sys.path)
@@ -559,7 +559,7 @@ def _check_command_installation(should_fix: bool, f: Finding) -> None:
             f.manual_issues.append(_python_repair_hint())
         return
     from hermes_cli._launchers import resolve_store_python
-    from hermes_cli.runtime_paths import base_venv, selected_venv
+    from pm.environments import base_venv, selected_venv
 
     try:
         selected = selected_venv(PROJECT_ROOT)

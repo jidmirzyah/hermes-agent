@@ -87,6 +87,9 @@ test('writes and startup consumption stay in each installation despite a shared 
   assert.equal(fs.existsSync(marker(stable)), false)
   assert.equal(fs.readFileSync(marker(canary), 'utf8'), nextCanaryContents)
   assert.equal(fs.readFileSync(globalMarker, 'utf8'), legacyContents)
+  fs.writeFileSync(marker(commit), 'not json')
+  assert.deepEqual(consumePendingRelaunch(commit, 'commit-build'), { wasUpdateRelaunch: false, fromVersion: undefined })
+  assert.equal(fs.existsSync(marker(commit)), false)
 })
 
 test('cancellation and failed registration remove only their own installation marker', async (): Promise<void> => {
@@ -98,18 +101,38 @@ test('cancellation and failed registration remove only their own installation ma
   let cancelled: number = 0
 
   for (const automatic of [true, false]) {
-    const registration: RelaunchRegistration = await registerUpdateRelaunch(canary, 'canary-old', {
-      relaunch: (): RelaunchWaiterHandle | undefined =>
-        automatic
-          ? {
-              cancel: async (): Promise<void> => {
-                cancelled++
-              }
-            }
-          : undefined
+    let resolveReady!: (handle: RelaunchWaiterHandle | undefined) => void
+
+    const ready: Promise<RelaunchWaiterHandle | undefined> = new Promise(
+      (resolve: (handle: RelaunchWaiterHandle | undefined) => void): void => {
+        resolveReady = resolve
+      }
+    )
+
+    let registered: boolean = false
+
+    const pending: Promise<RelaunchRegistration> = registerUpdateRelaunch(canary, 'canary-old', {
+      relaunch: (): Promise<RelaunchWaiterHandle | undefined> => ready
+    }).then((result: RelaunchRegistration): RelaunchRegistration => {
+      registered = true
+
+      return result
     })
 
+    await new Promise(setImmediate)
+    assert.equal(registered, false)
     assert.equal(fs.existsSync(marker(canary)), true)
+    resolveReady(
+      automatic
+        ? {
+            cancel: async (): Promise<void> => {
+              cancelled++
+            }
+          }
+        : undefined
+    )
+    const registration: RelaunchRegistration = await pending
+    assert.equal(registration.automatic, automatic)
     await Promise.all([registration.cancel(), registration.cancel()])
     assert.equal(fs.existsSync(marker(canary)), false)
     assert.equal(fs.readFileSync(marker(stable), 'utf8'), stableContents)
@@ -128,15 +151,20 @@ test('cancellation and failed registration remove only their own installation ma
   assert.equal(fs.existsSync(marker(canary)), false)
   assert.equal(fs.readFileSync(marker(stable), 'utf8'), stableContents)
 
+  let attempts: number = 0
+
   const failedCancellation: RelaunchRegistration = await registerUpdateRelaunch(canary, 'canary-old', {
     relaunch: (): RelaunchWaiterHandle => ({
       cancel: async (): Promise<never> => {
+        attempts++
         throw failure
       }
     })
   })
 
   await assert.rejects(failedCancellation.cancel(), AggregateError)
+  await assert.rejects(failedCancellation.cancel(), AggregateError)
+  assert.equal(attempts, 1)
   assert.equal(fs.existsSync(marker(canary)), false)
   assert.equal(fs.readFileSync(marker(stable), 'utf8'), stableContents)
   assert.equal(fs.existsSync(path.join(hermesHome, PENDING_RELAUNCH_FILENAME)), false)
@@ -150,4 +178,24 @@ test('cancellation and failed registration remove only their own installation ma
   assert.equal(fs.existsSync(marker(stable)), false)
   assert.equal(fs.readFileSync(marker(canary), 'utf8'), siblingContents)
   await sibling.cancel()
+
+  const blocked: RelaunchRegistration = await registerUpdateRelaunch(canary, 'old', {
+    relaunch: (): RelaunchWaiterHandle => ({
+      cancel: async (): Promise<never> => {
+        throw failure
+      }
+    })
+  })
+
+  fs.unlinkSync(marker(canary))
+  fs.mkdirSync(marker(canary))
+  fs.writeFileSync(path.join(marker(canary), 'foreign-data'), 'keep')
+  await assert.rejects(blocked.cancel(), (error: Error): boolean => {
+    assert.ok(error instanceof AggregateError)
+    assert.equal(error.errors[0], failure)
+    assert.equal(error.errors.length, 2)
+
+    return true
+  })
+  assert.equal(fs.readFileSync(path.join(marker(canary), 'foreign-data'), 'utf8'), 'keep')
 })

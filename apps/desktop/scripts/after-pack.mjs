@@ -1,17 +1,9 @@
 /**
  * after-pack.mjs — electron-builder afterPack hook.
  *
- * Stamps the Hermes icon + identity onto the packed Windows Hermes.exe via
- * rcedit (delegated to set-exe-identity.mjs). This runs for EVERY packed build
- * — first install, `hermes desktop`, the installer's --update rebuild, and a
- * dev's manual `npm run pack` — so the branded exe can never silently revert
- * to the stock "Electron" icon/name (the bug when the stamp lived only in
- * install.ps1, which the update path doesn't use).
- *
- * Windows-only: rcedit edits PE resources, irrelevant on macOS/Linux where the
- * app identity comes from the bundle Info.plist / desktop entry. Best-effort:
- * a stamp failure must never fail an otherwise-good build (worst case is the
- * stock icon, not a broken app), so we log and resolve rather than throw.
+ * Per-platform post-pack work on the unpacked app: payload relocation, nested
+ * Chromium + wheel signing on macOS, PE signature sanitizing and batch signing
+ * on Windows. The exe identity stamp lives in after-extract.mjs (#105629).
  *
  * electron-builder passes a context with:
  *   - electronPlatformName: 'win32' | 'darwin' | 'linux'
@@ -26,8 +18,8 @@ import { runPython } from '../../../scripts/build/python.mjs'
 import { batchSignAppTree } from './batch-sign-binaries.mjs'
 import { rehashPayloadDigests } from './payload-digests.mjs'
 import { resolveSigningIdentity, signNestedChromium } from './sign-nested-chromium.mjs'
+import { signWheelZipMembers } from './sign-wheel-zips.mjs'
 import { sanitizeTree } from './sanitize-pe-signatures.mjs'
-import { stampExeIdentity } from './set-exe-identity.mjs'
 
 export default async function afterPack(context) {
   const platform = context.electronPlatformName
@@ -48,6 +40,14 @@ export default async function afterPack(context) {
         `[after-pack] repaired ${nested.repaired} framework links; signed ${nested.signed} nested chromium targets` +
           (identity ? ` as ${identity}` : ' (no Developer ID in the builder keychain)')
       )
+      // uv-cache wheel zips carry Mach-O members the notary validates but
+      // electron-osx-sign cannot reach; sign them in place (see module doc).
+      const wheels = signWheelZipMembers(payload, { identity, keychain })
+      if (wheels.signed > 0) {
+        console.log(
+          `[after-pack] signed ${wheels.signed} Mach-O members across ${wheels.wheels} payload wheel zips` +
+            (identity ? ` as ${identity}` : ' (no Developer ID in the builder keychain)'))
+      }
       // The macOS signer refreshes this again before sealing the outer app.
       // Unsigned builds end here and still need final-byte facts.
       rehashPayloadDigests(payload)
@@ -63,7 +63,6 @@ export default async function afterPack(context) {
 
   const productName = context.packager?.appInfo?.productFilename || 'Hermes'
   const exe = path.join(context.appOutDir, `${productName}.exe`)
-  const desktopRoot = path.resolve(import.meta.dirname, '..')
 
   // Repair dangling PE certificate tables BEFORE electron-builder signs the
   // tree. A stripped-but-still-declared signature makes signtool reject the
@@ -77,12 +76,9 @@ export default async function afterPack(context) {
     console.log(`  ${file}`)
   }
 
-  try {
-    await stampExeIdentity(exe, desktopRoot)
-  } catch (err) {
-    // Never fail the build over a cosmetic stamp.
-    console.warn(`[after-pack] exe identity stamp failed (${err.message}); Hermes.exe keeps the stock Electron icon`)
-  }
+  // The identity stamp already ran from afterExtract on the pristine exe
+  // (scripts/after-extract.mjs, #105629); rcedit cannot commit to the
+  // ASAR-integrity-rewritten PE we hold here.
 
   // Batch-sign every payload binary AFTER sanitize (above) and the rcedit
   // stamp: a dangling certificate table or a subsequent resource edit would

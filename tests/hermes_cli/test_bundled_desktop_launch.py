@@ -100,6 +100,8 @@ def _host_bundle(tmp_path: Path) -> tuple[Path, Path]:
     if sys.platform == "win32":
         repo = _windows_bundle(tmp_path)
         return repo, tmp_path / "Hermes" / "Hermes.exe"
+    if sys.platform == "darwin":
+        return _macos_bundle(tmp_path), tmp_path / "Hermes.app/Contents/MacOS/Hermes"
     repo = _linux_bundle(tmp_path)
     return repo, tmp_path / "linux-unpacked" / "Hermes"
 
@@ -177,7 +179,7 @@ class TestShapePredicate:
 
 
 class TestLaunchDetached:
-    def test_the_child_outlives_this_process_and_owns_no_stdio(self):
+    def test_detach_flags_and_unowned_stdio_are_forwarded(self):
         seen = {}
 
         def fake_popen(argv, **kwargs):
@@ -198,7 +200,7 @@ class TestLaunchDetached:
         detach_key = "creationflags" if sys.platform == "win32" else "start_new_session"
         assert seen["kwargs"][detach_key]
 
-    def test_a_real_child_survives_and_is_reachable(self, tmp_path):
+    def test_a_real_detached_child_runs(self, tmp_path):
         """The one E2E rung: spawn a real process and prove it ran."""
         marker = tmp_path / "ran.txt"
         pid = launch_detached(
@@ -214,6 +216,7 @@ class TestLaunchDetached:
         assert marker.read_text() == "yes"
 
 
+@pytest.mark.platforms("windows", "linux", "macos")
 class TestCmdGuiOnABundle:
     """The behavior the checkout ladder got wrong: never build in a bundle."""
 
@@ -236,20 +239,14 @@ class TestCmdGuiOnABundle:
             builds.append([str(c) for c in cmd])
             return subprocess.CompletedProcess(cmd, 0)
 
-        def record_npm_install(npm, root, **kw):
-            builds.append(["npm", "ci", str(root)])
-            return subprocess.CompletedProcess(["npm", "ci"], 0)
-
         def record_popen(argv, **kw):
             launches.append([str(a) for a in argv])
             return SimpleNamespace(pid=4242)
 
-        from hermes_cli import main_desktop, main_install_repair, main_web_build
+        from hermes_cli import main_desktop, source_build
         monkeypatch.setattr(cli_main, "PROJECT_ROOT", repo)
-        monkeypatch.setattr(main_install_repair, "_resolve_node_runtime_npm", lambda: "/usr/bin/npm")
+        monkeypatch.setattr(source_build, "source_build_env", lambda env, **kwargs: dict(env))
         monkeypatch.setattr(main_desktop, "_desktop_build_needed", lambda *a, **k: True)
-        monkeypatch.setattr(main_desktop, "_write_desktop_build_stamp", lambda *a, **k: None)
-        monkeypatch.setattr(main_web_build, "_run_npm_install_deterministic", record_npm_install)
         monkeypatch.setattr(main_desktop, "_stop_desktop_processes_locking_build", lambda *a, **k: [])
         monkeypatch.setattr(main_desktop, "_desktop_linux_sandbox_fixup", lambda *a, **k: launcher_ok)
         monkeypatch.setattr(main_desktop, "_desktop_linux_needs_no_sandbox", lambda: not launcher_ok)

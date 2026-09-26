@@ -272,7 +272,8 @@ def _check_vercel(config: Dict[str, Any]) -> bool:
         return _reject(f"Vercel Sandbox does not support custom TERMINAL_CONTAINER_DISK={disk}. "
                        "Use the default shared setting (51200 MB).")
     if importlib.util.find_spec("vercel") is None:
-        return _reject("vercel is required for the Vercel Sandbox terminal backend: pip install vercel")
+
+        return _reject("vercel is required for the Vercel Sandbox terminal backend. Run hermes setup terminal and select Vercel Sandbox.")
     from agent.secret_scope import get_secret
     if get_secret("VERCEL_OIDC_TOKEN"):
         return True

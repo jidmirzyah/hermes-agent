@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import argparse
 from typing import Callable
 
 
 def build_update_parser(subparsers, *, cmd_update: Callable) -> None:
     """Attach the ``update`` subcommand to ``subparsers``."""
+    from hermes_cli.release_channels import validate_name
     update_parser = subparsers.add_parser(
         "update", help="Update Hermes Agent to the latest version",
         description="Pull the latest changes from git and reinstall dependencies")
@@ -99,15 +99,14 @@ def build_update_parser(subparsers, *, cmd_update: Callable) -> None:
     update_parser.add_argument(
         "--set-channel",
         default=None,
-        choices=("main", "stable", "canary"),
+        type=validate_name,
         metavar="CHANNEL",
         help=(
             "Persist the update channel for THIS install (recorded per "
-            "install in config.yaml under update.installs). 'stable' tracks "
-            "published stable releases, 'main' the git main branch, and "
-            "'canary' published canary prereleases. Source installs check out "
-            "the selected release's exact commit. Package channels are baked "
-            "into their separate stable/canary identities and cannot be changed."
+            "install in config.yaml under update.installs). Names are resolved "
+            "from the release archive, not a built-in list. Source installs "
+            "check out the published build's exact commit; main follows the "
+            "source branch. Package channels are baked into their identities."
         ),
     )
     update_parser.add_argument(
@@ -122,7 +121,7 @@ def build_update_parser(subparsers, *, cmd_update: Callable) -> None:
     update_parser.add_argument(
         "--channel",
         default=None,
-        choices=("stable", "main", "canary"),
+        type=validate_name,
         metavar="CHANNEL",
         help=(
             "Track CHANNEL for this run only (transient override; "

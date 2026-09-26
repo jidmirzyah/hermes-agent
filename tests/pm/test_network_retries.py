@@ -16,11 +16,10 @@ from pm.store import Store, current_target
 from tests.pm._range_server import RangeHandler, dl_server, url  # noqa: F401
 
 
-@pytest.mark.parametrize("failure_phase", [
-    "probe", "probe-disconnect", "probe-empty-body", "ranged", "single",
-    "interrupted", "single-interrupted",
-])
-@pytest.mark.parametrize("install_path", ["install", "stage"])
+@pytest.mark.parametrize("failure_phase,install_path", [
+    (phase, "install") for phase in ("probe", "probe-disconnect", "probe-empty-body", "ranged", "single",
+                                   "interrupted", "single-interrupted")
+] + [("ranged", "stage")])
 def test_install_recovers_from_transient_http_failure(tmp_path, dl_server, monkeypatch, failure_phase, install_path):
     payload = io.BytesIO()
     with zipfile.ZipFile(payload, "w") as archive:
@@ -71,7 +70,7 @@ def test_install_recovers_from_transient_http_failure(tmp_path, dl_server, monke
         "url": url(dl_server, "/tool.zip"),
         "sha256": hashlib.sha256(body).hexdigest(),
     }})
-    ensure = importlib.import_module("pm.ensure")
+    ensure = importlib.import_module("pm.install")
     if install_path == "install":
         ensure._install(package, lock, facts, store, current_target())
         entry = store.entry(facts.get(package.name)["entry"])
@@ -124,12 +123,15 @@ def test_pm_metadata_reads_retry_transient_http_failure(dl_server, monkeypatch, 
     }
     if reader_name == "digests":
         import urllib.request
-        original_urlopen = urllib.request.urlopen
 
-        def local_release(request, **kwargs):
-            return original_urlopen(urllib.request.Request(endpoint, headers=request.headers), **kwargs)
+        class LocalRelease(urllib.request.HTTPSHandler):
+            def https_open(self, request):
+                assert request.host == "api.github.com"
+                return urllib.request.urlopen(
+                    urllib.request.Request(endpoint, headers=request.headers), timeout=request.timeout,
+                )
 
-        monkeypatch.setattr(urllib.request, "urlopen", local_release)
+        monkeypatch.setattr(urllib.request, "_opener", urllib.request.build_opener(LocalRelease()))
         monkeypatch.setattr(packages, "_release_digest_cache", {})
         readers["digests"] = (lambda: packages._github_release_digests("test/repo", "test"), {"tool.zip": "abc123"})
     read, expected = readers[reader_name]

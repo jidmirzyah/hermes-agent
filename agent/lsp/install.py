@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
 from hermes_cli._subprocess_compat import windows_hide_flags
-from hermes_constants import find_node_executable
+from hermes_constants import find_node_executable, with_hermes_node_path
 
 logger = logging.getLogger("agent.lsp.install")
 
@@ -137,7 +137,7 @@ def _existing_binary(name: str, *, is_windows: Optional[bool] = None) -> Optiona
         else:
             if binary is not None:
                 return str(binary)
-    suffixes = ("", *_WINDOWS_WRAPPER_SUFFIXES) if _is_windows() else ("",)
+    suffixes = (*_WINDOWS_WRAPPER_SUFFIXES, "") if win else ("",)
     return next((p for s in suffixes if (p := shutil.which(f"{name}{s}"))), None)
 
 
@@ -254,7 +254,7 @@ def _install_npm(pkg: str, bin_name: str, extra_pkgs: Optional[list] = None) -> 
     install_targets = [pkg] + list(extra_pkgs or [])
     cmd = [pm_bin, *_NODE_PM_ARGV[pm](str(staging)), *install_targets]
     logger.info("[install] %s %s", pm, " ".join(cmd[1:]))
-    if not _run_installer(pm, pkg, cmd, timeout=300):
+    if not _run_installer(pm, pkg, cmd, timeout=300, env=with_hermes_node_path()):
         return None
     found = _first_existing(staging / "node_modules" / ".bin" / bin_name)
     if found is not None:

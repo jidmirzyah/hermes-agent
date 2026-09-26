@@ -7,7 +7,7 @@ description: "Frequently asked questions and solutions to common issues with Her
 # FAQ & Troubleshooting
 
 Python dependency commands on this page use a
-[PM-prepared source checkout](/reference/package-management#developer-workflow).
+[PM-prepared source checkout](./package-management.md#developer-workflow).
 After a dependency change, reactivate the checkout and restart Hermes.
 
 Quick answers and fixes for the most common questions and issues.

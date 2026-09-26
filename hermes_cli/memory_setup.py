@@ -12,34 +12,6 @@ from hermes_cli.secret_prompt import masked_secret_prompt
 
 _CANCELLED = -1
 
-# pip name → import name mapping for packages where they differ
-_IMPORT_NAMES = {
-    "honcho-ai": "honcho",
-    "mem0ai": "mem0",
-    "hindsight-client": "hindsight_client",
-    "hindsight-all": "hindsight"}
-
-
-def _provider_pip_dependencies(provider_name: str, declared: list) -> list:
-    """Return the pip deps a provider actually needs on THIS install.
-
-    ``plugin.yaml`` declares the baseline bridge packages; some providers add mode-dependent extras
-    at setup time that the manifest can't express.
-
-    Hindsight's ``local_embedded`` mode installs ``hindsight-all`` (daemon + embedder + client) during
-    ``hermes memory setup`` — if the update-time refresh only reinstalled the declared ``hindsight-client``,
-    the embedded daemon would stay broken after a venv rebuild stripped ``hindsight-embed`` (#70636).
-    """
-    deps = list(declared or [])
-    if provider_name == "hindsight":
-        from utils import read_json_or_empty  # BOM-tolerant; {} on missing/corrupt
-
-        cfg = read_json_or_empty(get_hermes_home() / "hindsight" / "config.json")
-        # "local" is a legacy alias for "local_embedded"
-        if cfg.get("mode", "") in {"local", "local_embedded"}:
-            deps.append("hindsight-all")
-    return deps
-
 
 def _curses_select(
     title: str, items: list[tuple[str, str]], default: int = 0, *, cancel_returns: int | None = None
@@ -79,16 +51,8 @@ def _prompt(label: str, default: str | None = None, secret: bool = False) -> str
     return val or (default or "")
 
 
-def _install_dependencies(provider_name: str, *, force: bool = False) -> None:
-    """Prepare provider dependencies without narrowing the active plugin union.
-
-    A new provider is not selected in config yet. Include its directory with
-    every active member, and propagate failure before setup saves it.
-    """
-    import subprocess
-
-    import pm
-    from hermes_cli.plugins_admission import candidate_member_dirs
+def memory_provider_dependency_inputs(provider_name: str) -> tuple[dict, dict]:
+    """Read one candidate declaration for preparation and passive readiness."""
     from hermes_cli.plugins_cmd import PluginOperationError, _read_manifest_for_install
     from pm.package import InstallError
     from pm.workspace import _is_member_candidate
@@ -96,7 +60,7 @@ def _install_dependencies(provider_name: str, *, force: bool = False) -> None:
 
     plugin_dir = find_provider_dir(provider_name)
     if not plugin_dir:
-        return
+        return {}, {}
     try:
         meta = _read_manifest_for_install(plugin_dir)
         member = _is_member_candidate(plugin_dir)
@@ -105,15 +69,37 @@ def _install_dependencies(provider_name: str, *, force: bool = False) -> None:
 
     extra = meta.get("extra")
     extras = [extra] if isinstance(extra, str) and extra else []
-    missing = [e for e in extras if force or not pm.available(e)]
-    if not missing and not member:
-        return
+    if not extras and not member:
+        return meta, {}
 
-    print(f"\n  Preparing dependencies for {provider_name}")
     # Without a proposed home, selection retains every configured member.
-    inputs = {"plugin_dirs": lambda: candidate_member_dirs((), extra_dirs=[plugin_dir])} if member else {}
-    pm.sync_venv(missing, explicit=True, **inputs)
-    print(f"  ✓ Dependencies prepared for {provider_name}")
+    inputs = {"extra_plugin_dirs": [plugin_dir]} if member else {}
+    return meta, {"extras": extras, **inputs}
+
+
+def prepare_memory_provider_dependencies(provider_name: str) -> tuple[dict, str | None]:
+    """Prepare the candidate union; PM owns constraint and currency checks."""
+    import pm
+
+    meta, inputs = memory_provider_dependency_inputs(provider_name)
+    if not inputs:
+        return meta, None
+    pm.sync_venv(explicit=True, **inputs)
+    from pm.environments import running_from_selected_environment
+    from pm.paths import repo_root
+
+    return meta, "installed" if running_from_selected_environment(repo_root()) else "restart_required"
+
+
+def _install_dependencies(provider_name: str) -> None:
+    """Render CLI preparation and external-sidecar guidance."""
+    import subprocess
+
+    meta, status = prepare_memory_provider_dependencies(provider_name)
+    if status:
+        print(f"  ✓ Dependencies prepared for {provider_name}")
+        if status == "restart_required":
+            print("  Restart Hermes to use the prepared dependencies.")
 
     # Also show external (non-pip) dependencies that are missing.
     for dep in meta.get("external_dependencies", []):

@@ -154,7 +154,7 @@ Nix is **no longer an explicitly supported install path** (best-effort only). If
 ## Manual / Developer Installation
 
 For a source checkout, start with the
-[PM developer workflow](/reference/package-management#developer-workflow).
+[PM developer workflow](../reference/package-management.md#developer-workflow).
 It covers activation, daily commands, dependency refresh, and current bootstrap limits.
 [Development Setup](../developer-guide/contributing.md#development-setup) covers the separate test environment and checks.
 

@@ -1,10 +1,6 @@
-"""Shared CLI fixtures; updater mutation boundaries are explicitly opt-in."""
+"""Fixtures shared across hermes_cli tests."""
 
 from __future__ import annotations
-
-from types import SimpleNamespace
-from unittest.mock import patch
-import subprocess
 
 import pytest
 
@@ -46,7 +42,7 @@ def _suppress_concurrent_hermes_gate(request, monkeypatch):
     except Exception:
         return
     # raising=False: under pytest's per-test spawn isolation, a concurrent
-    # process importing a module that transitively touches hermes_cli.main
+    # xdist worker importing a module that transitively touches hermes_cli.main
     # can briefly expose a partially-initialized module object here — one where
     # _detect_concurrent_hermes_instances isn't defined yet. A bare setattr
     # would raise AttributeError and error the (unrelated) test. The attribute
@@ -61,29 +57,25 @@ def _suppress_concurrent_hermes_gate(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _inline_post_swap_handoff(request, monkeypatch):
-    """Run the post-swap tail in-process instead of re-executing ``hermes update --post-swap``.
-
-    ``_apply_pulled_update`` / ``_update_via_zip`` hand the rest of the run to a child
-    interpreter on the pulled tree. A mocked updater flow must not spawn that child (it would
-    run a real dependency sync against the worktree), so the tail runs here through the same
-    payload round-trip — every step stays patchable and the payload shape is still exercised.
-    Tests of the hand-off itself opt out with ``@pytest.mark.real_post_swap_handoff``.
+def _source_channels_resolve_locally(request, monkeypatch):
+    """Every unflagged ``hermes update`` resolves its channel through R2; tests must
+    not reach the network for that. Default every channel to a ``source-branch``
+    record delivering ``origin/<name>`` through the documented seam. Channel tests
+    that model records themselves re-patch ``_resolve_channel`` after this runs;
+    the marker opts out entirely for tests of the reader's own network path.
     """
-    if request.node.get_closest_marker("real_post_swap_handoff"):
+    if request.node.get_closest_marker("real_release_channels"):
         return
-    try:
-        from hermes_cli import update_cmd, update_receipt
-    except Exception:
-        return
+    from hermes_cli import source_releases
+    from hermes_cli.release_channels import ChannelResolution
 
-    def _inline(args, **payload_kwargs):
-        payload = update_cmd._post_swap_payload(**payload_kwargs)
-        if payload["receipt"]:
-            update_receipt.resume_update_receipt(payload["receipt"])
-        update_cmd._execute_post_swap(payload, args, payload_kwargs["gateway_mode"])
+    def resolve(name, repository):
+        record = {"schema": 1, "name": name, "repository": repository, "policy": "source-branch",
+                  "state": "active", "identity": None, "nextSequence": 1, "head": None,
+                  "delivery": {"kind": "source-branch", "branch": name}}
+        return ChannelResolution(record, record, None)
 
-    monkeypatch.setattr(update_cmd, "_hand_off_post_swap", _inline, raising=False)
+    monkeypatch.setattr(source_releases, "_resolve_channel", resolve)
 
 
 @pytest.fixture(autouse=True)
@@ -113,70 +105,52 @@ def _discharge_host_update_obligation():
 
 
 @pytest.fixture
-def isolated_update_processes():
-    """Keep cmd_update's gateway auto-restart phase off this machine's gateways.
+def isolated_source_completion(monkeypatch):
+    """Unit-test the completion tail in-process; real transport is tested separately."""
+    from hermes_cli import update_cmd, update_completion
 
-    The restart phase used to swallow every exception at debug level, so these
-    end-to-end tests never noticed it touching real gateway discovery. Since
-    the phase is surfaced (#78574: an aborted restart now fails the update),
-    an unmocked ``find_gateway_pids`` on a box with a live gateway reaches the
-    conftest live-system guard and turns into a spurious ``sys.exit(1)``.
-    Discovery returning nothing makes the phase a clean no-op for every test
-    in this module (none of them assert on gateway restarts).
+    monkeypatch.setattr("hermes_cli.source_build.build_update_products", lambda *a, **kw: None)
+    monkeypatch.setattr("hermes_cli.venv_sync.publish_launchers", lambda *a: None)
+
+    def complete(request):
+        update_completion._complete_selected(request)
+        return {"exit_code": 0, "receipt": update_completion._read_terminal_receipt(request),
+                "windows_resume": request["windows_resume"]}
+
+    monkeypatch.setattr(update_cmd, "run_completion", complete)
+
+
+@pytest.fixture(autouse=True)
+def _reset_prompt_toolkit_output_cache():
+    """Clear prompt_toolkit's cached AppSession output around each CLI test.
+
+    See the module docstring for the capsys/prompt_toolkit interaction this
+    guards against.
     """
-    with patch("hermes_cli.gateway.find_gateway_pids", return_value=[]), \
-         patch("hermes_cli.gateway.supports_systemd_services", return_value=False), \
-         patch("hermes_cli.gateway.find_profile_gateway_processes", return_value=[]), \
-         patch("hermes_cli.update_cmd_windows._detect_venv_python_processes", return_value=[]), \
-         patch("hermes_cli.main._fleet_probe_expected_runtimes", return_value=False), \
-         patch("os.kill"), \
-         patch("pm.sync_venv"), \
-         patch("pm.client.sync_venv"), \
-         patch(
-             "hermes_cli.update_inventory.collect_runtime_inventory",
-             return_value=SimpleNamespace(runtimes=[], to_dict=lambda: {}),
-         ), \
-         patch("hermes_cli.main._purge_stale_hermes_modules"), \
-         patch("hermes_cli.main._pause_windows_gateways_for_update", return_value=None), \
-         patch("hermes_cli.main._resume_windows_gateways_after_update"), \
-         patch(
-             "hermes_cli.main._install_hangup_protection",
-             return_value={
-                 "prev_stdout": None, "prev_stderr": None,
-                 "log_file": None, "installed": False,
-             },
-         ), \
-         patch("hermes_cli.main._finalize_update_output"), \
-         patch("hermes_cli.update_cmd._reload_config_modules"):
-        yield
 
+    def _clear() -> None:
+        try:
+            from prompt_toolkit.application.current import get_app_session
+
+            get_app_session()._output = None
+        except Exception:
+            # prompt_toolkit not importable / internal shape changed — the
+            # tests that rely on this simply keep their prior behavior.
+            pass
+
+    _clear()
+    yield
+    _clear()
 
 @pytest.fixture
-def isolated_update_checkout(monkeypatch, tmp_path):
-    """Keep the updater on an isolated checkout and intercept the web build's Popen path."""
-    import hermes_cli.main as cli_main
-    from hermes_cli import main_web_build
+def probe_root(tmp_path):
+    """A fixture checkout the installation launcher can boot from.
 
-    (tmp_path / ".git").mkdir(exist_ok=True)
-    monkeypatch.setattr(cli_main, "PROJECT_ROOT", tmp_path, raising=False)
-    noop_build = lambda *args, **kwargs: True  # noqa: E731
-    monkeypatch.setattr(cli_main, "_build_web_ui", noop_build, raising=False)
-    monkeypatch.setattr(main_web_build, "_build_web_ui", noop_build, raising=False)
-    monkeypatch.setattr(
-        main_web_build, "_web_ui_build_needed", lambda *a, **k: False, raising=False
-    )
-    fake_npm = lambda *a, **k: subprocess.CompletedProcess(  # noqa: E731
-        [], 0, stdout="", stderr=""
-    )
-    monkeypatch.setattr(
-        main_web_build, "_run_npm_install_deterministic", fake_npm, raising=False
-    )
-
-    # Tests that exercise ZIP fallback must override this tripwire explicitly.
-    def _no_zip_fallback(*args, **kwargs):
-        pytest.fail(
-            "test reached _update_via_zip — the git checkout path was not "
-            "isolated correctly (missing tmp .git or unexpected fallback)"
-        )
-
-    monkeypatch.setattr("hermes_cli.update_cmd._update_via_zip", _no_zip_fallback)
+    ``runtime_command`` prepends the checkout root and runs ``import hermes_bootstrap``
+    before the probe body, exactly as production does. Tests that point the import
+    guard at a scratch tree need that module present, or the probe dies before its
+    health marker — a developer venv whose editable ``.pth`` shadows the root hides
+    the dependency, CI's clean environment does not.
+    """
+    (tmp_path / "hermes_bootstrap.py").write_text("", encoding="utf-8")
+    return tmp_path

@@ -91,11 +91,15 @@ changes only that installation's configuration, then exits without applying an
 update. `--channel` is a one-run override. An explicit `--branch` takes precedence
 for a source checkout.
 
-Source `main` tracks the branch tip. Source `stable` and `canary` resolve the
-published release for that channel and update the checkout to its exact Git
-commit. Canary does not mean the current tip of `main`, and an unpublished tag
-is not a release. Switching a source channel does not install a desktop package.
-Per-install records live under `update.installs` in configuration, so one
+Channel names are registered in the release archive on Cloudflare R2, not in a
+fixed list shipped with Hermes. The `main` record selects source-branch delivery;
+published-build channels select an exact Git commit. Custom preview channels use
+the same source commands, for example `hermes update --set-channel pm-preview`.
+The publisher must have created that channel before an update can resolve it.
+An unavailable or invalid record reports an error rather than falling back to
+`main` or another release. Switching a source channel does not install a desktop
+package.
+Per-install subscriptions live under `update.installs` in configuration, so one
 checkout's choice does not change another installation's channel. The source-built
 desktop uses that same selection for checks and update handoffs; it does not
 replace a selected release channel with its default branch.
@@ -129,7 +133,7 @@ This suppresses both cached update notices and passive update-check network requ
 
 For an admitted source checkout, `hermes update` runs these phases:
 
-1. **Pre-update snapshot** — Hermes saves selected state files for every profile in that profile's `state-snapshots/` directory. These include pairing data, cron jobs, `config.yaml`, `.env`, and `auth.json`. Automatic quick snapshots skip individual files larger than 1 GiB. `updates.pre_update_backup` selects `quick`, `full`, or `off`. Full archives use the [backup exclusions](/reference/faq#hermes-backup-vs-hermes-profile-export). Recovery uses [Snapshots and rollback](../user-guide/checkpoints-and-rollback.md). Quick snapshots recover state files, not application code.
+1. **Pre-update snapshot** — Hermes saves selected state files for every profile in that profile's `state-snapshots/` directory. These include pairing data, cron jobs, `config.yaml`, `.env`, and `auth.json`. Automatic quick snapshots skip individual files larger than 1 GiB. `updates.pre_update_backup` selects `quick`, `full`, or `off`. Full archives use the [backup exclusions](../reference/faq.md#hermes-backup-vs-hermes-profile-export). Recovery uses [Snapshots and rollback](../user-guide/checkpoints-and-rollback.md). Quick snapshots recover state files, not application code. The snapshot is best-effort: if it fails, the update prints a `⚠ Pre-update snapshot FAILED` warning and continues, and the receipt records `pre_update_backup` as a failed step (a deliberate `off`/`--no-backup` lands in the receipt's skips with its reason instead).
 2. **Code update** — applies the configured source branch or stable release tag and updates submodules.
 3. **Post-pull syntax validation + auto-rollback** — after the pull, Hermes compiles the nine critical files every `hermes` invocation imports at startup. If any fails to parse (e.g. an orphan merge-conflict marker, an accidentally truncated file), Hermes runs `git reset --hard <pre-pull-sha>` to roll the install back so your shell stays bootable. Re-run `hermes update` once the upstream fix lands.
 4. **Dependency preparation** — PM provisions required tools and prepares a complete Python environment from the new lock, existing extras, and enabled plugin requirements. It validates that environment before publishing its selection.
@@ -196,12 +200,10 @@ When the update runs **without a terminal** — from the desktop/chat app's "Upd
 updates:
   non_interactive_local_changes: stash   # default: keep + auto-restore
   # non_interactive_local_changes: discard  # throw local source edits away
-  # non_interactive_local_changes: abort    # stop before changing a dirty checkout
 ```
 
 - `stash` (default) — auto-stash, pull, then auto-restore your changes on top of the updated code. Nothing is lost; if a restore hits conflicts they're preserved in a git stash for manual recovery.
 - `discard` — auto-stash and drop the stash after the pull, so the update always lands on a clean tree. Use this only on machines where you never intend to keep local edits to the Hermes source. It stash-drops (not `git reset --hard` + `git clean -fd`), so ignored paths like `node_modules`, `venv`, and build outputs are never touched.
-- `abort` — if tracked or untracked source changes exist, stop before backups, fetches, stashes, pulls, installs, or gateway restarts. Use this on managed checkouts where unexpected edits require human review.
 
 In the desktop app this is **Settings → Advanced → In-App Update Local Changes**.
 
@@ -285,7 +287,7 @@ updates:
 `updates.pre_update_backup` has three modes:
 
 - `quick` saves the selected state files described above. This is the default.
-- `full` adds a zip archive with the [backup exclusions](/reference/faq#hermes-backup-vs-hermes-profile-export). Large data directories can take several minutes.
+- `full` adds a zip archive with the [backup exclusions](../reference/faq.md#hermes-backup-vs-hermes-profile-export). Large data directories can take several minutes.
 - `off` disables pre-update backups. `--no-backup` selects this mode for one run.
 
 Legacy boolean values remain supported: `true` means `full`, and `false` means `off`.
@@ -425,7 +427,7 @@ Run `hermes backup` before you remove the installation. The full archive include
 credentials but excludes downloaded runtimes, dependency environments, caches,
 and browser profiles. Review its skipped-file report before you delete source data.
 `hermes profile export` packs one profile without credentials.
-See [`hermes backup` vs `hermes profile export`](/reference/faq#hermes-backup-vs-hermes-profile-export).
+See [`hermes backup` vs `hermes profile export`](../reference/faq.md#hermes-backup-vs-hermes-profile-export).
 :::
 
 ### Manual Uninstall

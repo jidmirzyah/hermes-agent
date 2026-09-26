@@ -953,7 +953,7 @@ class GatewayNotificationsMixin:
             if not path.exists():
                 return
             try:
-                data = json.loads(path.read_text(encoding="utf-8"))
+                data = json.loads(path.read_text(encoding="utf-8-sig"))
                 delivered = {tuple(target) for target in data.get("delivered_targets", [])}
                 # Owed targets come from config, not live transports: a removed home or an opt-out
                 # (gateway_restart_notification=false) must not keep the marker alive forever.

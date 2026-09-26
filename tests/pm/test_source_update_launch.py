@@ -19,17 +19,20 @@ import pytest
 
 import pm
 from hermes_cli import venv_sync
-from hermes_cli.runtime_paths import install_state_dir, runtime_facts_path, selected_venv, site_packages
+from pm.environments import install_state_dir, runtime_facts_path, selected_venv, site_packages
 from pm import paths
 from pm.lock import Facts
 from pm.package import InstallError
-from tests.pm.test_worker import isolated_python  # noqa: F401
+from tests.pm._fixtures import isolated_python  # noqa: F401
+
+# Spawns children with a home it builds itself; the parent's must stay real.
+pytestmark = pytest.mark.real_machine_home
 
 
 @pytest.fixture
 def source_launch(tmp_path, monkeypatch, isolated_python):
     client = importlib.import_module("pm.client")
-    engine = importlib.import_module("pm.ensure")
+    engine = importlib.import_module("pm.install")
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
@@ -58,6 +61,15 @@ def source_launch(tmp_path, monkeypatch, isolated_python):
     (root / "install-stamp.json").write_text(
         json.dumps({"updateMechanism": "self"}), encoding="utf-8",
     )
+    # The startup heal hands the shared completion tail (launchers, products,
+    # maintenance) to the checkout's own hermes_cli/source_completion.py. This
+    # source slice has no products; record the hand-off instead of running it.
+    (root / "hermes_cli").mkdir()
+    (root / "hermes_cli" / "source_completion.py").write_text(
+        "import json, sys\n"
+        f"open({str(tmp_path / 'completion-calls')!r}, 'a').write(json.dumps(sys.argv[1:]) + '\\n')\n",
+        encoding="utf-8",
+    )
     (root / "pyproject.toml").write_text(
         '[project]\nname = "launch-proof"\nversion = "1"\nrequires-python = ">=3.11"\n'
         '[project.optional-dependencies]\nall = []\nlaunch-extra = []\n'
@@ -65,14 +77,139 @@ def source_launch(tmp_path, monkeypatch, isolated_python):
     )
     pm.lock_project(root, offline=True, explicit=True)
 
-    # Exercise the launcher's real store lookup without fabricating tool facts.
-    # This is a real executable, not a fake installer or successful shell stub.
-    store_python = tmp_path / "store" / "python-test" / "bin" / "python3"
+    # Acquisition uses the real host interpreter; publish its installed fact
+    # through PM too. Unrecorded store bytes are deliberately not launchable.
+    from pm.store import current_target, tree_digest
+
+    store = paths.store_root()
+    entry = store / "python-test"
+    store_python = entry / "bin" / "python3"
     store_python.parent.mkdir(parents=True)
-    # A Nix Python wrapper resets sys.executable to its own path. PM installs
-    # an actual interpreter, so use the underlying binary rather than a wrapper.
+    # A Nix wrapper resets sys.executable; use the underlying binary instead.
     store_python.symlink_to(sys._base_executable)
+    Facts(paths.facts_path()).record(
+        "python", "test", entry.name, {"PATH": [str(store_python.parent)]}, store,
+        target=current_target(), digest=tree_digest(entry),
+    )
     return root, store_python, command
+
+
+@pytest.mark.platforms("posix")
+@pytest.mark.parametrize("update", ["launch", "sync", "pm-update"])
+def test_source_python_pin_update_survives_real_gc(source_launch, tmp_path, monkeypatch, update):
+    from hermes_cli import _launchers
+    from pm.cli import cmd_gc
+    from pm.lock import Lockfile
+    from pm.store import current_target, tree_digest
+    from tests.hermes_cli.test_source_launcher_publication import BOOT_FILES
+
+    root, old_python, _ = source_launch
+    repository = Path(__file__).resolve().parents[2]
+    for relative in BOOT_FILES:
+        destination = root / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(repository / relative, destination)
+    (root / "source_probe.py").write_text(
+        "import json, sys, selected_probe\n"
+        "print(json.dumps({'executable': sys.executable, 'value': selected_probe.VALUE}))\n",
+        encoding="utf-8",
+    )
+    pin = Lockfile(paths.lockfile_path())
+    pin.set_pin("python", "A", {})
+    pin.save()
+    pm.sync_venv(explicit=True, project_root=root)
+    # Initial installation is allowed to publish. No explicit writer is called
+    # after replacement: the source-update owner must refresh this same command.
+    _launchers.ensure_install_launchers(root, root / ".hermes" / "bin")
+    command = _launchers.installation_command(root, module="source_probe")
+    (site_packages(selected_venv(root)) / "selected_probe.py").write_text("VALUE = 'A'\n")
+    child_env = {**os.environ, "HERMES_DISABLE_LAZY_INSTALLS": "1"}
+    before = subprocess.run(command, env=child_env, capture_output=True, text=True, timeout=30)
+    assert before.returncode == 0, before.stderr
+    assert json.loads(before.stdout)["executable"] == str(old_python)
+
+    # Only acquisition is substituted. This is a new real interpreter entry,
+    # a changed tool pin and a real Facts publication, not a launcher rewrite.
+    store = paths.store_root()
+    new_python = store / "python-B" / "bin" / "python3"
+    new_python.parent.mkdir(parents=True)
+    new_python.symlink_to(sys._base_executable)
+    Facts(paths.facts_path()).record(
+        "python", "B", "python-B", {"PATH": [str(new_python.parent)]}, store,
+        target=current_target(), digest=tree_digest(new_python.parent.parent),
+    )
+    if update != "pm-update":
+        pin.set_pin("python", "B", {})
+        pin.save()
+        assert not pm.venv_is_current(project_root=root)
+    previous = selected_venv(root)
+    if update == "launch":
+        assert venv_sync.prepare_launch(root, []) == new_python
+        # The heal finished the whole tail, with update wording, through the checkout's own completion.
+        calls = [json.loads(line) for line in (tmp_path / "completion-calls").read_text().splitlines()]
+        assert calls == [["--source", str(root), "--finish-update"]]
+    elif update == "sync":
+        # This is the PM sync -> launcher publication sequence now split across
+        # update_completion._prepare and _complete_selected. The former checkout
+        # case adds no distinct PM/GC coverage; the fresh-interpreter handoff is
+        # exercised separately in test_update_completion_process.py.
+        assert venv_sync.sync(root) == {"state": "synced", "ok": True}
+    else:
+        from types import SimpleNamespace
+        from pm import cli
+        from pm.update import Resolved
+
+        monkeypatch.setattr(paths, "repo_root", lambda: root)
+        monkeypatch.setattr(cli, "repo_root", lambda: root)
+        # The latest release and artifact acquisition are fixture inputs; the
+        # CLI must still pin, ensure, synchronize and publish through its owners.
+        monkeypatch.setattr(cli, "resolve_package", lambda *a, **k: Resolved("python", "A", "semver", "B"))
+        monkeypatch.setattr(cli, "_pin_artifacts", lambda *a: {})
+        monkeypatch.setattr(importlib.import_module("pm.install"), "sync_venv", pm.sync_venv)
+        assert cli.cmd_update(SimpleNamespace(names=["python"], target=None, check=False, uv=False, npm=False, termux=False)) == 0
+        assert Lockfile(paths.lockfile_path()).version("python") == "B"
+    assert pm.venv_is_current(project_root=root)
+    assert selected_venv(root) != previous
+    (site_packages(selected_venv(root)) / "selected_probe.py").write_text("VALUE = 'B'\n")
+    monkeypatch.setattr(paths, "repo_root", lambda: root)
+    assert cmd_gc(None) == 0
+    assert not old_python.exists(), "real PM GC did not remove the superseded Python"
+    assert new_python.is_file()
+    after = subprocess.run(command, env=child_env, capture_output=True, text=True, timeout=30)
+    assert after.returncode == 0, after.stderr
+    assert json.loads(after.stdout) == {"executable": str(new_python), "value": "B"}
+
+
+@pytest.mark.platforms("posix")
+def test_launcher_publication_failure_retries_without_rebuilding_dependencies(source_launch, monkeypatch):
+    from hermes_cli import _launchers
+
+    root, store_python, _ = source_launch
+    with monkeypatch.context() as failed_publication:
+        failed_publication.setattr(_launchers, "ensure_install_launchers", lambda *a: [])
+        result = venv_sync.sync(root)
+    assert not result["ok"] and "launcher publication failed" in result["detail"]
+    assert pm.venv_is_current(project_root=root)
+    committed = runtime_facts_path(root).read_bytes()
+    assert venv_sync.prepare_launch(root, []) == store_python
+    assert runtime_facts_path(root).read_bytes() == committed
+    assert (root / ".hermes" / "bin" / "hermes").is_file()
+
+
+@pytest.mark.platforms("posix")
+@pytest.mark.parametrize("checkout", [False, True])
+def test_source_publication_leaves_external_install_launchers_alone(source_launch, checkout):
+    root, _, _ = source_launch
+    (root / "install-stamp.json").write_text(
+        json.dumps({"updateMechanism": "external", "distribution": "nix"}), encoding="utf-8",
+    )
+    if not checkout:
+        (root / ".git").rmdir()
+    launcher = root / ".hermes" / "bin" / "hermes"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text("externally owned launcher\n", encoding="utf-8")
+    assert venv_sync.sync(root)["ok"]
+    assert launcher.read_text(encoding="utf-8") == "externally owned launcher\n"
 
 
 def _fact(root):
@@ -191,7 +328,7 @@ def test_real_bootstrap_reexecs_before_app_imports(source_launch, tmp_path, isol
         "import hermes_bootstrap\n"
         "import json, sys\n"
         "from pathlib import Path\n"
-        "from hermes_cli.runtime_paths import selected_venv, site_packages\n"
+        "from pm.environments import selected_venv, site_packages\n"
         "from hermes_cli.venv_sync import prepare_launch\n"
         "root = Path(__file__).parent\n"
         "selected = selected_venv(root)\n"
@@ -220,7 +357,7 @@ def test_real_bootstrap_reexecs_before_app_imports(source_launch, tmp_path, isol
         activation_probe = subprocess.run(
             [str(isolated_python), "-I", "-c",
              f"import sys; sys.path.insert(0, {str(repository)!r}); "
-             "from pathlib import Path; from hermes_cli.runtime_paths import activate_dependencies; "
+             "from pathlib import Path; from pm.environments import activate_dependencies; "
              f"activate_dependencies(Path({str(root)!r}))"],
             capture_output=True, text=True, timeout=30,
         )

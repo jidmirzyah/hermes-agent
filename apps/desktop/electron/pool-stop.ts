@@ -17,22 +17,29 @@
  *  - spawn paths can await inFlight(key) so a fresh child never overlaps a
  *    dying one on the same HERMES_HOME.
  *
- * Extracted into a dependency-free module (same pattern as backend-child.ts /
- * pool-eviction.ts) so the dedup and handle-retention semantics are asserted
+ * Extracted into a dependency-free module (same pattern as backend-child.ts)
+ * so the dedup and handle-retention semantics are asserted
  * directly instead of grepping main.ts source text.
  */
 
-export interface PoolStopEntry<Process = unknown> {
-  process?: Process
+import type { WaitableChild } from './backend-child'
+
+export interface PoolStopEntry {
+  process?: unknown
 }
 
-export interface PoolStopperDeps<Process> {
+export interface PoolStopperDeps {
   /** The live backend pool. Entries are evicted synchronously on stop. */
-  pool: Map<string, PoolStopEntry<Process>>
+  pool: Map<string, PoolStopEntry>
   /** Signal the child (tree/group kill per platform). Synchronous. */
-  stopChild: (child: Process | undefined) => void
+  stopChild: (child: unknown) => void
   /** Bounded wait: resolves when the child exits, escalating to SIGKILL. */
-  waitForExit: (child: Process | undefined) => Promise<void>
+  waitForExit: (child: unknown) => Promise<void>
+  /**
+   * Extra per-key work that must finish before a replacement may spawn.
+   * Held on the same in-flight promise as child exit (SSH teardown, etc.).
+   */
+  afterStop?: (key: string) => Promise<void>
 }
 
 export interface PoolStopper {
@@ -46,23 +53,17 @@ export interface PoolStopper {
   stopAll: () => Promise<void>
 }
 
-interface PendingStop<Process> {
-  entry: PoolStopEntry<Process>
-  completion: Promise<void>
-  failed: boolean
-}
-
-export function createPoolStopper<Process>(deps: PoolStopperDeps<Process>): PoolStopper {
-  const stops = new Map<string, PendingStop<Process>>()
+export function createPoolStopper(deps: PoolStopperDeps): PoolStopper {
+  const stops = new Map<string, Promise<void>>()
 
   function stop(key: string): Promise<void> {
     const inFlight = stops.get(key)
 
-    if (inFlight && !inFlight.failed) {
-      return inFlight.completion
+    if (inFlight) {
+      return inFlight
     }
 
-    const entry = inFlight?.entry ?? deps.pool.get(key)
+    const entry = deps.pool.get(key)
 
     if (!entry) {
       return Promise.resolve()
@@ -72,41 +73,46 @@ export function createPoolStopper<Process>(deps: PoolStopperDeps<Process>): Pool
     // below retains the process handle until the bounded exit completes.
     deps.pool.delete(key)
 
-    const stopping = (async (): Promise<void> => {
+    const clear = () => {
+      if (stops.get(key) === stopping) {
+        stops.delete(key)
+      }
+    }
+
+    const stopping = (async () => {
       deps.stopChild(entry.process)
       await deps.waitForExit(entry.process)
-    })().then(
-      (): void => {
-        stops.delete(key)
-      },
-      (error: unknown): never => {
-        pending.failed = true
-        throw error
-      }
-    )
 
-    const pending: PendingStop<Process> = { entry, completion: stopping, failed: false }
-    stops.set(key, pending)
+      if (deps.afterStop) {
+        await deps.afterStop(key)
+      }
+    })().then(clear, error => {
+      const child = entry.process as Partial<WaitableChild> | undefined
+
+      if (child?.once && child.exitCode === null && child.signalCode === null) {
+        // Keep rejecting reuse of this profile while the old child is alive.
+        // The real late exit, not the teardown deadline, releases this fence.
+        child.once('exit', clear)
+      } else {
+        clear()
+      }
+
+      throw error
+    })
+
+    stops.set(key, stopping)
 
     return stopping
   }
 
   return {
-    inFlight: (key: string): Promise<void> | undefined => stops.get(key)?.completion,
-    hasPending: (): boolean =>
-      stops.size > 0 || [...deps.pool.values()].some((entry: PoolStopEntry<Process>): boolean => entry.process != null),
+    inFlight: key => stops.get(key),
+    hasPending: () => stops.size > 0 || [...deps.pool.values()].some(entry => entry.process != null),
     stop,
-    stopAll: async (): Promise<void> => {
-      const pending = new Set([...deps.pool.keys(), ...stops.keys()])
-      const results = await Promise.allSettled([...pending].map(stop))
+    stopAll: async () => {
+      const currentStops = [...deps.pool.keys()].map(stop)
 
-      const errors = results
-        .filter((result: PromiseSettledResult<void>): result is PromiseRejectedResult => result.status === 'rejected')
-        .map((result: PromiseRejectedResult): unknown => result.reason)
-
-      if (errors.length) {
-        throw new AggregateError(errors, 'Backend pool shutdown failed')
-      }
+      await Promise.all(new Set([...stops.values(), ...currentStops]))
     }
   }
 }

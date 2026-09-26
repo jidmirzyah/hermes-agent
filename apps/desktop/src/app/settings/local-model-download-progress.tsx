@@ -1,11 +1,16 @@
-import { useState } from 'react'
+import { type ReactElement, useState } from 'react'
 
 import { Button } from '@/components/ui/button'
 import { pauseLocalDownload, resumeLocalDownload } from '@/hermes'
 import { useI18n } from '@/i18n'
 import { Loader2, Pause, Play } from '@/lib/icons'
 import { cn } from '@/lib/utils'
-import { watchLocalRuntimeJobs } from '@/store/local-runtime-jobs'
+import {
+  isCurrentLocalModelsOwner,
+  type LocalModelsOwner,
+  localModelsRequestScope,
+  watchLocalRuntimeJobs
+} from '@/store/local-runtime-jobs'
 import { notifyError } from '@/store/notifications'
 import type { LocalRuntimeJob } from '@/types/hermes'
 
@@ -50,6 +55,87 @@ export function gbLabel(bytes: number | null | undefined): string {
   return `${(bytes / (1 << 30)).toFixed(1)} GB`
 }
 
+// The status line's copy, as the pieces it composes — a locale changes the
+// words around each number without the caller knowing the grammar.
+export interface DownloadStatusCopy {
+  downloadPausedLabel: string
+  downloadStatusRunning: string
+  downloadProgress: (done: string, total: string) => string
+  downloadSpeed: (rate: string) => string
+  downloadEta: (time: string) => string
+}
+
+export function formatSpeed(bytesPerSec: number | null | undefined): string {
+  if (!bytesPerSec || bytesPerSec <= 0 || !Number.isFinite(bytesPerSec)) {
+    return ''
+  }
+
+  const mb = bytesPerSec / (1 << 20)
+
+  return mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB/s` : mb >= 10 ? `${Math.round(mb)} MB/s` : `${mb.toFixed(1)} MB/s`
+}
+
+export function formatEta(seconds: number | null | undefined): string {
+  if (seconds == null || !Number.isFinite(seconds) || seconds < 1) {
+    return ''
+  }
+
+  if (seconds < 60) {
+    return `${Math.max(1, Math.round(seconds))} sec`
+  }
+
+  const minutes = Math.round(seconds / 60)
+
+  if (minutes < 60) {
+    return `${minutes} min`
+  }
+
+  const hours = Math.floor(minutes / 60)
+  const rest = minutes % 60
+
+  return rest ? `${hours} h ${rest} min` : `${hours} h`
+}
+
+// One status line for every download surface: what it is doing, how far, how
+// fast, how long left — each part dropped rather than guessed when it isn't
+// honestly known yet. Shared by the model rows, the setup hero and the
+// browser tiles so the three can't drift apart.
+export function downloadStatusText(job: LocalRuntimeJob, copy: DownloadStatusCopy): string {
+  if (!isDownloadPhase(job)) {
+    return job.detail
+  }
+
+  const parts: string[] = [job.status === 'paused' ? copy.downloadPausedLabel : copy.downloadStatusRunning]
+
+  const size = job.total_bytes
+    ? copy.downloadProgress(gbLabel(job.done_bytes), gbLabel(job.total_bytes))
+    : job.done_bytes
+      ? gbLabel(job.done_bytes)
+      : ''
+
+  if (size) {
+    parts.push(size)
+  }
+
+  // Speed and ETA only while bytes move: a parked transfer keeps its frozen
+  // counter but has no live rate, so the backend sends none and we render none.
+  if (job.status === 'running') {
+    const speed = formatSpeed(job.bytes_per_sec)
+
+    if (speed) {
+      parts.push(copy.downloadSpeed(speed))
+
+      const eta = formatEta(job.eta_seconds)
+
+      if (eta) {
+        parts.push(copy.downloadEta(eta))
+      }
+    }
+  }
+
+  return parts.length > 1 ? parts.join(' · ') : job.detail || parts[0]
+}
+
 // Phases where bytes are actually moving (or parked mid-move). Quickstart
 // recomputes percent against EACH stage's own download plan — the counter
 // resets between stages by design, so it is only shown during a genuine
@@ -70,28 +156,26 @@ export function isDownloadPhase(job: LocalRuntimeJob): boolean {
   return job.kind === 'quickstart' && QUICKSTART_DOWNLOAD_PHASES.has(job.phase)
 }
 
-// Progress bar + honest byte counter. The counter is suppressed outside
-// download phases (a stage hand-off would otherwise read as progress loss);
-// paused rows keep the frozen counter they parked with.
+// Progress bar + honest status line. The line is the shared composer, so the
+// state word, byte counter, speed and ETA read the same here as on every
+// other download surface.
 export function LocalModelDownloadProgress({ job }: LocalModelDownloadProps) {
   const { t } = useI18n()
   const copy = t.settings.localModels
-  const showCounter = isDownloadPhase(job)
 
   return (
     <div className="grid gap-1">
       <ProgressBar paused={job.status === 'paused'} percent={job.percent} />
 
-      <p className="text-[0.68rem] text-muted-foreground">
-        {!showCounter || (!job.done_bytes && job.detail)
-          ? job.detail
-          : copy.downloadProgress(gbLabel(job.done_bytes), gbLabel(job.total_bytes))}
-      </p>
+      <p className="text-[0.68rem] text-muted-foreground">{downloadStatusText(job, copy)}</p>
     </div>
   )
 }
 
-export function LocalModelDownloadActions({ job }: LocalModelDownloadProps) {
+export function LocalModelDownloadActions({
+  job,
+  owner
+}: LocalModelDownloadProps & { owner?: LocalModelsOwner }): ReactElement | null {
   const { t } = useI18n()
   const copy = t.settings.localModels
   const [busy, setBusy] = useState<boolean>(false)
@@ -105,14 +189,16 @@ export function LocalModelDownloadActions({ job }: LocalModelDownloadProps) {
       // below decides what the row shows; only a real transport failure
       // surfaces as an error.
       if (kind === 'pause') {
-        await pauseLocalDownload(job.job_id)
+        await pauseLocalDownload(job.job_id, owner ? localModelsRequestScope(owner) : undefined)
       } else {
-        await resumeLocalDownload(job.job_id)
+        await resumeLocalDownload(job.job_id, owner ? localModelsRequestScope(owner) : undefined)
       }
 
-      watchLocalRuntimeJobs()
+      watchLocalRuntimeJobs(owner)
     } catch (err) {
-      notifyError(err, copy.downloadFailed(job.target))
+      if (!owner || isCurrentLocalModelsOwner(owner)) {
+        notifyError(err, copy.downloadFailed(job.target))
+      }
     } finally {
       setBusy(false)
     }

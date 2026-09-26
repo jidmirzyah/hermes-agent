@@ -22,8 +22,9 @@
 //     afterPack, which invalidates any signature. It is signed per-file by the
 //     customSign hook AFTER rcedit, on the exact Azure mechanism sign-msix.mjs
 //     uses for the package itself.
-//   - The customSign hook returns true (does nothing) for every file the batch
-//     already covered, so electron-builder never re-signs one-by-one.
+//   - Extra-resource copies invoke customSign BEFORE afterPack; payload files
+//     are deferred to the sanitized batch. Later per-file calls are no-ops,
+//     so electron-builder never re-signs those binaries one-by-one.
 //
 // Sign-nested-chromium.mjs stays as-is: it is macOS-only (codesign --deep over
 // .app bundles inside the payload for Apple notarization) and is invoked from
@@ -40,9 +41,13 @@
 import { execFile } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
+import { Arch } from 'app-builder-lib'
+import { computeArchToTargetNamesMap } from 'app-builder-lib/internal'
 import { isMain } from './utils.mjs'
 import { createPayloadSignCache } from './payload-sign-cache.mjs'
 import { ensureWindowsBundleTools } from './windows-bundle-tools.mjs'
+
+/** @typedef {(cmd: string, args: string[], options?: import('node:child_process').ExecFileOptions) => unknown} SignExecutor */
 
 export const CHUNK_SIZE = 100
 // How many signtool children may run at once. Azure Trusted Signing and the
@@ -177,7 +182,7 @@ export function azureSigningConfigured(env = process.env) {
  * server, and a timestamp failure would force a full re-sign).
  *
  * @param {string[]} files
- * @param {{ signtool: string, dlib: string, metadataPath: string, exec?: typeof execFile, execOptions?: import('node:child_process').ExecFileOptions }} opts
+ * @param {{ signtool: string, dlib: string, metadataPath: string, exec?: SignExecutor, execOptions?: import('node:child_process').ExecFileOptions }} opts
  */
 export async function signChunk(files, opts) {
   const args = [
@@ -202,7 +207,7 @@ export async function signChunk(files, opts) {
  * whole re-sign) and runs concurrently like the sign pass.
  *
  * @param {string[]} files
- * @param {{ signtool: string, timestampUrl?: string, exec?: typeof execFile, execOptions?: import('node:child_process').ExecFileOptions, timestampAttempts?: number, timestampRetryDelayMs?: number }} opts
+ * @param {{ signtool: string, timestampUrl?: string, exec?: SignExecutor, execOptions?: import('node:child_process').ExecFileOptions, timestampAttempts?: number, timestampRetryDelayMs?: number }} opts
  */
 export async function timestampChunk(files, opts) {
   const args = [
@@ -233,7 +238,7 @@ export async function timestampChunk(files, opts) {
  * passes. Identical cacheable inputs share one signing operation.
  *
  * @param {string[]} binaries file list from getBinaries
- * @param {{ env?: NodeJS.ProcessEnv, exec?: typeof execFile, chunkSize?: number, concurrency?: number, mkdtemp?: typeof fs.mkdtempSync, signtool?: string, dlib?: string, dotnetRoot?: string, config?: import('app-builder-lib').Configuration, resourcesDir?: string, timestampUrl?: string, timestampAttempts?: number, timestampRetryDelayMs?: number, cache?: ReturnType<typeof createPayloadSignCache> }} [opts]
+ * @param {{ env?: NodeJS.ProcessEnv, exec?: SignExecutor, chunkSize?: number, concurrency?: number, mkdtemp?: typeof fs.mkdtempSync, signtool?: string, dlib?: string, dotnetRoot?: string, config?: import('app-builder-lib').Configuration, resourcesDir?: string, timestampUrl?: string, timestampAttempts?: number, timestampRetryDelayMs?: number, cache?: ReturnType<typeof createPayloadSignCache> }} [opts]
  * @returns {Promise<{ signed: number, chunks: number, skipped: boolean }>}
  *   skipped=true when Azure signing is not configured (caller warns).
  */
@@ -347,11 +352,37 @@ const SIGNABLE_PACKAGE_EXTENSIONS = ['.msix', '.msixbundle']
 const STORE_ARTIFACT_PREFIX = 'Store-'
 
 /**
+ * Match the paths WinPackager.signApp signs after editing the root executable.
+ * The per-file hook has no arch/appOutDir: use the same target normalization,
+ * output macros and computeAppOutDir as Packager.doBuild/PlatformPackager.pack.
+ * @param {string} file
+ * @param {import('app-builder-lib').WinPackager} packager
+ * @returns {boolean}
+ */
+function isProductExe(file, packager) {
+  // Packager initializes targets and validateConfig supplies directories.output
+  // before doBuild can invoke this hook (the public input types are optional).
+  const targets = /** @type {Map<Arch, string[]>} */ (packager.packagerOptions.targets?.get(packager.platform))
+  const output = /** @type {string} */ (packager.config.directories?.output)
+  const arches = computeArchToTargetNamesMap(targets, packager, packager.platform)
+  const resolved = path.resolve(file).toLowerCase()
+  for (const arch of arches.keys()) {
+    const outDir = path.resolve(packager.projectDir, packager.expandMacro(output, Arch[arch]))
+    // Protected in the declarations, but this is the actual pack() resolver;
+    // bracket access avoids inventing a parallel output-directory convention.
+    const appOutDir = packager['computeAppOutDir'](outDir, arch)
+    const productExe = path.resolve(appOutDir, `${packager.appInfo.productFilename}.exe`)
+    if (resolved === productExe.toLowerCase()) return true
+  }
+  return false
+}
+
+/**
  * The electron-builder custom win.sign hook.
  *
  * @param {{ path: string }} configuration
- * @param {any} packager
- * @param {{ signMsix?: (configuration: any, packager: any) => Promise<void>, azureSignFile?: (file: string, packager: any) => Promise<void> }} [deps]
+ * @param {import('app-builder-lib').WinPackager} packager
+ * @param {{ signMsix?: (configuration: { path: string }, packager: import('app-builder-lib').WinPackager) => Promise<void>, azureSignFile?: (file: string, packager: import('app-builder-lib').WinPackager) => Promise<void> }} [deps]
  * @returns {Promise<boolean>} true when this hook handled the file
  *   (batch-signed: nothing to do) — electron-builder must not re-sign it.
  */
@@ -368,13 +399,14 @@ export async function customSign(configuration, packager, deps = {}) {
   }
   // The product exe was rcedit-ed after the batch ran, so it is signed here,
   // after its resources are final, on the same Azure manager sign-msix uses.
-  const productName = packager?.appInfo?.productFilename
-  if (productName && base.toLowerCase() === `${productName.toLowerCase()}.exe`) {
+  const productName = packager.appInfo.productFilename
+  if (base.toLowerCase() === `${productName.toLowerCase()}.exe` && isProductExe(file, packager)) {
     const { azureSignFile } = await import('./sign-msix.mjs')
     await (deps.azureSignFile ?? azureSignFile)(file, packager)
     return true
   }
-  // Everything else the hook is offered was already batch-signed in afterPack.
+  // Payload copies arrive before afterPack; defer them to its sanitized batch.
+  // Calls after afterPack are no-ops for binaries that batch already signed.
   return true
 }
 

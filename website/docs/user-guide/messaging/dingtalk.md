@@ -7,7 +7,7 @@ description: "Set up Hermes Agent as a DingTalk chatbot"
 # DingTalk Setup
 
 Python dependency commands on this page use a
-[PM-prepared source checkout](/reference/package-management#developer-workflow).
+[PM-prepared source checkout](../../reference/package-management.md#developer-workflow).
 After a dependency change, reactivate the checkout and restart Hermes.
 
 Hermes Agent integrates with DingTalk (钉钉) as a chatbot, letting you chat with your AI assistant through direct messages or group chats. The bot connects via DingTalk's Stream Mode — a long-lived WebSocket connection that requires no public URL or webhook server — and replies using markdown-formatted messages through DingTalk's session webhook API.

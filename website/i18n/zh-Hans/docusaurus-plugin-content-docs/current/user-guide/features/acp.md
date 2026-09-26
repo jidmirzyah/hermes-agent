@@ -6,7 +6,7 @@ description: "在兼容 ACP 的编辑器和协作平台中使用 Hermes Agent"
 
 # ACP 宿主集成
 
-本页的 Python 依赖命令使用 [PM 准备的源码环境](/reference/package-management#developer-workflow)。
+本页的 Python 依赖命令使用 [PM 准备的源码环境](../../reference/package-management.md#developer-workflow)。
 依赖变更后，请重新激活该 checkout 并重启 Hermes。
 
 Hermes Agent 可作为 ACP 服务器运行，让兼容 ACP 的编辑器通过 stdio 与 Hermes 通信并渲染：

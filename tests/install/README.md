@@ -40,14 +40,78 @@ Each leg with the script drivers has these phases:
 
 1. Stage: make the bare clone, park `main` at the old release.
 2. Install: run the old release's own installer script. Make sure that the checkout is at the old commit and that `hermes --version` works.
-3. Desktop smoke: run `hermes desktop --build-only` from the installed CLI. This proves that the installed version can build the desktop app. If the installed version does not have this flag, the phase reports a skip and continues.
-4. Update: move `main` to HEAD. Apply one update method. Make sure that the checkout is at HEAD and that `hermes --version` works.
-5. Desktop smoke again, at HEAD.
+3. Update: move `main` to HEAD. Apply one update method. An app update must produce a new successful receipt or handoff result; a changed checkout alone is not completion.
+4. Verify the installed command and products before running `hermes --version`. Select the command under the installation's `.hermes/bin`; use the old venv only for a source tree without PM. Check PM currency and compiler receipts where supported. Preserve the no-desktop scenario for a plain install. Do not rebuild, remove dependencies, or force-stop an updater during verification. Historical installs without these receipts get artifact-presence checks, not a freshness claim.
+
+The cheap fixture checks are `tests/scripts/test_source_driver.py` and `tests-js/source-update-observer.test.mjs`. They do not run installers or prove native GUI relaunch. The native packaged-update drivers own automatic-relaunch acceptance. A later driver-owned launch checks chat only after the original update/relaunch assertions pass; it cannot repair a failed handoff. The observer does not change source files, products, dependency selections, or facts.
 
 The Windows `desktop-installer@latest` install downloads the published
 `Hermes-Setup.exe` and drives its GUI with AutoHotkey. The selected update
 method is a separate axis. App-update methods click the running app's Update
 control; script and CLI methods use their corresponding entry points.
+
+## Desktop chat at install and update checkpoints
+
+Desktop-bearing routes run the same message check used by post-build bundle
+smoke and the desktop chat spec: `tests-js/scripts/desktop-chat-smoke.ts`.
+It types a unique prompt through the real composer, requires a new request at
+the existing loopback mock provider, and waits for a new completed assistant
+reply in the active transcript. A reply preserved from OLD cannot satisfy NEW.
+Only inference is mocked; Electron, the installed backend, and rendering run
+for real. These checks require no external model credentials.
+
+- A desktop-bearing OLD installation must chat before its update. App-driven
+  updates also check the actual OLD window before clicking Update now.
+- After the existing completion and product checks, NEW must chat if the route
+  expects desktop. A route that adds desktop only at update retains the OLD
+  no-desktop assertion.
+- Plain source install/update routes that never request desktop record
+  `not-applicable`; the chat driver does not build desktop for them.
+- Native package updates must prove automatic relaunch first. The driver then
+  closes the verified app normally and launches the same installed binary for
+  `post-update-launch` chat. That second launch is not automatic-relaunch proof.
+
+`tests/install/e2e-assets/desktop-smoke.ts` runs an exact installed executable
+with an isolated home/userData and checks the actual backend listener's origin.
+Source checkpoints use that leg's installed tree; bundle checkpoints use its
+embedded payload. Missing products fail rather than trigger a build or repair.
+Driver Node/Playwright come from the current checkout, not OLD's dependencies.
+
+Each checkpoint writes a `desktop-chat-old.json`, `desktop-chat-new.json`, or
+`desktop-chat-installed.json` result plus a screenshot. Failed chat fails the
+leg even when version, health, and update receipts passed. Existing plugin and
+user-state preservation checks remain required. The mock configuration writer
+preserves unrelated settings, including the controlled update feed.
+
+## Post-build artifact smoke
+
+`desktop-bundled-release.yml` calls `desktop-bundle-smoke.yml` on fresh native
+Windows and macOS runners. It downloads the admitted commit's receipt-bound
+bytes through the public archive and installs the actual artifact before chat:
+
+| Native target | Independently installed formats |
+|---|---|
+| macOS arm64 and x64 | DMG, ZIP |
+| Windows arm64 and x64 | MSIX, universal MSIXBUNDLE |
+
+The universal envelope runs on both Windows architectures, verifying native
+slice selection. Windows assembly/staging is separate from feed publication;
+both Windows smoke matrices must pass before publishing its canary feed.
+macOS publication and stable candidate acceptance also require their smoke
+results. Failed checks retain the downloadable build and diagnostic artifacts.
+
+Stable candidate schema 2 binds these successful smoke groups into the pinned
+candidate manifest. Promotion renders that evidence, not the skipped smoke
+jobs from its own phase. Schema-1 candidates lack this admission and cannot be
+promoted by the new workflow; create a new candidate tag. They remain valid as
+previous-version upgrade baselines.
+
+This covers signed downloadable commit builds, canaries with upload enabled,
+and stable candidates. No-upload tag builds have no cross-job download handoff.
+Linux bundle jobs remain disabled, but Linux source-install desktop checks run.
+Unsigned Store submissions are not sideloaded or re-signed for this smoke;
+their Store acceptance remains separate. Passing helper tests does not establish
+native installation or chat acceptance: those require the corresponding runner.
 
 ## Old versions
 
@@ -146,6 +210,53 @@ contract and not exercised.
   stable-to-stable when BOTH the install ref and the target ref are release
   tags. The workflow matrix itself is unchanged.
 
+## Manual update rehearsals
+
+There is no `manual/` directory in this repo. The rehearsal scripts — `pre`
+(back up the whole `HERMES_HOME`, the desktop app's Electron userData, the
+`hermes` shims on PATH and the global git config, then point the install's
+update source at a custom repo + ref) and `post` (undo all of it and report how
+exact the restore was) — are a hand-off kit for someone with a *real* install,
+kept outside this checkout on purpose: they are not part of the repo and not
+wired into any lane here.
+
+What *is* in the repo is the assertion layer they exist to demonstrate. The
+user-state preservation checks below run on every upgrade leg; the manual kit
+only reproduces the same upgrade on a machine you care about, where a backup
+and a restore are the only honest way to do it.
+
+## User-state preservation
+
+Alongside the plugin-tree contract below, every upgrade leg also carries a
+**user-state** contract: an upgrade may add state, may rewrite `config.yaml`
+(additive config migration) and the bundled `skills/` tree (the product
+re-syncs it), but it may not delete or modify the user's own durable state —
+`.env`, `auth.json`, `state.db`, `gateway_state.json`, `memories/`, `cron/`,
+`sessions/`, `profiles/`, `photon/`, `desktop-plugins/`, `tui-widgets/`,
+`skins/`, `pets/`, `skills/.archive/` — and `state.db` may not lose rows.
+
+- `e2e-assets/verify-user-state.py` is the shared, stdlib-only, read-only
+  verifier. It records row counts for `state.db` rather than bytes (a live
+  SQLite file changes for benign reasons), and it has **no** `seed` mode on
+  purpose: the state it defends must be produced by the product through the
+  ordinary user path, never hand-written by the harness.
+- `e2e-assets/user-state-actions.sh` produces that state with real commands —
+  `hermes chat -q` (a real turn → `sessions/` + `state.db` rows),
+  `hermes auth add` (→ `auth.json`), `hermes profile create`
+  (→ `profiles/<name>/`) — after probing `--help` for each flag, per the
+  harness's "probe, do not assume" rule. Each action asserts it actually landed,
+  so a leg can never "pass" while testing nothing.
+- `e2e-assets/preserve-user-state.sh` is the POSIX/macOS hook pair
+  (snapshot before the upgrade, verify after). Windows calls the same Python
+  `snapshot`/`verify` from `windows-e2e.ps1`'s phases, alongside its existing
+  plugin hooks.
+- Two more invariants ride along: the redirect must stay transport-level
+  (`config --get remote.origin.url` stays official while `remote get-url` is
+  rewritten), and the user-visible launcher must still exist and run after the
+  upgrade.
+- Unit tests live at `tests/scripts/test_verify_user_state.py` and exercise the
+  verifier against a real temp filesystem with real sqlite databases.
+
 ## Artifacts
 
-Each leg uploads its logs as an artifact. Every leg also records the screen for its whole run: the composite action `.github/actions/e2e-screen-record` installs ffmpeg, records with the OS's capture backend (x11grab on linux, gdigrab on windows, avfoundation on macos), and fails the leg if the recording is missing or has zero frames. Linux runners have no display, so the action starts `Xvfb :99` first and exports `DISPLAY` for every later step — the app under test and the recorder share that display. The windows GUI leg also uploads screenshots and the update result file. Get them with `gh run download <run-id>`.
+Each leg uploads its logs as an artifact. Every leg also records the screen for its whole run: the composite action `.github/actions/e2e-screen-record` records with the OS's capture backend (x11grab on linux, gdigrab on windows, avfoundation on macos), and fails the leg if the recording is missing or has zero frames. ffmpeg itself comes from the PM toolchain — jobs pass `packages: ffmpeg` to `actions/setup-pm`, which installs the locked, sha256-pinned build (native per-OS, including win32-arm64) and puts it on `PATH`; the action only verifies it is there. Linux runners have no display, so the action starts `Xvfb :99` first and exports `DISPLAY` for every later step — the app under test and the recorder share that display. The windows GUI leg also uploads screenshots and the update result file. Get them with `gh run download <run-id>`.

@@ -253,7 +253,7 @@ def validate_file(path: Path) -> tuple[list[str], list[str]]:
     try:
         reader = YAML(typ="safe")
         reader.version = (1, 1)
-        with open(path, encoding="utf-8") as fh:
+        with open(path, encoding="utf-8-sig") as fh:
             data = reader.load(fh)
     except OSError as exc:
         return [f"cannot read file: {exc}"], []

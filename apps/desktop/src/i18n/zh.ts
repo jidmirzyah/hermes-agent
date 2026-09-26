@@ -2,7 +2,7 @@ import { defineFieldCopy } from '@/app/settings/field-copy'
 
 import { defineLocale } from './define-locale'
 
-export const zh: Translations = {
+export const zh = defineLocale({
   externalOpenFailed: {
     title: '无法打开此链接',
     message: '没有注册用于打开此地址的浏览器。请复制链接并手动打开。',
@@ -33,9 +33,12 @@ export const zh: Translations = {
     search: '查找应用',
     empty: '没有匹配的应用',
     disclaimer: '连接为可选操作。请仅授权你希望 Hermes 使用的应用。',
-    connectTitle: app => `连接 ${app}？`,
-    describe: app => `Hermes 会在浏览器中登录 ${app}，读取任何内容前都会先询问。`,
-    execution: '连接器工具'
+    execution: '连接器工具',
+    setup: server => `设置 ${server}`,
+    openInBrowser: '在浏览器中打开',
+    setupCancel: '取消',
+    authorizedToolsUnavailable: '已授权。工具不可用。',
+    required: '必填'
   },
   sessionImport: {
     title: '从其他应用继续',
@@ -167,8 +170,7 @@ export const zh: Translations = {
       back: '返回',
       openLogs: '打开日志',
       repairHint: '修复会重新运行安装器，在新机器上可能需要几分钟。',
-      bundledReinstallHint:
-        '捆绑安装无法从应用内部自修复——重新安装 Hermes Desktop 以恢复其后端。',
+      bundledReinstallHint: '捆绑安装无法从应用内部自修复——重新安装 Hermes Desktop 以恢复其后端。',
       reinstallApp: '重新安装 Hermes Desktop',
       remoteSignInHint: signInLabel =>
         `先退出已保存的远程浏览器会话，然后打开${signInLabel}。也可以使用本地网关切换到随应用提供的后端。`,
@@ -194,7 +196,8 @@ export const zh: Translations = {
   },
 
   notifications: {
-    sharedProfileWarning: '另一个 Hermes 安装实例正在使用此配置。两个实例共享此配置的设置和数据，因此更改可能发生冲突。你可以继续使用，也可以在更改前关闭另一个实例。',
+    sharedProfileWarning:
+      '另一个 Hermes 安装实例正在使用此配置。两个实例共享此配置的设置和数据，因此更改可能发生冲突。你可以继续使用，也可以在更改前关闭另一个实例。',
     region: '通知',
     hide: '隐藏',
     show: '显示',
@@ -390,7 +393,6 @@ export const zh: Translations = {
       'view.toggleStatusbar': '切换状态栏',
       'view.toggleTabStrip': '切换标签',
       'view.toggleProfileRail': '切换配置档案栏',
-      'view.toggleSimpleMode': '切换简洁模式',
       'view.showFiles': '显示文件浏览器',
       'view.showBrowser': '打开浏览器',
       'view.showTerminal': '显示终端',
@@ -609,7 +611,7 @@ export const zh: Translations = {
       blurb:
         '加载到此应用中的界面扩展——随构建捆绑，或放入 desktop-plugins 文件夹（包括 Hermes 编写的插件）。禁用会即时卸载插件并在重启后保持。',
       count: n => `已安装 ${n} 个`,
-      openFolder: '打开桌面插件文件夹',
+      openFolder: '打开插件文件夹',
       rescan: '重新扫描',
       reveal: '在文件管理器中显示',
       enable: '启用',
@@ -630,17 +632,14 @@ export const zh: Translations = {
         includesHeading: '此包包含',
         agentLabel: '智能体插件',
         desktopLabel: '桌面 UI',
-        profileLabel: '安装到配置文件',
         agentTargetLocal: (profile, dir) => `安装到 ${profile} 后端（${dir}）`,
         agentTargetRemote: profile => `安装到已连接的 ${profile} 后端`,
         catalogPinned: (name, sha) =>
           `Hermes 目录条目「${name}」— agent 部分将安装在经过审核的固定提交${sha ? ` ${sha}` : ''}，而不是分支最新代码。`,
         reviewedHeading: '经过审核的目录条目',
         reviewedIntro: '此条目已在其固定提交处经过人工审核。你仍可在下方检查确切代码。',
-        toolsConnected: n => `已连接 ${n} 个工具`,
-        skillsReady: names => (names.length === 1 ? `技能 ${names[0]} 已就绪` : `${names.length} 个技能已就绪`),
-        nextChat: '更多工具将在下一次聊天中可用',
-        serverNotConnected: (server, reason) => `MCP 服务器 ${server} 未连接${reason ? `：${reason}` : '。'}`,
+        restartToApply: '重启网关后插件才会生效。',
+        restartNow: '重启网关',
         missingEnvAction: '去设置',
         alreadyInstalled: (name: string) => `${name} 已安装。`,
         desktopTarget: '安装到此应用的本地 desktop-plugins 文件夹',
@@ -1185,7 +1184,7 @@ export const zh: Translations = {
       driverHealth: '驱动健康状态'
     },
     about: {
-      updates: '更新',
+      updates: '更新'
     },
     config: {
       minimizeToTrayTitle: '最小化到托盘',
@@ -1517,24 +1516,59 @@ export const zh: Translations = {
     },
     mcp: {
       loading: '正在加载 MCP 服务器...',
+      failedLoad: 'MCP 配置加载失败',
+      nameRequiredTitle: '需要名称',
+      nameRequiredMessage: '请为此 MCP 服务器提供配置键。',
+      objectRequired: '服务器配置必须是 JSON 对象',
       invalidJson: 'MCP JSON 无效',
       saveFailed: '保存失败',
       removeFailed: '移除失败',
+      gatewayUnavailableTitle: '网关不可用',
+      gatewayUnavailableMessage: '重新加载 MCP 前请先重连网关。',
+      reloadedTitle: 'MCP 工具已重新加载',
+      reloadedMessage: '新的工具 schema 将应用到后续回合。',
       reloadFailed: 'MCP 重新加载失败',
       savedTitle: 'MCP 服务器已保存',
       savedMessage: name => `${name} 会在 MCP 重新加载后生效。`,
+      newServer: '新服务器',
+      reload: '重新加载 MCP',
+      reloading: '重新加载中...',
+      emptyTitle: '没有 MCP 服务器',
+      emptyDesc: '添加 stdio 或 HTTP 服务器以暴露 MCP 工具。',
       disabled: '已禁用',
+      editServer: '编辑服务器',
       name: '名称',
       serverJson: '服务器 JSON',
       remove: '移除',
+      saveServer: '保存服务器',
       test: '测试连接',
+      testing: '测试中…',
+      testOk: count => `已连接 — ${count} 个工具可用`,
+      testFailed: '连接失败',
+      enableServer: name => `启用 ${name}`,
+      disableServer: name => `禁用 ${name}`,
+      serverEnabled: name => `${name} 已启用 — 对新会话生效。`,
+      serverDisabled: name => `${name} 已禁用 — 对新会话生效。`,
+      toggleFailed: (name, enabled) => `${enabled ? '开启' : '关闭'} ${name} 失败`,
+      tabServers: '服务器',
+      tabCatalog: '目录',
       catalogLoading: '正在加载 MCP 目录…',
+      catalogLoadFailed: 'MCP 目录加载失败',
+      catalogEmpty: '没有可用的目录条目。',
+      catalogInstalled: '已安装',
+      catalogEnabled: '已启用',
+      catalogNeedsInstall: '需要构建',
+      catalogInstall: '安装',
+      catalogInstalling: '安装中…',
+      catalogInstallStarted: name => `正在安装 ${name}… 完成后对新会话生效。`,
       catalogInstallFailed: name => `安装 ${name} 失败`,
+      catalogEnvPrompt: name => `${name} 需要凭据`,
       catalogEnvRequired: '安装前请填写必需的值。',
       capabilitySummary: (tools, prompts, resources) =>
         `已启用 ${[`${tools} 个工具`, ...(prompts ? [`${prompts} 个提示`] : []), ...(resources ? [`${resources} 个资源`] : [])].join('、')}`,
       costTokens: tokens => `每次调用约 ${tokens} token`,
       usage30d: uses => `30 天内 ${uses} 次调用`,
+      unusedPill: '未使用',
       statusConnecting: '连接中…',
       statusNeedsAuth: '需要认证',
       statusError: '错误',
@@ -1542,7 +1576,11 @@ export const zh: Translations = {
       allServers: '所有服务器',
       authenticatedTitle: '已认证',
       authenticatedMessage: (server, count) => `${server}：${count} 个工具`,
+      waitingForBrowser: '等待浏览器…',
       authenticate: '认证',
+      unsavedConnect: '未保存 — 保存 mcp.json 以连接。',
+      enableTool: tool => `启用 ${tool}`,
+      disableTool: tool => `禁用 ${tool}`,
       noOutput: '暂无输出。',
       deepLinkTitle: '添加 MCP 服务器？',
       deepLinkDescription:
@@ -1556,7 +1594,12 @@ export const zh: Translations = {
       deepLinkErrorConfig: '链接中的配置不是有效的 base64 编码 JSON。',
       deepLinkErrorShape: '配置必须是包含字符串 `url` 或 `command` 字段的 JSON 对象。',
       deepLinkErrorUrl: '仅允许 http:// 和 https:// 服务器地址。',
-      deepLinkErrorTooLarge: '配置负载超过 32KB 上限。'
+      deepLinkErrorTooLarge: '配置负载超过 32KB 上限。',
+      importButton: '导入',
+      importPlaceholder: '粘贴 mcp.json 片段、npx/docker 命令、claude mcp add 命令、URL 或 Cursor 链接…',
+      importNoMatch: '粘贴的文本中未识别到服务器配置。',
+      importConfirm: '添加到 mcp.json',
+      importConfirmMany: count => `添加 ${count} 个服务器到 mcp.json`
     },
     model: {
       loading: '正在加载模型配置...',
@@ -1647,6 +1690,9 @@ export const zh: Translations = {
       downloaded: '已下载',
       downloadAction: size => `下载 · ${size}`,
       downloadProgress: (done, total) => `${done} / ${total}`,
+      downloadStatusRunning: '下载中',
+      downloadSpeed: rate => `${rate}`,
+      downloadEta: time => `剩余约 ${time}`,
       downloadPausedLabel: '已暂停',
       downloadPauseAction: '暂停',
       downloadResumeAction: '继续',
@@ -1660,7 +1706,7 @@ export const zh: Translations = {
       updateAction: '更新引擎',
       updating: '正在更新引擎…',
       upToDateTitle: '引擎已是最新',
-      upToDateDetail: (tag, backend) => `正在运行 llama.cpp ${tag}（${backend}）——已配置的构建。`,
+      upToDateDetail: (tag, backend) => `正在运行 llama.cpp ${tag}（${backend})。`,
       activeDetail: '新对话使用此模型——发送首条消息时加载',
       activeNotLoaded: '首条消息时加载',
       loadedPill: '已加载',
@@ -1882,6 +1928,7 @@ export const zh: Translations = {
     tabSkills: '技能',
     tabToolsets: '工具集',
     configuringProfile: '正在配置：',
+    tabMcp: 'MCP',
     all: '全部',
     searchSkills: '搜索技能…',
     searchToolsets: '搜索工具集…',
@@ -3500,8 +3547,7 @@ export const zh: Translations = {
       notAvailable: '此后端无法更新。',
       failed: '后端更新失败。',
       noReturn: '后端未恢复在线。更新可能未完成——请检查后端主机。'
-    }
-    ,
+    },
     // Update-status overlay + version-details (mechanism-aware update UI).
     appName: 'Hermes',
     version: value => `版本 ${value}`,
@@ -3524,19 +3570,21 @@ export const zh: Translations = {
     daysAgo: count => `${count} 天前`,
     justNowSuffix: ' · 刚刚',
     bundleOutOfSync: '应用版本过旧',
-    bundleOutOfSyncDesc:
-      'Hermes 运行时已更新，但桌面应用仍是较旧的构建。请更新以获取最新修复。',
+    bundleOutOfSyncDesc: 'Hermes 运行时已更新，但桌面应用仍是较旧的构建。请更新以获取最新修复。',
     bundleOutOfSyncAction: '获取安装程序',
     checkingShort: '检查中…',
     releaseAvailable: tag => `版本 ${tag} 可用。`,
     versionDetailsTitle: '版本详情',
-    versionDetailsBody:
-      '此安装在应用外部管理。请使用与安装时相同的方式更新。',
+    versionDetailsBody: '此安装在应用外部管理。请使用与安装时相同的方式更新。',
     versionDetailsVersion: '版本',
     versionDetailsCommit: '提交',
     versionDetailsBuildOrigin: '构建来源',
     versionDetailsDistribution: '发行版',
-    versionDetailsDistributionDesktop: '桌面应用 (MSIX)',
+    versionDetailsDistributionDesktop: '桌面应用',
+    versionDetailsDistributionDesktopMsix: '桌面应用 (MSIX)',
+    versionDetailsDistributionDesktopInstaller: '桌面应用（安装器）',
+    versionDetailsDistributionSourceInstaller: '源码（安装脚本）',
+    versionDetailsDistributionSource: '源码',
     versionDetailsDistributionStore: 'Microsoft Store',
     versionDetailsRuntime: '运行时',
     versionDetailsRuntimeEmbedded: '嵌入式（捆绑）',
@@ -3570,8 +3618,7 @@ export const zh: Translations = {
     connectExistingTitle: '连接到现有 Hermes',
     connectExistingShort: '连接现有环境',
     connectExistingDesc: '使用会话令牌或浏览器登录连接远程后端。不会启动本地安装。',
-    setupChoiceDescLocal:
-      '在这台电脑上安装 Hermes，或连接到已在运行的 Hermes 网关。',
+    setupChoiceDescLocal: '在这台电脑上安装 Hermes，或连接到已在运行的 Hermes 网关。',
 
     installLocalTitle: '本地安装 Hermes',
     installLocalDesc: '下载 Hermes，创建 Python 环境，并在这台电脑上运行后端。',
@@ -4075,20 +4122,6 @@ export const zh: Translations = {
     }
   },
 
-  interfaceMode: {
-    title: '界面模式',
-    hint: '只改变显示的内容，不改变 Hermes 的能力。',
-    sessionNote: '由简洁模式设定。此处的更改仅在本次会话内生效；切换到高级模式即可保留为你的设置。',
-    simple: {
-      label: '简洁',
-      description: '用于与 Hermes 对话。只有侧边栏和聊天；没有终端、文件或差异面板。'
-    },
-    advanced: {
-      label: '高级',
-      description: '面向开发者。终端、文件、差异、状态栏和布局，按你的设置显示。'
-    }
-  },
-
   zones: {
     showTabStrip: '显示标签',
     hideTabStrip: '隐藏标签',
@@ -4260,29 +4293,6 @@ export const zh: Translations = {
       lateAnswer: (question, choice) => `关于"${question}" — 我的回答: ${choice}`,
       lateAnswerTip: '将此回答起草为后续消息',
       lateAnswerHint: '此问题已不再等待回答。选择一个选项会将其起草为后续消息。'
-    },
-    catalogInstall: {
-      preparing: '正在准备安装…',
-      install: '安装',
-      advanced: '高级',
-      skip: '跳过',
-      installing: '正在安装…',
-      installed: '已安装',
-      notInstalled: '未安装',
-      failed: '失败',
-      showNames: '显示名称',
-      hideNames: '隐藏名称',
-      skill: name => `技能 ${name}`,
-      kind: { plugin: '插件', skill: '技能' },
-      tier: { official: '官方', community: '社区' },
-      targetProfile: profile => `安装到你的 ${profile} 配置文件`,
-      sendFailed: '无法发送你的回复，请重试。',
-      commitLabel: '提交',
-      subdirLabel: '文件夹',
-      securityHeading: '安全',
-      scan: { passed: '扫描通过', warnings: '扫描发现警告', failed: '扫描未通过' },
-      requirementsLabel: '要求',
-      credentialsHeading: '凭据'
     },
     mcpSetup: {
       installTitle: '添加 MCP 服务器',

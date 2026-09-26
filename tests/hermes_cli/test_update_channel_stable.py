@@ -1,6 +1,9 @@
 """Source-update channel selection policy."""
 
+import json
 from unittest.mock import patch
+
+import pytest
 
 from hermes_cli.update_cmd import _source_update_channel
 
@@ -20,7 +23,7 @@ class TestSourceUpdateChannel:
     def test_transient_channel_flag_wins(self):
         """--channel is the per-invocation override (--set-channel persists);
         no config read happens when it is present."""
-        with patch("hermes_cli.config.load_config") as load_config:
+        with patch("hermes_cli.config.require_readable_config_before_write") as load_config:
             for channel in ("stable", "main", "canary"):
                 assert _source_update_channel(_Args(channel=channel)) == channel
                 assert _source_update_channel(channel=channel) == channel
@@ -40,8 +43,11 @@ class TestSourceUpdateChannel:
         import hermes_cli.update_cmd as update_cmd
 
         monkeypatch.setattr(update_cmd._m(), "PROJECT_ROOT", root)
-        with patch("hermes_cli.config.load_config", return_value=config):
-            assert _source_update_channel(_Args()) == "stable"
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(home))
+        (home / "config.yaml").write_text(json.dumps(config), encoding="utf-8")
+        assert _source_update_channel(_Args()) == "stable"
 
     def test_no_record_stays_main(self, tmp_path, monkeypatch):
         root = tmp_path / "install"
@@ -52,9 +58,11 @@ class TestSourceUpdateChannel:
         import hermes_cli.update_cmd as update_cmd
 
         monkeypatch.setattr(update_cmd._m(), "PROJECT_ROOT", root)
-        with patch("hermes_cli.config.load_config", return_value={"update": {"installs": {}}}):
-            assert _source_update_channel(_Args()) == "main"
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+        assert _source_update_channel(_Args()) == "main"
 
-    def test_config_failure_defaults_to_main(self):
-        with patch("hermes_cli.config.load_config", side_effect=RuntimeError("boom")):
-            assert _source_update_channel(_Args()) == "main"
+    def test_config_failure_never_changes_the_subscription(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        (tmp_path / "config.yaml").write_text("update: [broken", encoding="utf-8")
+        with pytest.raises(RuntimeError, match="formatting error"):
+            _source_update_channel(_Args())

@@ -63,7 +63,7 @@ describe('deriveUpdateStatus', () => {
     const view = derive({ supported: true, error: 'check-failed', message: 'ECONNREFUSED' })
 
     expect(view.tone).toBe('error')
-    expect(view.line).toBe(en.updates.cantReach)
+    expect(view.line).toBe(`${en.updates.cantReach} ECONNREFUSED`)
     expect(view.error).toBe('ECONNREFUSED\ncheck-failed')
   })
 
@@ -137,6 +137,12 @@ describe('VersionHero bundle banners', () => {
 
     return relaunchApp
   }
+
+  it('shows an R2 channel name that is not a built-in translated label', (): void => {
+    render(<VersionHero version={version({ channel: 'pm-preview' })} />)
+
+    expect(screen.getByText(`${en.updates.version('0.19.0')} · pm-preview`)).toBeTruthy()
+  })
 
   it.each(Object.entries(TRANSLATIONS) as [Locale, Translations][])(
     'localizes version channels in %s',

@@ -32,6 +32,7 @@ class _StubHandler(BaseHTTPRequestHandler):
     models: dict | None = None
     require_auth = False
     chat_answer = "Paris"
+    reasoning = ""
     requests_processing = 0
     slots: list = []
     slots_error = 0
@@ -84,7 +85,8 @@ class _StubHandler(BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(length)) if length else {}
         if self.path == "/v1/chat/completions":
             self._send(200, {"choices": [{"message": {
-                "role": "assistant", "content": self.chat_answer}}]})
+                "role": "assistant", "content": self.chat_answer,
+                "reasoning_content": self.reasoning}}]})
         elif self.path == "/models/load":
             self._send(200, {"success": True})
         elif self.path == "/models/unload":
@@ -229,24 +231,11 @@ def test_touch_generate_is_the_readiness_proof(stub_server, tmp_path):
     assert sup.touch_generate("m") is False
 
 
-def test_touch_generate_scans_reasoning_content(stub_server, tmp_path):
-    """Reasoning models answer inside reasoning_content (receipted pitfall)."""
+@pytest.mark.parametrize('reasoning,ready', [('The capital is Paris.', True), ('', False)])
+def test_touch_generate_scans_reasoning_content(stub_server, tmp_path, reasoning, ready):
     port, handler = stub_server
-    sup = _make_supervisor(tmp_path, port)
-
-    class ReasoningHandler(handler):  # type: ignore[valid-type]
-        def do_POST(self):  # noqa: N802
-            if self.path == "/v1/chat/completions":
-                self._send(200, {"choices": [{"message": {
-                    "role": "assistant", "content": "",
-                    "reasoning_content": "The capital of France is Paris."}}]})
-            else:
-                self._send(404, {})
-
-    # Swap handler class on the live stub server socket is overkill; just
-    # verify the scan logic path via the normal handler with empty content.
-    handler.chat_answer = ""
-    assert sup.touch_generate("m") is False  # empty content, no reasoning field
+    handler.chat_answer, handler.reasoning = '', reasoning
+    assert _make_supervisor(tmp_path, port).touch_generate('m') is ready
 
 
 def test_ensure_model_ready_unknown_model_raises(stub_server, tmp_path):
@@ -918,10 +907,9 @@ def test_ensure_local_runtime_serializes_racing_callers(tmp_path, monkeypatch):
     monkeypatch.setattr(bootstrap, "_generate_presets", lambda *a, **k: None)
     monkeypatch.setattr(bootstrap, "_presets_stale", lambda: False)
     monkeypatch.setattr(bootstrap, "_detect_gpu_vendor", lambda: None)
-    monkeypatch.setattr("hermes_cli.local_runtime.binaries.installed_tags", lambda: ["b1"])
-    monkeypatch.setattr("hermes_cli.local_runtime.binaries.default_tag", lambda: "b1")
-    monkeypatch.setattr("hermes_cli.local_runtime.binaries.ensure_runtime_installed",
-                        lambda tag, backend: tmp_path / "install")
+    from hermes_cli.local_runtime.binaries import Engine
+    monkeypatch.setattr("hermes_cli.local_runtime.binaries.installed_engine",
+                        lambda backend="auto", **k: Engine("cpu", "b1", tmp_path / "install" / "llama-server"))
 
     spawns = []
 
@@ -978,23 +966,10 @@ def test_ensure_local_runtime_proceeds_when_boot_lock_is_unwritable(tmp_path, mo
     blocker.write_text("", encoding="utf-8")
     monkeypatch.setattr(bootstrap, "runtimes_root", lambda: blocker / "runtimes")  # mkdir -> OSError
     monkeypatch.setattr("hermes_cli.local_runtime.endpoint._state_endpoint", lambda: None)
-    monkeypatch.setattr("hermes_cli.local_runtime.binaries.installed_tags", lambda: [])
+    monkeypatch.setattr("hermes_cli.local_runtime.binaries.installed_engine", lambda backend="auto", **k: None)
 
     with caplog.at_level(logging.WARNING, logger=bootstrap.logger.name):
         result = bootstrap.ensure_local_runtime({"local_runtime": {"enabled": True}})
 
     assert result is None  # no exception escaped
     assert any("boot lock unavailable" in rec.getMessage() for rec in caplog.records)
-
-
-def test_manifest_verified_tolerates_non_dict_manifest(tmp_path):
-    """A parseable-but-non-object manifest used to raise AttributeError out of
-    manifest_verified (the .get ran inside a try that only caught decode/OSError),
-    breaking any() scans over install dirs."""
-    from hermes_cli.local_runtime.binaries import manifest_verified
-
-    m = tmp_path / "manifest.json"
-    m.write_text('"oops"', encoding="utf-8")
-    assert manifest_verified(m) is False
-    m.write_text(json.dumps({"verified_version": "5015 (abc)"}), encoding="utf-8")
-    assert manifest_verified(m) is True

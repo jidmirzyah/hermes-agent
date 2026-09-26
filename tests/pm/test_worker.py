@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import importlib
-import os
 from pathlib import Path
 import subprocess
 import shutil
@@ -15,37 +14,19 @@ from pm.package import InstallError
 from pm.runtime import runtime_python
 from tests.pm._range_server import RangeHandler, dl_server, url  # noqa: F401
 from tests.pm.test_runtime_wheelhouse import locked_wheelhouse  # noqa: F401
+from tests.pm._fixtures import (
+    _wheel,
+    build_worker as build_worker,
+    client as client,
+    isolated_python as isolated_python,
+)
 
-
-@pytest.fixture(scope="module")
-def isolated_python(tmp_path_factory):
-    from pm.runtime_stage import stage_runtime
-
-    root = tmp_path_factory.mktemp("pm-python")
-    uv = shutil.which("uv")
-    assert uv, "the worker contract requires real uv"
-    python = stage_runtime(Path(uv), Path(sys.executable), root)
-    probe = subprocess.run(
-        [str(python), "-I", "-c", "import importlib.util; assert importlib.util.find_spec('yaml') is None"],
-        capture_output=True, text=True, timeout=30,
-    )
-    assert probe.returncode == 0, probe.stderr
-    return python
-
-
-@pytest.fixture
-def client(tmp_path, monkeypatch, isolated_python):
-    client = importlib.import_module("pm.client")
-    monkeypatch.setattr("pm.runtime.runtime_python", lambda **kwargs: isolated_python)
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
-    monkeypatch.setenv("HERMES_RUNTIME_DIR", str(tmp_path / "store"))
-    monkeypatch.setattr(paths, "lockfile_path", lambda: tmp_path / "lock.json")
-    return client
+# Spawns children with a home it builds itself; the parent's must stay real.
+pytestmark = pytest.mark.real_machine_home
 
 
 def test_isolated_worker_preserves_install_error(client, monkeypatch):
-    engine = importlib.import_module("pm.ensure")
+    engine = importlib.import_module("pm.install")
     monkeypatch.setattr(engine, "ensure", lambda *a, **kw: pytest.fail("engine ran in caller"))
     with pytest.raises(InstallError) as caught:
         client.ensure("node", explicit=True)
@@ -55,51 +36,12 @@ def test_isolated_worker_preserves_install_error(client, monkeypatch):
     assert not paths.facts_path().exists()
 
 
-def test_worker_build_owns_creation_and_preserves_parent_environment(client, tmp_path, monkeypatch, isolated_python):
-    import json
-    from pm import operations
-
-    uv = shutil.which("uv")
-    assert uv
-    worker = Path(client.__file__).with_name("worker.py")
-    script = (
-        "import runpy, sys; "
-        f"sys.path.insert(0, {str(worker.parent.parent)!r}); "
-        "import pm._uv; "
-        f"pm._uv._toolchain = lambda **kwargs: (__import__('pathlib').Path({uv!r}), "
-        f"__import__('pathlib').Path({sys.executable!r})); "
-        f"runpy.run_path({str(worker)!r}, run_name='__main__')"
-    )
-    monkeypatch.setattr(client, "runtime_command", lambda path, **kwargs: [str(isolated_python), "-I", "-B", "-c", script])
-    monkeypatch.setattr(operations, "build_environment", lambda **kwargs: pytest.fail("build ran in caller"))
-    source = tmp_path / "project with spaces"
-    source.mkdir()
-    (source / "pyproject.toml").write_text(
-        '[project]\nname="worker-proof"\nversion="1"\nrequires-python=">=3.11"\n'
-        '[tool.uv]\npackage=false\n', encoding="utf-8",
-    )
-    monkeypatch.setenv("UV_PYTHON", "/not-the-interpreter")
-    monkeypatch.setenv("UV_PROJECT_ENVIRONMENT", str(tmp_path / "wrong-environment"))
-    monkeypatch.setenv("VIRTUAL_ENV", str(tmp_path / "wrong-environment"))
-    before = dict(os.environ)
-    python = client.build_environment(source=source, out=tmp_path / "dependency tree",
-                                      frozen=False, offline=True, explicit=True)
-    result = subprocess.run([str(python), "-I", "-c", "import json,sys; print(json.dumps(sys.prefix))"],
-                            capture_output=True, text=True, timeout=30)
-    assert result.returncode == 0, result.stderr
-    assert Path(json.loads(result.stdout)) == python.parent.parent
-    assert not (tmp_path / "wrong-environment").exists()
-    assert dict(os.environ) == before
-    with pytest.raises(OSError, match="already exists"):
-        client.build_environment(source=source, out=python.parent.parent, explicit=True)
-    assert python.is_file()
-
 
 def test_refused_or_already_paused_install_does_not_acquire_runtime(client, monkeypatch):
     import threading
     from pm.downloader import DownloadPaused
 
-    monkeypatch.setattr(client, "runtime_command", lambda path: pytest.fail("refusal acquired PM runtime"))
+    monkeypatch.setattr(client, "runtime_command", lambda path, **kwargs: pytest.fail("refusal acquired PM runtime"))
     monkeypatch.setenv("HERMES_DISABLE_LAZY_INSTALLS", "1")
     with pytest.raises(InstallError, match="lazy installs are disabled"):
         client.ensure("node")
@@ -110,7 +52,7 @@ def test_refused_or_already_paused_install_does_not_acquire_runtime(client, monk
 
 
 def _current_environment(tmp_path, monkeypatch, members):
-    from hermes_cli.runtime_paths import install_state_dir
+    from pm.environments import install_state_dir
     from pm.lock import Facts
     from pm.packages import Venv
 
@@ -127,8 +69,99 @@ def _current_environment(tmp_path, monkeypatch, members):
     return repo
 
 
+@pytest.mark.parametrize("member_shape", ["paths", "sources"])
+@pytest.mark.parametrize("route", ["worker", "direct", "foreign-runtime"])
+def test_currency_probe_preserves_union_and_candidate_inputs(client, tmp_path, monkeypatch, isolated_python,
+                                                            member_shape, route):
+    import json
+    from pm.environments import runtime_facts_path, selected_venv
+    from pm.lock import Facts
+    from pm.packages import Venv
+
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    manifest = candidate / "plugin.yaml"
+    manifest.write_text('name: candidate\npython_dependencies: ["candidate-dep==1"]\n')
+    members = [candidate] if member_shape == "paths" else {tmp_path / "installed": candidate}
+    repo = _current_environment(tmp_path, monkeypatch, members)
+    environment = selected_venv(repo)
+    recorded = ["incumbent-extra", "provider-extra"]
+    facts_path = runtime_facts_path(repo)
+    Facts(facts_path).record_state(
+        "venv", Venv(repo).expected_stamp(recorded, plugin_dirs=members), recorded,
+        environment=environment,
+    )
+    monkeypatch.setattr(client, "is_runtime", lambda: route != "worker")
+    if route == "foreign-runtime":
+        monkeypatch.setattr(paths, "repo_root", lambda: tmp_path / "other-project")
+    root_args = {"project_root": repo} if route != "worker" else {}
+    acquisitions = []
+
+    def ready_runtime(*, bootstrap, cache):
+        assert bootstrap is False, "currency probe attempted to bootstrap PM"
+        acquisitions.append(bootstrap)
+        return isolated_python
+
+    monkeypatch.setattr("pm.runtime.runtime_python", ready_runtime)
+    if route != "direct":
+        engine = importlib.import_module("pm.install")
+        monkeypatch.setattr(engine, "venv_is_current", lambda **kw: pytest.fail("probe ran in caller"))
+    def snapshot():
+        return {path.relative_to(tmp_path): (path.read_bytes() if path.is_file() else None)
+                for path in tmp_path.rglob("*")}
+
+    from pm.lock import Lockfile
+    pins = Lockfile(paths.lockfile_path())
+    pins.set_pin("python", "test.1", {"any": {"url": "https://example.invalid/python", "sha256": "1" * 64}})
+    pins.save()
+    Facts(facts_path).record_state("venv", Venv(repo).expected_stamp(recorded, plugin_dirs=members), recorded,
+                                   environment=environment)
+    before = snapshot()
+    assert client.venv_is_current(extras=["provider-extra"], plugin_dirs=members, **root_args)
+    assert client.venv_is_current(extras=[], plugin_dirs=members, **root_args)
+    assert not client.venv_is_current(extras=["new-extra"], plugin_dirs=members, **root_args)
+    assert not client.venv_is_current(extras=recorded, plugin_dirs=[], **root_args)
+    assert snapshot() == before, "currency queries changed dependency state"
+    assert bool(acquisitions) is (route != "direct")
+    pins.set_pin("uv", "unrelated", {"any": {"url": "https://example.invalid/uv", "sha256": "3" * 64}})
+    pins.save()
+    unchanged = snapshot()
+    assert client.venv_is_current(extras=[], plugin_dirs=members, **root_args)
+    assert snapshot() == unchanged
+    for version, digest in [("test.1", "2" * 64), ("test.2", "1" * 64)]:
+        pins.set_pin("python", version, {"any": {"url": "https://example.invalid/python", "sha256": digest}})
+        pins.save()
+        changed = snapshot()
+        assert not client.venv_is_current(plugin_dirs=members, **root_args)
+        assert snapshot() == changed
+    pins.set_pin("python", "test.1", {"any": {"url": "https://example.invalid/python", "sha256": "1" * 64}})
+    pins.save()
+    marker = environment / "pyvenv.cfg"
+    contents = marker.read_bytes()
+    marker.unlink()
+    changed = snapshot()
+    assert not client.venv_is_current(plugin_dirs=members, **root_args)
+    assert snapshot() == changed
+    marker.write_bytes(contents)
+    assert client.venv_is_current(plugin_dirs=members, **root_args)
+
+    manifest.write_text('name: candidate\npython_dependencies: ["candidate-dep==2"]\n')
+    changed = snapshot()
+    assert not client.venv_is_current(extras=["provider-extra"], plugin_dirs=members, **root_args)
+    assert snapshot() == changed
+    assert selected_venv(repo) == environment
+    # Corruption must not be mistaken for a missing or current environment.
+    data = json.loads(facts_path.read_text())
+    data["packages"]["venv"]["extras"] = "provider-extra"
+    facts_path.write_text(json.dumps(data))
+    malformed = snapshot()
+    with pytest.raises(ValueError, match="invalid recorded dependency state"):
+        client.venv_is_current(extras=[], plugin_dirs=members, **root_args)
+    assert snapshot() == malformed
+
+
 def _assert_worker_holds_lock(repo):
-    from hermes_cli.runtime_paths import install_state_dir
+    from pm.environments import install_state_dir
     from hermes_cli.runtime_state import _lock
 
     with (install_state_dir(repo) / ".install.lock").open("a+b") as lock:
@@ -136,34 +169,35 @@ def _assert_worker_holds_lock(repo):
 
 
 @pytest.mark.parametrize("explicit", [True, False])
-def test_sync_callbacks_preserve_member_mapping_and_lock(client, tmp_path, monkeypatch, explicit):
-    identity, staged = tmp_path / "installed", tmp_path / "staged"
-    staged.mkdir()
-    (staged / "plugin.yaml").write_text("name: test\n")
-    members = {identity: staged}
-    repo = _current_environment(tmp_path, monkeypatch, members)
-    events = []
+def test_sync_discovers_profile_members_after_worker_acquires_lock(client, tmp_path, monkeypatch, isolated_python, explicit):
+    from concurrent.futures import ThreadPoolExecutor
+    import time
+    from hermes_cli.runtime_state import runtime_lock
+    from tests.pm._fixtures import worker_toolchain
 
-    def select():
-        _assert_worker_holds_lock(repo)
-        events.append("members")
-        return members
-
-    class Publication:
-        def __call__(self):
-            pytest.fail("successful no-op publication was undone")
-
-        def finish(self):
-            _assert_worker_holds_lock(repo)
-            events.append("finish")
-
-    def before_publish():
-        _assert_worker_holds_lock(repo)
-        events.append("publish")
-        return Publication()
-
-    client.sync_venv([], explicit=explicit, plugin_dirs=select, before_publish=before_publish)
-    assert events == ["members", "publish", "finish"]
+    sibling = tmp_path / "home/profiles/sibling/plugins/dependency"
+    sibling.mkdir(parents=True)
+    (sibling / "plugin.yaml").write_text("name: dependency\npython_dependencies: [fixture-dep==1]\n")
+    repo = _current_environment(tmp_path, monkeypatch, [sibling])
+    ready = tmp_path / "waiting-for-lock"
+    worker_toolchain(client, monkeypatch, isolated_python,
+        "from contextlib import contextmanager\nimport hermes_cli.runtime_state as state\n"
+        "original = state.runtime_lock\n@contextmanager\ndef lock(project, **kwargs):\n"
+        f"    Path({str(ready)!r}).touch()\n"
+        "    with original(project, **kwargs) as held:\n        yield held\nstate.runtime_lock = lock\n")
+    with ThreadPoolExecutor() as executor:
+        with runtime_lock(repo):
+            future = executor.submit(client.sync_venv, explicit=explicit, selection={
+                "home": str(tmp_path / "home"), "enabled": ["plain"], "disabled": [],
+            })
+            deadline = time.monotonic() + 15
+            while not ready.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert ready.exists(), "worker never reached the install lock"
+            assert not future.done(), "worker ignored the install lock"
+            (sibling.parent.parent / "config.yaml").write_text("plugins:\n  enabled: [dependency]\n")
+        future.result(timeout=30)
+    assert client.venv_is_current()
 
 
 @pytest.mark.parametrize("current", [True, False])
@@ -191,19 +225,11 @@ def test_lazy_disabled_sync_does_not_bootstrap_tools(client, tmp_path, monkeypat
     monkeypatch.setattr(_uv, "_toolchain", toolchain)
     monkeypatch.setattr("pm.runtime_stage.stage_runtime",
                         lambda *a, **kw: pytest.fail("lazy-disabled sync prepared PM runtime"))
-    selections = []
-
-    def select():
-        _assert_worker_holds_lock(repo)
-        selections.append("selected")
-        return []
-
     with receipt.worker_context("lazy-disabled-sync"):
         with pytest.raises(InstallError, match="lazy installs are disabled") as caught:
-            client.sync_venv([], plugin_dirs=select)
+            client.sync_venv([], plugin_dirs=[])
         result = receipt.last_for_update("lazy-disabled-sync", consume=True)
     assert caught.value.package == "pm-runtime"
-    assert selections == []
     assert result is not None
     assert result["outcome"] == "failed"
     receipts = list((tmp_path / "home" / "logs" / "update_receipts").glob("pm_*.json"))
@@ -212,22 +238,17 @@ def test_lazy_disabled_sync_does_not_bootstrap_tools(client, tmp_path, monkeypat
     assert not paths.facts_path().exists()
 
 
-def test_callback_exception_waits_for_failed_receipt_and_lock_release(client, tmp_path, monkeypatch):
+def test_invalid_selection_waits_for_failed_receipt_and_lock_release(client, tmp_path, monkeypatch):
     import json
-    from hermes_cli.runtime_paths import install_state_dir
+    from pm.environments import install_state_dir
     from hermes_cli.runtime_state import _lock
 
     repo = _current_environment(tmp_path, monkeypatch, [])
-    error = LookupError("selection disappeared")
-
-    def fail():
-        _assert_worker_holds_lock(repo)
-        raise error
-
-    with pytest.raises(LookupError) as caught:
-        client.sync_venv([], explicit=True, plugin_dirs=fail)
-    assert caught.value is error
-    receipts = list((tmp_path / "home" / "logs" / "update_receipts").glob("pm_*.json"))
+    home = tmp_path / "home"
+    (home / "config.yaml").write_text("plugins: []\n")
+    with pytest.raises(ValueError, match="plugins must be a mapping"):
+        client.sync_venv([], explicit=True, selection={"home": str(home), "enabled": [], "disabled": []})
+    receipts = list((home / "logs" / "update_receipts").glob("pm_*.json"))
     assert len(receipts) == 1
     assert json.loads(receipts[0].read_text())["outcome"] == "failed"
     with (install_state_dir(repo) / ".install.lock").open("a+b") as lock:
@@ -262,8 +283,10 @@ def _node_archive(server, body=b"#!/bin/sh\nexit 0\n"):
 
 @pytest.mark.platforms("posix")
 @pytest.mark.parametrize("operation", ["ensure", "stage_only"])
-def test_worker_installs_real_archive_and_relays_progress(client, dl_server, operation):
-    from pm.lock import Facts
+def test_worker_artifact_lifecycle_keeps_identity_and_relays_progress(client, dl_server, operation):
+    import hashlib
+    from pm.lock import Facts, Lockfile
+    from pm.store import tree_digest
 
     target, relative, body = _node_archive(dl_server)
     stages, downloads = [], []
@@ -290,6 +313,35 @@ def test_worker_installs_real_archive_and_relays_progress(client, dl_server, ope
         assert all(isinstance(row, tuple) for rows in downloads[-1][2].values() for row in rows)
     assert (entry / relative).read_bytes() == body
     assert stages and stages[0][0] == "download"
+
+    def install():
+        if operation == "stage_only":
+            return client.stage_only("node", target)
+        client.ensure("node", explicit=True)
+        return entry
+
+    first_tree = tree_digest(entry)
+    RangeHandler.payloads.clear()
+    assert install() == entry
+    assert tree_digest(entry) == first_tree
+    _, _, replacement = _node_archive(dl_server, b"#!/bin/sh\nexit 0\n# repinned\n")
+    assert install() == entry
+    assert (entry / relative).read_bytes() == replacement
+    assert not list(paths.store_root().glob("fetch-*"))
+    good_tree = tree_digest(entry)
+    previous_facts = paths.facts_path().read_bytes() if paths.facts_path().exists() else None
+    lock = Lockfile(paths.lockfile_path())
+    RangeHandler.payloads["/node.zip"] = b"not an archive"
+    lock.set_pin("node", "1", {target: {"url": url(dl_server, "/node.zip"),
+                                      "sha256": hashlib.sha256(b"not an archive").hexdigest()}})
+    lock.save()
+    with pytest.raises(RuntimeError if operation == "stage_only" else InstallError, match="zip"):
+        install()
+    assert tree_digest(entry) == good_tree
+    if operation == "stage_only":
+        assert not paths.facts_path().exists(), "foreign staging cannot publish host identity"
+    else:
+        assert paths.facts_path().read_bytes() == previous_facts
 
 
 @pytest.mark.platforms("posix")
@@ -389,7 +441,7 @@ def _patch_worker_apply(client, monkeypatch, isolated_python, body):
         "Venv.apply = apply\n"
         f"runpy.run_path({str(worker)!r}, run_name='__main__')\n"
     )
-    monkeypatch.setattr(client, "runtime_command", lambda path: [str(isolated_python), "-I", "-B", "-c", script])
+    monkeypatch.setattr(client, "runtime_command", lambda path, **kwargs: [str(isolated_python), "-I", "-B", "-c", script])
 
 
 def test_resolution_conflict_survives_worker_and_receipt(client, tmp_path, monkeypatch, isolated_python, capfd):
@@ -412,33 +464,28 @@ def test_resolution_conflict_survives_worker_and_receipt(client, tmp_path, monke
     assert "engine stdout" in capfd.readouterr().err
 
 
-def test_failed_finish_runs_undo_before_propagating_callback_exception(client, tmp_path, monkeypatch, isolated_python):
+def test_failed_facts_write_restores_exact_config_before_reporting(client, tmp_path, monkeypatch, isolated_python):
+    from tests.pm._fixtures import worker_toolchain
+    from pm.environments import install_state_dir
+
     repo = _current_environment(tmp_path, monkeypatch, [])
+    home = tmp_path / "home"
+    config = home / "config.yaml"
+    config.write_text("# preserve me\nplugins: {enabled: [old]}\n")
+    previous = config.read_bytes()
+    facts = (install_state_dir(repo) / "facts.json").read_bytes()
     (repo / "uv.lock").write_text("version = 2\n")
-    _patch_worker_apply(client, monkeypatch, isolated_python, "return {}")
-    events = []
-    error = LookupError("finish failed")
-
-    class Publication:
-        def __call__(self):
-            _assert_worker_holds_lock(repo)
-            events.append("undo")
-            return object()  # Return values of effect-only callbacks are ignored.
-
-        def finish(self):
-            _assert_worker_holds_lock(repo)
-            events.append("finish")
-            raise error
-
-    def publish():
-        _assert_worker_holds_lock(repo)
-        events.append("publish")
-        return Publication()
-
-    with pytest.raises(LookupError) as caught:
-        client.sync_venv([], explicit=True, plugin_dirs=[], before_publish=publish)
-    assert caught.value is error
-    assert events == ["publish", "finish", "undo"]
+    worker_toolchain(client, monkeypatch, isolated_python,
+        "from pm.packages import Venv\nfrom pm.lock import Facts\n"
+        "Venv.apply = lambda *args, **kwargs: {}\n"
+        "def fail(*args, **kwargs):\n"
+        f"    assert b'new' in Path({str(config)!r}).read_bytes()\n"
+        "    raise OSError('facts disk full')\nFacts.record_state = fail\n")
+    with pytest.raises(OSError, match="facts disk full"):
+        client.sync_venv(explicit=True, selection={"home": str(home), "enabled": ["new"], "disabled": []})
+    assert config.read_bytes() == previous
+    assert (install_state_dir(repo) / "facts.json").read_bytes() == facts
+    assert not (install_state_dir(repo) / "publication.json").exists()
 
 
 def test_invalid_arguments_keep_the_engine_exception_type(client):
@@ -451,27 +498,17 @@ def test_invalid_arguments_keep_the_engine_exception_type(client):
 
 
 def test_worker_death_reports_transport_failure(client, monkeypatch, isolated_python):
-    monkeypatch.setattr(client, "runtime_command", lambda path: [str(isolated_python), "-I", "-c", "import os; os._exit(7)"])
+    monkeypatch.setattr(client, "runtime_command", lambda path, **kwargs: [str(isolated_python), "-I", "-c", "import os; os._exit(7)"])
     with pytest.raises(InstallError, match="worker.*result"):
         client.ensure("node", explicit=True)
 
 
 def test_foreign_checkout_sync_uses_its_own_pm_generation(client, tmp_path, monkeypatch, isolated_python):
     from pm import venv_is_current
-    from hermes_cli.runtime_paths import selected_venv, runtime_facts_path
+    from pm.environments import selected_venv, runtime_facts_path
 
-    uv = shutil.which("uv")
-    assert uv
-    worker = Path(client.__file__).with_name("worker.py")
-    script = (
-        "import runpy, sys; "
-        f"sys.path.insert(0, {str(worker.parent.parent)!r}); "
-        "import pm._uv; "
-        f"pm._uv._toolchain = lambda **kwargs: (__import__('pathlib').Path({uv!r}), "
-        f"__import__('pathlib').Path({sys.executable!r})); "
-        f"runpy.run_path({str(worker)!r}, run_name='__main__')"
-    )
-    monkeypatch.setattr(client, "runtime_command", lambda path, **kwargs: [str(isolated_python), "-I", "-B", "-c", script])
+    from tests.pm._fixtures import worker_toolchain
+    worker_toolchain(client, monkeypatch, isolated_python)
     foreign = tmp_path / "other checkout"
     foreign.mkdir()
     (foreign / "pyproject.toml").write_text(
@@ -513,20 +550,9 @@ def test_cold_manager_build_does_not_bootstrap_a_worker(client, tmp_path, monkey
 def test_worker_side_environment_reuses_and_keeps_selection_on_failed_tool(client, tmp_path, monkeypatch, isolated_python):
     import zipfile
     from pm import environment_python, python_tool
-    from tests.pm.test_environment_build import _wheel
 
-    uv = shutil.which("uv")
-    assert uv
-    worker = Path(client.__file__).with_name("worker.py")
-    script = (
-        "import runpy, sys; "
-        f"sys.path.insert(0, {str(worker.parent.parent)!r}); "
-        "import pm._uv; "
-        f"pm._uv._toolchain = lambda **kwargs: (__import__('pathlib').Path({uv!r}), "
-        f"__import__('pathlib').Path({sys.executable!r})); "
-        f"runpy.run_path({str(worker)!r}, run_name='__main__')"
-    )
-    monkeypatch.setattr(client, "runtime_command", lambda path, **kwargs: [str(isolated_python), "-I", "-B", "-c", script])
+    from tests.pm._fixtures import worker_toolchain
+    worker_toolchain(client, monkeypatch, isolated_python)
     wheel = _wheel(tmp_path, "side_dep")
     with zipfile.ZipFile(wheel, "a") as archive:
         archive.writestr("side_dep/cli.py", "def main():\n    print('real side dependency')\n")
@@ -555,7 +581,26 @@ def test_worker_side_environment_reuses_and_keeps_selection_on_failed_tool(clien
     assert (root / "active.json").read_bytes() == selection
 
 
-def test_unknown_worker_operation_is_not_dispatched(client):
-    with pytest.raises((KeyError, RuntimeError), match="activate"):
-        client._request("activate", {})
+@pytest.mark.parametrize("operation", ["activate", "stage_manager_runtime"])
+@pytest.mark.parametrize("route", ["client", "wire"])
+def test_unknown_worker_operation_is_not_dispatched(client, monkeypatch, tmp_path, isolated_python, operation, route):
+    import json
+
+    arguments = {"destination": str(tmp_path / "unused")}
+    if route == "client":
+        monkeypatch.setattr(client, "runtime_command", lambda *a, **kw: pytest.fail("unsupported operation acquired PM"))
+        with pytest.raises(KeyError, match=operation):
+            client._request(operation, arguments)
+    else:
+        request = {"id": "unsupported", "operation": operation, "arguments": arguments,
+                   "callbacks": [], "packages": [],
+                   "context": {"repo": str(paths.repo_root()), "lockfile": str(paths.lockfile_path())}}
+        worker = Path(client.__file__).with_name("worker.py")
+        result = subprocess.run(client.runtime_command(worker), input=json.dumps(request) + "\n",
+                                capture_output=True, text=True, encoding="utf-8", timeout=30,
+                                env=client.runtime_environment())
+        assert result.returncode == 0, result.stderr
+        response = json.loads(result.stdout)
+        assert response["error"]["type"] == "KeyError", response
+        assert operation in response["error"]["message"]
     assert not paths.facts_path().exists()

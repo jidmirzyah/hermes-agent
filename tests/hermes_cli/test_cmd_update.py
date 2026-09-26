@@ -1,16 +1,10 @@
-"""Tests for cmd_update — branch fallback when remote branch doesn't exist."""
+"""Git trampoline recovery; branch updates use the real target-identity suite."""
 
-import hashlib
-import os
 import subprocess
-from types import SimpleNamespace
-from unittest.mock import ANY, patch
+from unittest.mock import patch
 
 import pytest
 
-from hermes_cli.main import cmd_update, PROJECT_ROOT
-from hermes_cli import main_web_build
-from hermes_cli import main_install_repair
 from hermes_cli import update_cmd
 
 
@@ -1590,12 +1584,12 @@ class TestGitTrampolineSelfHeal:
             stderr="BUG (fork bomb): tried to spawn itself, check your PATH\n",
         )
 
+    @pytest.mark.platforms("windows")
     def test_healthy_git_command_unchanged(self):
         from hermes_cli import update_cmd
 
         git_cmd = ["git", "-c", "windows.appendAtomically=false"]
         with (
-            patch("sys.platform", "win32"),
             patch(
                 "hermes_cli.update_cmd.subprocess.run",
                 side_effect=self._fake_run_healthy,
@@ -1606,6 +1600,7 @@ class TestGitTrampolineSelfHeal:
         assert result == git_cmd
         locate.assert_not_called()
 
+    @pytest.mark.platforms("windows")
     def test_trampoline_swaps_to_real_git(self, capsys):
         from pathlib import Path
 
@@ -1614,7 +1609,6 @@ class TestGitTrampolineSelfHeal:
         git_cmd = ["git", "-c", "windows.appendAtomically=false"]
         real = Path(r"C:\Program Files\Git\mingw64\libexec\git-core\git.exe")
         with (
-            patch("sys.platform", "win32"),
             patch(
                 "hermes_cli.update_cmd.subprocess.run",
                 side_effect=self._fake_run_trampoline,
@@ -1628,12 +1622,12 @@ class TestGitTrampolineSelfHeal:
         out = capsys.readouterr().out
         assert "switching to real git" in out
 
+    @pytest.mark.platforms("windows")
     def test_trampoline_no_real_git_keeps_command(self, capsys):
         from hermes_cli import update_cmd
 
         git_cmd = ["git", "-c", "windows.appendAtomically=false"]
         with (
-            patch("sys.platform", "win32"),
             patch(
                 "hermes_cli.update_cmd.subprocess.run",
                 side_effect=self._fake_run_trampoline,
@@ -1645,14 +1639,12 @@ class TestGitTrampolineSelfHeal:
         out = capsys.readouterr().out
         assert "ZIP path" in out
 
+    @pytest.mark.platforms("not windows")
     def test_off_windows_noop(self):
         from hermes_cli import update_cmd
 
         git_cmd = ["git"]
-        with (
-            patch("sys.platform", "linux"),
-            patch("hermes_cli.update_cmd.subprocess.run") as run,
-        ):
+        with patch("hermes_cli.update_cmd.subprocess.run") as run:
             result = update_cmd._ensure_non_trampoline_git(git_cmd)
         assert result == git_cmd
         run.assert_not_called()

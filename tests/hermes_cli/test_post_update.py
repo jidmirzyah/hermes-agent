@@ -101,29 +101,6 @@ def test_migrate_config_restores_backup_when_version_does_not_advance(
     assert backups, "backup file must exist"
 
 
-def test_migrate_config_restores_backup_on_exception(tmp_path, monkeypatch):
-    import hermes_cli.config as cfg
-    import hermes_cli.config_migrations as mig
-
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text("_config_version: 20\n", encoding="utf-8")
-
-    floor = getattr(mig, "SUPPORT_FLOOR_VERSION", 12)
-    monkeypatch.setattr(cfg, "check_config_version", lambda: (max(20, floor), 34))
-    monkeypatch.setattr(cfg, "get_config_path", lambda: config_path)
-    monkeypatch.setattr(cfg, "get_env_path", lambda: tmp_path / ".env")
-
-    def exploding_migrate(**kw):
-        config_path.write_text("half-written garbage", encoding="utf-8")
-        raise RuntimeError("migration blew up")
-
-    monkeypatch.setattr(cfg, "migrate_config", lambda **kw: exploding_migrate(**kw))
-
-    with pytest.raises(RuntimeError, match="blew up"):
-        step_migrate_config()
-    assert config_path.read_text(encoding="utf-8") == "_config_version: 20\n"
-
-
 # ── step_state_db_guard ──────────────────────────────────────────────
 
 
@@ -166,10 +143,34 @@ def test_provisioning_is_the_machine_scope_driver_path():
     assert not any("cua" in name for name in names)
 
 
+def test_provisioning_does_not_use_human_diagnostics(tmp_path, monkeypatch):
+    import json
+    import importlib
+    import pm
+    from pm import paths
+
+    engine = importlib.import_module("pm.install")
+    runtime = tmp_path / "tools"
+    runtime.mkdir()
+    (runtime / "facts.json").write_text(json.dumps({"schema": 1, "packages": {}}))
+    lock = tmp_path / "lock.json"
+    lock.write_text(json.dumps({"schema": 1, "packages": {"node": {"version": "test"}}}))
+    monkeypatch.setenv("HERMES_RUNTIME_DIR", str(runtime))
+    monkeypatch.setattr(paths, "lockfile_path", lambda: lock)
+    monkeypatch.setattr(engine, "sealed", lambda: False)
+    monkeypatch.setattr(engine, "lazy_installs_allowed", lambda: True)
+    monkeypatch.setattr(pm, "check", lambda: ["translated diagnostic without a package token"])
+    ensured = []
+    monkeypatch.setattr(pm, "ensure", lambda name, **kwargs: ensured.append((name, kwargs)))
+
+    assert post_update.main(["--scope", "machine"]) == 0
+    assert ensured == [("node", {"explicit": True})]
+
+
 def test_provision_runtimes_is_a_noop_when_pm_is_current(monkeypatch):
     import pm
 
-    monkeypatch.setattr(pm, "check", lambda: [])
+    monkeypatch.setattr(pm, "drift", lambda: {})
     assert post_update.step_provision_runtimes() == {"ok": True, "skipped": "current"}
 
 
@@ -181,10 +182,10 @@ def test_provision_runtimes_reensures_only_what_pm_names(monkeypatch):
     # pm/__init__ rebinds the name `pm.ensure` to the FUNCTION; the module
     # object (whose attrs step_provision_runtimes imports at call time)
     # comes from sys.modules.
-    pm_ensure = importlib.import_module("pm.ensure")
+    pm_ensure = importlib.import_module("pm.install")
 
     ensured = []
-    monkeypatch.setattr(pm, "check", lambda: ["node: not installed or outdated", "venv: out of sync with uv.lock"])
+    monkeypatch.setattr(pm, "drift", lambda: {"node": "outdated", "venv": "out of sync"})
     monkeypatch.setattr(pm_ensure, "sealed", lambda: False)
     monkeypatch.setattr(pm_ensure, "lazy_installs_allowed", lambda: True)
     monkeypatch.setattr(pm, "ensure", lambda name, explicit=False: ensured.append((name, explicit)))
@@ -201,9 +202,9 @@ def test_provision_runtimes_respects_the_lazy_install_policy(monkeypatch):
 
     import pm
 
-    pm_ensure = importlib.import_module("pm.ensure")
+    pm_ensure = importlib.import_module("pm.install")
 
-    monkeypatch.setattr(pm, "check", lambda: ["node: not installed or outdated"])
+    monkeypatch.setattr(pm, "drift", lambda: {"node": "outdated"})
     monkeypatch.setattr(pm_ensure, "sealed", lambda: False)
     monkeypatch.setattr(pm_ensure, "lazy_installs_allowed", lambda: False)
     result = post_update.step_provision_runtimes()

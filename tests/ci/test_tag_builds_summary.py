@@ -65,6 +65,7 @@ def test_admitted_failure_publishes_tag_info_without_promoting_channel(tmp_path,
     key = f"releases/tag/{tag}/index.html"
     assert key in r2_server.store, result.stdout + result.stderr
     page = r2_server.store[key][0].decode()
+    assert f'href="https://github.com/o/r/releases/tag/{tag}"' in page
     assert "Build incomplete" in page
     assert "build-win32 (failure)" in page and "publish-win32-updater (skipped)" in page
     assert "No downloadable artifacts" in page

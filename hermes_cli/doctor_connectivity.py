@@ -10,6 +10,7 @@ import concurrent.futures
 import errno
 import functools
 import os
+import socket
 from typing import NamedTuple
 from urllib.parse import urlsplit
 

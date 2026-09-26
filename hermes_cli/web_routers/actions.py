@@ -298,17 +298,14 @@ async def check_hermes_update(force: bool = False, profile: Optional[str] = None
         payload["message"] = non_applyable()
         return payload
 
-    # banner.check_for_updates() handles git / nix-revision paths through the GitHub API and
+    # source_check.check_for_updates() handles git / nix-revision paths through the GitHub API and
     # caches the result for 24h. ``force`` busts the cache so "Check now" reflects reality.
     try:
-        from hermes_cli.banner import check_for_updates, upstream_commits_behind
+        from hermes_cli.source_check import check_for_updates
 
-        if force:
-            # The checkout is host-wide, but the 24 h cache file lives in a profile home;
-            # bust the one belonging to the profile that asked.
-            with contextlib.suppress(OSError), _config_profile_scope(profile):
-                (get_hermes_home() / ".update_check").unlink()
-        behind = await asyncio.to_thread(check_for_updates)
+        with _config_profile_scope(profile):
+            status = await asyncio.to_thread(check_for_updates, force=force)
+        behind = status.get("behind")
     except Exception:
         _log.exception("Update check failed")
         behind = None
@@ -322,7 +319,8 @@ async def check_hermes_update(force: bool = False, profile: Optional[str] = None
         payload["update_available"] = True
         # "What's changed" for the desktop's remote update overlay; best-effort
         # (empty list on any failure).
-        payload["commits"] = await asyncio.to_thread(upstream_commits_behind)
+        payload["commits"] = [{**row, "sha": row["sha"][:7], "at": row["at"] // 1000}
+                              for row in status.get("commits", [])[:20]]
     return payload
 
 

@@ -17,6 +17,11 @@ from scripts.releases.semver import STABLE_TAG
 SHA = re.compile(r"[a-f0-9]{40}")
 DIGEST = re.compile(r"[a-f0-9]{64}")
 DESKTOP_TARGETS = ("windows/x64", "windows/arm64", "macos/x64", "macos/arm64")
+SMOKE_JOBS = {
+    "smoke-darwin": "macOS DMG + ZIP (arm64 and x64)",
+    "smoke-win32": "Windows MSIX (arm64 and x64)",
+    "smoke-win32-universal": "Windows MSIXBUNDLE (arm64 and x64)",
+}
 
 
 def require_stable_identity(tag: str, commit: str, ref: str) -> None:
@@ -33,10 +38,29 @@ def require_success(needs: dict, required: list[str]) -> None:
         raise ValueError("Release blocked: " + ", ".join(failures))
 
 
-def validate_candidates(manifest: dict, tag: str, commit: str, public_base: str) -> dict:
+def successful_smoke_results(needs: object) -> dict:
+    """Persist only observed successful native groups, never infer them from artifacts."""
+    if not isinstance(needs, dict):
+        raise ValueError("Candidate smoke results must be a job-result object")
+    results = {}
+    for job in SMOKE_JOBS:
+        row = needs.get(job)
+        results[job] = {"result": row.get("result") if isinstance(row, dict) else None}
+    require_success(results, list(SMOKE_JOBS))
+    return results
+
+
+def validate_candidates(manifest: dict, tag: str, commit: str, public_base: str,
+                        *, allow_legacy: bool = False) -> dict:
     require_stable_identity(tag, commit, f"refs/tags/{tag}")
-    if manifest.get("schema") != 1 or manifest.get("tag") != tag or manifest.get("commit") != commit or not isinstance(manifest.get("packages"), list):
+    if manifest.get("schema") not in (1, 2) or manifest.get("tag") != tag or manifest.get("commit") != commit or not isinstance(manifest.get("packages"), list):
         raise ValueError("Candidate manifest does not match release identity")
+    if manifest["schema"] == 1:
+        # A published baseline supplies old package identities, not new smoke evidence.
+        if not allow_legacy:
+            raise ValueError("Legacy candidate has no bound smoke admission; build a new candidate tag")
+    else:
+        successful_smoke_results(manifest.get("smoke_results"))
     prefix = urlsplit(f"{public_base.rstrip('/')}/releases/tag/{tag}/")
     if prefix.scheme != "https" or prefix.username or prefix.password or not prefix.netloc:
         raise ValueError("Public release origin must use HTTPS")
@@ -79,7 +103,7 @@ def windows_version(value: str) -> tuple[int, ...]:
 
 
 def plan_transitions(previous: dict, candidate: dict, public_base: str) -> list[dict]:
-    old = validate_candidates(previous, previous.get("tag"), previous.get("commit"), public_base)
+    old = validate_candidates(previous, previous.get("tag"), previous.get("commit"), public_base, allow_legacy=True)
     new = validate_candidates(candidate, candidate.get("tag"), candidate.get("commit"), public_base)
     result = []
     for target in DESKTOP_TARGETS:
@@ -152,6 +176,17 @@ def read_candidate(env: dict) -> dict:
     if not DIGEST.fullmatch(digest):
         raise ValueError("Pinned candidate manifest digest is required")
     return read_manifest(env["CANDIDATE_MANIFEST_URL"], digest)
+
+
+def read_admitted_candidate(tag: str, commit: str, public_base: str, digest: str) -> dict:
+    """The page and package promoter consume the same pinned admission."""
+    if not DIGEST.fullmatch(digest or ""):
+        raise ValueError("Pinned candidate manifest digest is required")
+    require_stable_identity(tag, commit, f"refs/tags/{tag}")
+    manifest = read_manifest(f"{public_base.rstrip('/')}/releases/tag/{tag}/release-candidates.json",
+                             digest, expected_origin=public_base)
+    validate_candidates(manifest, tag, commit, public_base)
+    return manifest
 
 
 def summary(text: str, env: dict) -> None:

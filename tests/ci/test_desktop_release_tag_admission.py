@@ -32,19 +32,11 @@ def _workflow() -> dict:
 
 
 def _admission_script() -> str:
-    """The validate job's run script, verbatim — the single source of truth."""
+    """The admission run script, verbatim — the single source of truth."""
     steps = _workflow()["jobs"]["validate"]["steps"]
-    scripts = [s for s in steps if isinstance(s, dict) and "run" in s]
-    assert len(scripts) == 1, "expected exactly one run step in the validate job"
+    scripts = [s for s in steps if isinstance(s, dict) and s.get("id") == "admission"]
+    assert len(scripts) == 1, "expected exactly one admission step in the validate job"
     return scripts[0]["run"]
-
-
-def _checkout_refs(job: dict) -> list[str | None]:
-    refs = []
-    for step in job.get("steps", []) or []:
-        if isinstance(step, dict) and "checkout" in step.get("uses", ""):
-            refs.append(step.get("with", {}).get("ref"))
-    return refs
 
 
 # ---------------------------------------------------------------------------
@@ -59,15 +51,7 @@ def test_validate_exports_the_admitted_sha_as_a_job_output():
     assert "steps.admission.outputs.sha" in outputs["sha"]
 
 
-def test_admission_script_requires_ancestry_on_origin_main():
-    script = _admission_script()
-    assert "merge-base --is-ancestor" in script
-    assert "origin/main" in script
-    assert "::error::" in script, "the refusal must be a loud, greppable error"
-    assert "GITHUB_OUTPUT" in script, "the resolved SHA must be exported"
-
-
-def test_every_signing_job_checks_out_the_admitted_sha_not_the_tag():
+def test_signing_jobs_pin_source_and_controller_revisions_not_mutable_tags():
     wf = _workflow()
     privileged = {
         name: job
@@ -77,14 +61,27 @@ def test_every_signing_job_checks_out_the_admitted_sha_not_the_tag():
     assert privileged, "walk broken: no release-signing jobs found"
 
     for name, job in privileged.items():
-        refs = _checkout_refs(job)
-        for ref in refs:
-            assert ref == "${{ needs.validate.outputs.sha }}", (
+        for step in job.get("steps", []):
+            if "checkout" not in step.get("uses", ""):
+                continue
+            ref = step.get("with", {}).get("ref")
+            expected = "${{ needs.validate.outputs.sha }}"
+            if name in {"publish-channel"} or step.get("if") == "needs.validate.outputs.channel-build != ''":
+                expected = "${{ github.sha }}"
+            elif name == "validate":
+                expected = "${{ (inputs.build_commit != '' || inputs.channel != '') && github.sha || inputs.tag }}"
+            elif name == "assemble-win32-bundle":
+                expected = "${{ needs.validate.outputs.channel-build != '' && github.sha || needs.validate.outputs.sha }}"
+            assert ref == expected, (
                 f"signing job {name!r} checks out {ref!r} — it must check out "
-                "the SHA validate admitted, never the tag ref"
+                "the admitted source or explicitly selected trusted controller, never a mutable tag"
             )
-    # jobs that need the SHA must actually need validate
+    # The merged validate job owns allocation and admission; it consumes no
+    # prior admission (the one-dispatch design).
     for name, job in privileged.items():
+        if name == "validate":
+            assert job.get("needs") in ([], None)
+            continue
         needs = job.get("needs") or []
         needs = [needs] if isinstance(needs, str) else needs
         assert "validate" in needs, f"signing job {name!r} reads needs.validate.outputs.sha but does not need validate"

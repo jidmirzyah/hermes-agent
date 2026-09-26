@@ -137,6 +137,56 @@ class TestBusyInputMode:
         cli.process_command("/queue follow up")
         assert cli._pending_input.get_nowait() == "follow up"
 
+    def test_queue_command_can_edit_remove_move_and_clear_pending_items(self):
+        cli = _make_cli()
+        cli.process_command("/queue first prompt")
+        cli.process_command("/queue second prompt")
+        cli.process_command("/queue edit 2 replacement prompt")
+        assert cli._pending_input_items() == ["first prompt", "replacement prompt"]
+
+        cli.process_command("/queue move 2 1")
+        assert cli._pending_input_items() == ["replacement prompt", "first prompt"]
+
+        cli.process_command("/queue rm 2")
+        assert cli._pending_input_items() == ["replacement prompt"]
+
+        cli.process_command("/queue clear")
+        assert cli._pending_input_items() == []
+        # queue.Queue bookkeeping must stay consistent after clear
+        assert cli._pending_input.unfinished_tasks == 0
+        assert cli._pending_input.empty()
+
+    def test_queue_command_preserves_prompts_that_start_with_non_subcommand_words(self):
+        cli = _make_cli()
+        cli.process_command("/queue maybe run later")
+        assert cli._pending_input.get_nowait() == "maybe run later"
+
+    def test_queue_add_allows_prompts_that_start_with_management_words(self):
+        cli = _make_cli()
+        cli.process_command("/queue add clear the logs after tests")
+        assert cli._pending_input.get_nowait() == "clear the logs after tests"
+
+    def test_queue_edit_preserves_voice_sentinel(self):
+        cli = _make_cli()
+        # Import AFTER _make_cli: the harness reloads the cli module, so the
+        # sentinel class must come from the same (reloaded) module the
+        # instance's handler compares against.
+        import cli as _cli_mod
+        cli._pending_input.put(_cli_mod._VoiceInputMessage("spoken prompt"))
+        cli.process_command("/queue edit 1 corrected prompt")
+        items = cli._pending_input_items()
+        assert len(items) == 1
+        assert isinstance(items[0], _cli_mod._VoiceInputMessage)
+        assert str(items[0]) == "corrected prompt"
+
+    def test_queue_out_of_range_indices_leave_queue_untouched(self):
+        cli = _make_cli()
+        cli.process_command("/queue only item")
+        cli.process_command("/queue rm 5")
+        cli.process_command("/queue edit 3 nope")
+        cli.process_command("/queue move 1 9")
+        assert cli._pending_input_items() == ["only item"]
+
 
 
 
@@ -258,7 +308,7 @@ class TestPromptToolkitTerminalCompatibility:
 
         The native-Windows arm (``_terminal_may_leak_cpr() is False``, plus
         the ``PROMPT_TOOLKIT_NO_CPR`` override that outranks it) lives in
-        ``tests/cli/test_cpr_local_leak.py`` under ``platforms("windows")``, where it
+        ``tests/hermes_cli/test_cpr_local_leak.py`` under ``platforms("windows")``, where it
         runs against a real Windows console.
         """
         from cli import _terminal_may_leak_cpr

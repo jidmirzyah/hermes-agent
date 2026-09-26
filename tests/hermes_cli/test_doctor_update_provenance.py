@@ -45,52 +45,30 @@ def test_no_plugins_dir_is_info(tmp_path):
     assert rows == [("info", "No plugins directory yet (nothing to check provenance for)", "")]
 
 
-def test_drift_plugin_warns_with_reinstall_remedy(tmp_path):
-    _make_plugin(tmp_path, "drifty", sidecar={"source": "git", "update_url": "https://example.com/x"})
-    rows = ds._plugin_provenance_rows(tmp_path)
-    warns = [r for r in rows if r[0] == "warn"]
-    assert len(warns) == 1
-    assert "'drifty'" in warns[0][1] and "drift" in warns[0][1]
-    assert "reinstall" in str(warns[0])
-
-
-def test_manual_and_self_cloned_are_info(tmp_path):
-    _make_plugin(tmp_path, "dropped")
-    _make_plugin(tmp_path, "cloned", git=True)
-    rows = ds._plugin_provenance_rows(tmp_path)
-    assert any("manually" in text and kind == "info" for kind, text, _ in rows)
-    assert any("'cloned'" in text and "adopt" in detail for kind, text, detail in rows if kind == "info")
-    assert not any(kind == "warn" for kind, _, _ in rows)
-
-
-def test_git_plugin_in_good_standing_is_ok(tmp_path):
-    _make_plugin(
-        tmp_path, "fine",
-        sidecar={"source": "git", "update_url": "https://example.com/x"},
-        git=True, manifest_update_url="https://example.com/x",
-    )
-    rows = ds._plugin_provenance_rows(tmp_path)
-    assert not any(kind == "warn" for kind, _, _ in rows)
-    assert any(kind == "ok" and "good standing" in text for kind, text, _ in rows)
-
-
-def test_manifest_url_without_saved_url_warns(tmp_path):
-    _make_plugin(tmp_path, "sneaky", sidecar={"source": "git"}, git=True,
-                 manifest_update_url="https://evil.example/x")
-    rows = ds._plugin_provenance_rows(tmp_path)
-    warns = [r for r in rows if r[0] == "warn"]
-    assert len(warns) == 1
-    assert "'sneaky'" in warns[0][1] and "no url was saved" in warns[0][1]
-
-
-@pytest.mark.parametrize("claimed", [None, "https://evil.example/x"])
-def test_manifest_url_mismatch_warns(tmp_path, claimed):
-    _make_plugin(tmp_path, "swapped", sidecar={"source": "git", "update_url": "https://example.com/x"},
-                 git=True, manifest_update_url=claimed)
-    rows = ds._plugin_provenance_rows(tmp_path)
-    warns = [r for r in rows if r[0] == "warn"]
-    assert len(warns) == 1
-    assert "update_url mismatch" in str(warns[0])
+def test_mixed_provenance_diagnostic_is_read_only(tmp_path, monkeypatch, capsys):
+    plugins = tmp_path / 'plugins'
+    url = 'https://example.com/x'
+    cases = [
+        ('drifty', {'source': 'git', 'update_url': url}, False, None, 'warn', 'reinstall'),
+        ('dropped', None, False, None, 'info', 'manually'),
+        ('cloned', None, True, None, 'info', 'adopt'),
+        ('fine', {'source': 'git', 'update_url': url}, True, url, 'ok', 'good standing'),
+        ('sneaky', {'source': 'git'}, True, 'https://evil.example/x', 'warn', 'no url was saved'),
+        ('swapped', {'source': 'git', 'update_url': url}, True, 'https://evil.example/x', 'warn', 'update_url mismatch'),
+        ('removed', {'source': 'git', 'update_url': url}, True, None, 'warn', 'update_url mismatch'),
+    ]
+    for name, sidecar, git, manifest, *_ in cases:
+        _make_plugin(plugins, name, sidecar=sidecar, git=git, manifest_update_url=manifest)
+    before = {p: p.read_bytes() for p in plugins.rglob('*') if p.is_file()}
+    rows = ds._plugin_provenance_rows(plugins)
+    for name, *_, severity, remedy in cases:
+        assert any(kind == severity and name in text and remedy in text + detail
+                   for kind, text, detail in rows)
+    monkeypatch.setattr('hermes_constants.get_hermes_home', lambda: tmp_path)
+    ds._check_update_provenance(False)
+    output = capsys.readouterr().out
+    assert all(name in output for name, *_ in cases)
+    assert {p: p.read_bytes() for p in plugins.rglob('*') if p.is_file()} == before
 
 
 # --- doctor-side wiring -------------------------------------------------

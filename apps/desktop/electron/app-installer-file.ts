@@ -7,7 +7,10 @@ export async function stageAppInstallerFile(
   directory: string,
   fetchFile: typeof fetch = fetch
 ): Promise<string> {
-  const response = await fetchFile(url, { signal: AbortSignal.timeout(30_000) })
+  // No redirects: the descriptor must come from the validated feed origin
+  // itself, not from wherever that origin's operator (or a hijacked hop)
+  // points next. Windows verifies the referenced package, not this file.
+  const response = await fetchFile(url, { signal: AbortSignal.timeout(30_000), redirect: 'error' })
 
   if (!response.ok || !response.body) {
     throw new Error(`App Installer descriptor download failed: HTTP ${response.status}`)
@@ -21,7 +24,10 @@ export async function stageAppInstallerFile(
     for (;;) {
       const { value, done } = await reader.read()
 
-      if (done) { break }
+      if (done) {
+        break
+      }
+
       size += value.byteLength
 
       if (size > 1024 * 1024) {
@@ -34,7 +40,10 @@ export async function stageAppInstallerFile(
     await reader.cancel()
   }
 
-  if (size === 0) { throw new Error('App Installer descriptor is empty') }
+  if (size === 0) {
+    throw new Error('App Installer descriptor is empty')
+  }
+
   await fs.mkdir(directory, { recursive: true })
   const target = path.join(directory, 'update.appinstaller')
   const temporary = `${target}.tmp`

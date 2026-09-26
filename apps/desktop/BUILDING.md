@@ -69,38 +69,81 @@ Do not refresh facts in `afterSign`: that changes resources covered by the signa
 
 ## Complete native build
 
-From a checkout whose `HEAD` equals the release tag, run:
+From a clean checkout whose `HEAD` equals the release tag, run:
 
 ```sh
-uv run --no-project --python 3.14 python scripts/bundles/desktop.py --tag=vX.Y.Z
+python scripts/bundles/desktop.py --tag=vX.Y.Z
 ```
 
 Replace `vX.Y.Z` with an actual immutable tag. Stable tags must match the
 version in `pyproject.toml`. Canary tags use the release script's tag grammar.
-The host must provide Git, native-architecture Node/npm, and official uv 0.12+
-with a build triple in `uv --version`. Native dependency builds also need the
-platform's compiler and libraries.
+Start with host Python 3.11+ and Git. Use `python3` if that is your host's command.
+Preparation asks PM for the pinned Python, Node, npm and private installer;
+preinstalling a separate Node/npm/uv toolchain is not required. Native dependency
+builds still need the platform's compiler, SDK and libraries. Windows ARM64 uses
+the shared Visual Studio/Clang/Rust/static OpenSSL preparation provider, which
+can require Administrator permissions for missing system components. macOS
+requires its native developer tools. This is not a hermetic host SDK.
 
 The builder:
 
-1. Checks the tag, checkout, Node architecture, and workspace engine constraints.
-2. Installs the locked root JS workspace when its install stamp differs.
-3. Builds the TUI and dashboard for variants with a payload.
-4. Stages the PM payload, places JS assets, relocates links, and generates launchers.
-5. Builds Electron and packages MSIX, DMG/ZIP, or AppImage for the current OS.
+1. Admits the clean source revision and prepares managed tools in isolated build state.
+2. Prepares the locked JS workspace union, icon environment, Electron-native bindings,
+   packaging utilities, and the application/independent PM environments when selected.
+3. Compiles icons and the selected TUI, dashboard and desktop products.
+4. Assembles the PM payload, places JS assets, relocates links, and generates launchers.
+5. Consumes the prepared Electron archive and utilities to package the current OS.
 
-Use `--variant store` on Windows, or `--variant light` for the remote client.
-Arguments after `--` go to Electron Builder. `electron-builder.config.cjs`
+Use `--variant store` with a stable tag on Windows, or `--variant light` for the remote client.
+Arguments after `--` go to the prepared wrapper, which rejects overrides of
+the admitted target, tools, output and configuration. `electron-builder.config.cjs`
 is the sole packaging configuration. The wrapper disables automatic publishing;
 the release workflow owns uploads and channel promotion.
 
 `pm bundle --out DIR --ref REF` stages the native runtime only.
-`scripts/bundles/stage.py` also generates its launchers. Neither command builds
-the TUI/dashboard outputs or creates a signed installer by itself.
+`scripts/bundles/stage.py` also builds the TUI/dashboard unless both products
+are supplied explicitly. Both generate launchers; neither creates an Electron installer.
 The launcher stage checks the payload and records its relative launch paths.
 The Electron build bakes these paths into its stamp. Desktop startup does not
 inspect, create, or repair a PM payload. Non-bundled builds carry no placeholder payload.
 See [shared bundle builds](../../docs/shared-bundle-builds.md) for Termux reuse.
+
+### Prepare once, then build
+
+CI and local builds share the same split interface:
+
+```sh
+python scripts/bundles/desktop.py --tag vX.Y.Z --variant bundled --prepare-only \
+  --work "$PWD/.build/desktop-job" --cache "$PWD/.cache/desktop-inputs"
+python scripts/bundles/desktop.py --prepared "$PWD/.build/desktop-job/prepared.json"
+```
+
+The displayed paths are the defaults. Use separate build-owned work/cache roots;
+do not pre-create the work directory. `prepared.json` is published after every
+provider succeeds and contains absolute paths for this job, not a portable cache.
+After relocation or a source/lock/tool change, prepare again. Consumption rejects
+missing or changed dependencies without repairing or downloading them. Stable
+Windows builds can consume one preparation for `--variant bundled` and then
+`--variant store`; light and commit preparations cannot switch to Store.
+
+Release jobs restore candidates, prepare, save reusable inputs, and only then
+build/sign. Job-local environments, credentials, products and signature results
+are not dependency snapshot inputs. The signature cache retains its own lifetime.
+Commit jobs request token-enforced read-only cache access; the conditional YAML
+mode still needs GitHub acceptance (see the
+[cache-policy caveat](../../docs/shared-bundle-builds.md#cache-ownership)). A
+separate key or skipped save alone would not protect release caches. Archival remains an independent
+prerequisite, and R2 upload credentials are not exposed to desktop preparation.
+
+Strict consumption means no dependency acquisition, not offline signing.
+Timestamp services, Azure signing, Apple notarization and publication remain
+online operations. Validate unsigned packaging with dependency networking denied
+on each target, then verify signed installers and launchers on their native hosts.
+
+macOS packaging retains the caller's login `HOME` for keychain import and signing.
+An explicit keychain path does not make Security.framework work under a scratch
+home. Dependency preparation and product compilation still use the isolated home.
+Hermes state and explicit dependency-cache paths remain build-owned during packaging.
 
 ## Commit-only builds
 
@@ -153,7 +196,7 @@ It rejects mixed tag, release-phase, channel-publication, and upgrade inputs.
 
 Builder jobs check out the admitted SHA. Their artifacts and completion receipts
 go to `releases/commit/FULL_SHA/`, separate from tag archives and update channels.
-The run summary lists Windows packages and both universal bundles, macOS DMG/ZIP
+The run summary lists Windows sideload packages and their universal bundle, macOS DMG/ZIP
 files, and the Termux package. Linux release legs remain disabled and are listed
 as not built. Only receipt-listed artifacts that exist in storage get download
 links. Missing receipts show the failed or incomplete leg.
@@ -166,8 +209,8 @@ staged, and a re-run of an older tag never replaces a newer channel page.
 `release.py --build-commit` prints the commit page URL before dispatching.
 
 Commit builds require the signing credentials used by their release legs.
-Store bundle envelopes remain unsigned for Partner Center, but these builds
-never submit them. No GitHub release, updater feed, or APT channel is changed.
+They do not produce Store packages or submit to Partner Center. No GitHub
+release, updater feed, or APT channel is changed.
 An identical upload retry can succeed. Different bytes at an existing commit
 object key fail rather than replace that object.
 
@@ -178,8 +221,8 @@ python scripts/bundles/desktop.py --commit=FULL_SHA --variant=bundled
 ```
 
 The builder uses that commit's project version. Sideload MSIX versions append
-`.0`. Store package versions use the commit timestamp with the existing UTC
-calendar policy, even when the app version starts with zero.
+`.0`. The shared MSIX version helper can derive Store versions from commit timestamps,
+but this desktop preparation interface only admits Store packaging for stable tags.
 Commit-built stamps disable automatic release-channel updates. Local command and transport tests do not
 replace signed-package installation and update acceptance on each native host.
 
@@ -273,7 +316,10 @@ The queries use noninteractive `sudo` when available. Permission failures and
 query timeouts are reported explicitly. Empty output does not prove that the
 image has no holder. The shim does not stop processes or change detach results,
 retry settings, signing or notarization. Explicit `CUSTOM_DMGBUILD_PATH`
-overrides bypass the shim because their interpreter layout is not known.
+overrides outside the prepared path are not an escape hatch for strict builds.
+Prepared packaging supplies the admitted dmgbuild path to the diagnostics shim.
+Changes to its preparation provider need native DMG/detach and
+signing/notarization acceptance; a successful download is not native execution proof.
 
 ## Development, assets, and verification
 

@@ -11,7 +11,27 @@ import { $desktopVersion, checkBackendUpdates, refreshDesktopVersion } from '@/s
 import { SectionHeading, SettingsContent } from './primitives'
 import { UninstallSection } from './uninstall-section'
 
-export function AboutSettings(): ReactElement {
+interface AboutSettingsProps {
+  subpage?: string
+}
+
+export function AboutSettings({ subpage }: AboutSettingsProps = {}): ReactElement {
+  if (subpage === 'uninstall') {
+    return (
+      <SettingsContent>
+        <UninstallSection />
+      </SettingsContent>
+    )
+  }
+
+  return <AppUpdatesSettings includeUninstall={subpage === undefined} />
+}
+
+interface AppUpdatesSettingsProps {
+  includeUninstall: boolean
+}
+
+function AppUpdatesSettings({ includeUninstall }: AppUpdatesSettingsProps): ReactElement {
   const { t } = useI18n()
   const version = useStore($desktopVersion)
   const connection = useStore($connection)

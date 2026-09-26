@@ -23,8 +23,10 @@ if ! (
 fi
 
 # Guard against double-sourcing: venv activate precedent (re-activating is a
-# no-op re-save; we keep it idempotent by deactivating first).
-if [ -n "${__HERMES_ACTIVATED:-}" ]; then
+# no-op re-save; we keep it idempotent by deactivating first). Key on the
+# function, not the sentinel: child shells inherit __HERMES_ACTIVATED from an
+# activated parent but never the function, and there is nothing to undo there.
+if [ "$(type -t deactivate 2>/dev/null)" = "function" ]; then
     deactivate
 fi
 
@@ -50,7 +52,7 @@ if [ -z "$_hermes_py" ]; then
 fi
 
 # --- emit export lines from `pm env` ---
-_hermes_json="$(PYTHONHOME= PYTHONPATH="$_hermes_repo" "$_hermes_py" -m hermes_cli.runtime_paths)"
+_hermes_json="$(PYTHONHOME= PYTHONPATH="$_hermes_repo" "$_hermes_py" -m pm.environments)"
 if [ -z "$_hermes_json" ] || [ "${_hermes_json#*{}" = "$_hermes_json" ]; then
     echo "activate: could not read pm env (run ./setup-hermes.sh first)" >&2
     unset _hermes_repo _hermes_os _hermes_arch _hermes_target _hermes_store _hermes_py _hermes_json
@@ -62,7 +64,9 @@ _hermes_keys="$(printf '%s' "$_hermes_json" | "$_hermes_py" -c 'import json,sys;
 [ -n "$_hermes_keys" ] || _hermes_keys="PATH"
 
 # --- snapshot what we are about to change (deactivate restores this) ---
-__HERMES_ACTIVATED=1
+# __HERMES_ACTIVATED is part of the composed env below (it carries the
+# installed-state path this environment was built from), so it is snapshotted
+# and exported with every other key — no separate assignment here.
 __HERMES_SAVED_PATH="$PATH"
 for _hermes_k in $_hermes_keys; do
     eval "__HERMES_SAVED_$_hermes_k=\"\${$_hermes_k+set}\""

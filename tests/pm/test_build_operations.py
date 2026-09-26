@@ -4,23 +4,167 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-import shutil
 import sys
 
 import pytest
 
 from pm.package import InstallError
-from tests.pm.test_environment_build import _run, _wheel
+from tests.pm._fixtures import (
+    _run,
+    _wheel,
+    build_worker as build_worker,
+    client as client,
+    isolated_python as isolated_python,
+    served as served,
+)
+
+
+def test_stage_tools_copies_verified_closure_without_acquiring_or_live_state(tmp_path, client, monkeypatch, served):
+    import importlib.util
+    import pm
+    from pm.lock import Facts, Lockfile
+    from pm.registry import _packages
+    from pm.store import current_target, tree_digest
+
+    target = current_target()
+    source = tmp_path / "canonical"
+    source.mkdir()
+    lock = Lockfile(tmp_path / "lock.json")
+    facts = Facts(source / "facts.json")
+    definition = tmp_path / "copy_fixture.py"
+    definition.write_text(
+        "from pm.package import Package\n"
+        "class CopyLeaf(Package):\n"
+        "    name = 'copy-leaf'\n"
+        "    def env(self, entry, target): return {'COPY_ROOT': str(entry)}\n"
+        "class CopyTool(CopyLeaf):\n"
+        "    name = 'copy-tool'\n"
+        "    deps = ('copy-leaf',)\n", encoding="utf-8")
+    spec = importlib.util.spec_from_file_location("copy_fixture", definition)
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, "copy_fixture", module)
+    spec.loader.exec_module(module)
+    for package in (module.CopyLeaf(), module.CopyTool()):
+        monkeypatch.setitem(_packages, package.name, package)
+        lock.set_pin(package.name, "1.0", {target: {"url": "https://invalid.test/tool.tgz", "sha256": "a" * 64}})
+        entry = source / package.store_entry("1.0", target)
+        entry.mkdir()
+        (entry / "data").write_text(package.name, encoding="utf-8")
+        facts.record(package.name, "1.0", entry.name, package.env(entry, target), source,
+                     target=target, artifacts=["a" * 64], digest=tree_digest(entry))
+    lock.save()
+    from tests.pm._fixtures import make_tar
+    import shutil
+    directory, base = served
+    for name in ("copy-leaf", "copy-tool"):
+        archive, sha = make_tar(directory, name + ".tgz", {"data": name})
+        lock.set_pin(name, "1.0", {target: {"url": base + "/" + archive, "sha256": sha}})
+    lock.save()
+    shutil.rmtree(source)
+    assert pm.prepare_tools(["copy-tool"], out=source, target=target, cache=tmp_path / "python-cache") == source
+    facts = Facts(source / "facts.json")
+    before = (source / "facts.json").read_bytes()
+    home_before = sorted(str(path) for path in (tmp_path / "home").rglob("*"))
+    destination = tmp_path / "payload-tools"
+    result = pm.stage_tools(["copy-tool"], source_store=source, out=destination, target=target)
+    assert result == destination
+    # An old output may have been populated with hardlinks. A fresh staging
+    # request must establish independent bytes, not reuse those current facts.
+    tool_entry = facts.get("copy-tool")["entry"]
+    linked_copy = destination / tool_entry / "data"
+    linked_copy.unlink()
+    os.link(source / tool_entry / "data", linked_copy)
+    pm.stage_tools(["copy-tool"], source_store=source, out=destination, target=target)
+    staged = Facts(destination / "facts.json")
+    for name in ("copy-leaf", "copy-tool"):
+        entry = facts.get(name)["entry"]
+        copied, original = destination / entry / "data", source / entry / "data"
+        assert copied.read_bytes() == original.read_bytes()
+        assert not copied.samefile(original)
+        copied.write_text("signed output", encoding="utf-8")
+        assert original.read_text() == name
+        assert staged.get(name)["digest"] == facts.get(name)["digest"]
+        assert staged.env_for(name, destination)["COPY_ROOT"] == str(destination / entry)
+    assert (source / "facts.json").read_bytes() == before
+    assert sorted(str(path) for path in (tmp_path / "home").rglob("*")) == home_before
+    assert not (tmp_path / "home/config.yaml").exists()
+    assert not (tmp_path / "store/facts.json").exists()
+
+    # Every call must admit the source, even if destination facts are warm.
+    original = source / facts.get("copy-tool")["entry"] / "data"
+    original.write_text("corrupt", encoding="utf-8")
+    with pytest.raises(InstallError, match="source failed verification"):
+        pm.stage_tools(["copy-tool"], source_store=source, out=destination, target=target)
+    original.write_text("copy-tool", encoding="utf-8")
+    lock.set_pin("copy-tool", "1.0", {target: {"url": "https://invalid.test/repin", "sha256": "b" * 64}})
+    lock.save()
+    with pytest.raises(InstallError, match="source failed verification"):
+        pm.stage_tools(["copy-tool"], source_store=source, out=destination, target=target)
+    lock.set_pin("copy-tool", "1.0", {target: {"url": "https://invalid.test/tool.tgz", "sha256": facts.get("copy-tool")["artifacts"][0]}})
+    lock.save()
+    # A locally recorded link must not turn an independent copy into a shared
+    # mutable file in the cache or another caller's tree.
+    external = tmp_path / "external"
+    external.write_text("shared", encoding="utf-8")
+    original.unlink()
+    original.symlink_to(external)
+    package = module.CopyTool()
+    entry = original.parent
+    facts.record(package.name, "1.0", entry.name, package.env(entry, target), source,
+                 target=target, artifacts=facts.get("copy-tool")["artifacts"], digest=tree_digest(entry))
+    with pytest.raises(InstallError, match="source.*verification|escapes"):
+        pm.stage_tools(["copy-tool"], source_store=source, out=tmp_path / "other-output", target=target)
+
+
+@pytest.mark.parametrize("damage", [None, "entry", "env", "bytes", "pin", "binary"])
+def test_verified_tools_admits_only_locked_entries_without_execution(tmp_path, monkeypatch, damage):
+    import subprocess
+    from pm import build_operations
+    from pm.lock import Facts, Lockfile
+    from pm.registry import get_package
+    from pm.store import current_target, tree_digest
+
+    target, store = current_target(), tmp_path / "tools"
+    lock = Lockfile(tmp_path / "lock.json")
+    package = get_package("python")
+    entry = store / package.store_entry("1.0", target)
+    binary = package.binary(entry, target)
+    assert binary is not None
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"already verified at publication")
+    lock.set_pin("python", "1.0", {target: {"url": "https://invalid.test/python", "sha256": "a" * 64}})
+    facts = Facts(store / "facts.json")
+    env = package.env(entry, target)
+    if damage == "entry":
+        renamed = entry.with_name("noncanonical")
+        entry.rename(renamed)
+        entry = renamed
+        env = package.env(entry, target)
+    if damage == "env":
+        env["PATH"] = [str(tmp_path / "unverified")]
+    if damage == "binary":
+        binary.unlink()
+    facts.record("python", "1.0", entry.name, env, store, target=target,
+                 artifacts=["a" * 64], digest=tree_digest(entry))
+    if damage == "bytes":
+        binary.write_bytes(b"changed")
+    if damage == "pin":
+        lock.set_pin("python", "1.0", {target: {"url": "https://invalid.test/python", "sha256": "b" * 64}})
+    before = {p.relative_to(store): p.read_bytes() for p in store.rglob("*") if p.is_file()}
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: pytest.fail("read-only admission executed a process"))
+    if damage:
+        with pytest.raises(InstallError, match="source failed verification"):
+            build_operations.verified_tools(["python"], source_store=store, target=target, lock=lock)
+    else:
+        selected = build_operations.verified_tools(["python"], source_store=store, target=target, lock=lock)
+        assert selected.entries["python"].path == entry
+        assert selected.entries["python"].binary == binary
+        assert selected.environment({"PATH": "inherited"})["PATH"] == str(binary.parent) + os.pathsep + "inherited"
+    assert {p.relative_to(store): p.read_bytes() for p in store.rglob("*") if p.is_file()} == before
 
 
 @pytest.fixture
-def build_tools(tmp_path, monkeypatch):
-    uv = shutil.which("uv")
-    assert uv, "PM build tests require real uv"
-    # Worker transport is covered separately. These public operation tests use
-    # real engine/tools without downloading a second toolchain.
-    monkeypatch.setattr("pm.client.is_runtime", lambda: True)
-    monkeypatch.setattr("pm._uv._toolchain", lambda **kwargs: (Path(uv), Path(sys.executable)))
+def build_tools(tmp_path, monkeypatch, build_worker):
     env = {key: value for key, value in os.environ.items()
            if not key.startswith(("UV_", "PYTHON")) and key != "VIRTUAL_ENV"}
     home = tmp_path / "home"
@@ -33,7 +177,7 @@ def build_tools(tmp_path, monkeypatch):
 
 @pytest.fixture
 def locked_source(tmp_path, build_tools):
-    from pm.operations import lock_project
+    from pm import lock_project
 
     wheels = tmp_path / "wheelhouse"
     wheels.mkdir()
@@ -192,7 +336,7 @@ def test_failed_requirement_build_removes_only_its_candidate(tmp_path, build_too
         build_requirements_environment(["app-dep==1.0"], out=out, python=python, wheelhouse=wheels,
                                        env=build_tools, cache=tmp_path / "cold-cache", offline=True, explicit=True)
     assert not out.exists()
-    with pytest.raises(FileExistsError):
+    with pytest.raises(FileExistsError, match="already exists"):
         build_requirements_environment(["app-dep==1.0"], out=previous, wheelhouse=wheels,
                                        env=build_tools, cache=tmp_path / "cache", offline=True, explicit=True)
     assert (previous / "pyvenv.cfg").read_bytes() == previous_cfg
@@ -251,7 +395,7 @@ def test_ready_tools_do_not_bypass_disabled_lazy_operations(locked_source, tmp_p
     import importlib
     from pm import build_requirements_environment, check_project_lock, export_requirements
 
-    monkeypatch.setattr(importlib.import_module("pm.ensure"), "lazy_installs_allowed", lambda: False)
+    monkeypatch.setattr(importlib.import_module("pm.install"), "lazy_installs_allowed", lambda: False)
     out = tmp_path / "blocked-output"
     before = {p.name: p.read_bytes() for p in locked_source.iterdir() if p.is_file()}
     actions = {
@@ -278,7 +422,7 @@ def test_prune_cache_does_not_acquire_a_missing_toolchain(tmp_path, monkeypatch)
     monkeypatch.setattr(pm.paths, "store_root", lambda: store)
     monkeypatch.setattr(pm.paths, "writable_store_root", lambda: store)
     monkeypatch.setattr(pm.paths, "facts_path", lambda: store / "facts.json")
-    monkeypatch.setattr(importlib.import_module("pm.ensure"), "ensure",
+    monkeypatch.setattr(importlib.import_module("pm.install"), "ensure",
                         lambda *args, **kwargs: pytest.fail("cache pruning must not acquire tools"))
     with pytest.raises(InstallError, match="pinned toolchain is unavailable"):
         prune_cache(tmp_path / "cache")

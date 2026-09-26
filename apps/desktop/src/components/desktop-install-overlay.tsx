@@ -20,7 +20,7 @@ import { capitalize } from '@/lib/text'
 import { cn } from '@/lib/utils'
 
 import { localCardPresentation } from './desktop-install-local-card'
-import { FirstRunRemoteForm } from './first-run-remote-form'
+import { FirstRunRemoteSetup } from './remote-setup/first-run'
 
 /**
  * DesktopInstallOverlay
@@ -417,7 +417,7 @@ export function DesktopInstallOverlay({ enabled = true }: DesktopInstallOverlayP
   }
 
   if (remoteOpen) {
-    return <FirstRunRemoteForm onBack={() => setRemoteOpen(false)} />
+    return <FirstRunRemoteSetup onBack={() => setRemoteOpen(false)} />
   }
 
   if (state.setupChoice) {

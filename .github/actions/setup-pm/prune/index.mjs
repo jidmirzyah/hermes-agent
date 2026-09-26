@@ -6,13 +6,19 @@ import { pathToFileURL } from 'node:url'
 // this action's post runs first, pruning the cache just before it is saved.
 export function run(env, execute = spawnSync) {
   if (!env.STATE_python) {
-    for (const [key, value] of Object.entries({ python: env.INPUT_PYTHON, cache: env.INPUT_CACHE })) {
+    // The runner keeps hyphens when it maps an input to INPUT_<NAME>.
+    for (const [key, value] of Object.entries({ python: env.INPUT_PYTHON, cache: env.INPUT_CACHE, lockSource: env['INPUT_LOCK-SOURCE'] })) {
       if (!value || /[\r\n\0]/.test(value)) throw new Error(`invalid ${key}`)
       appendFileSync(env.GITHUB_STATE, `${key}=${value}\n`, 'utf8')
     }
     return
   }
-  const result = execute(env.STATE_python, ['-m', 'pm.build_env', '--prune-cache', '--cache', env.STATE_cache, '--ci'], {
+  // Exact-to-lock pruning keeps every wheel the project's uv.lock resolves —
+  // including downloaded ones. `--ci` pruning discarded downloaded wheels so
+  // the saved snapshot warmed almost nothing; bundling later ships this same
+  // cache only after its own exact-lock gate, so exactness is the shared
+  // contract, and sediment for superseded pins never accumulates.
+  const result = execute(env.STATE_python, ['-m', 'pm.build_env', '--exact-lock', '--cache', env.STATE_cache, '--lock-source', env.STATE_lockSource], {
     env,
     stdio: 'inherit',
   })

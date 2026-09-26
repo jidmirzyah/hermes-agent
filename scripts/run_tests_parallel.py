@@ -176,7 +176,7 @@ def _read_files_from(spec: str) -> List[str]:
         text = sys.stdin.read()
     else:
         try:
-            text = Path(spec).read_text(encoding="utf-8")
+            text = Path(spec).read_text(encoding="utf-8-sig")
         except OSError as exc:
             print(f"error: --files-from: cannot read {spec!r}: {exc}", file=sys.stderr)
             sys.exit(2)

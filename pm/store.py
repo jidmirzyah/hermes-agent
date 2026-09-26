@@ -13,7 +13,8 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-_UA = {"User-Agent": "hermes-pm"}
+from pm.filesystem import is_junction
+
 
 
 ALL_TARGETS = (
@@ -102,23 +103,13 @@ def current_target() -> str:
     return f"linux-{arch}"
 
 
-def sha256_file(path: Path) -> str:
-    import hashlib
-
-    digest = hashlib.sha256()
-    with open(path, "rb") as f:
-        for block in iter(lambda: f.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
 def hash_url(url: str) -> str:
     """sha256 of a url's content, streamed. `pm lock` uses this to pin."""
     import hashlib
     import http.client
     import urllib.request
 
-    from pm.downloader import _OPENER
+    from pm.downloader import _OPENER, _UA
     from pm.network import retry_network
 
     def request():
@@ -138,6 +129,26 @@ def hash_url(url: str) -> str:
     return retry_network(request)
 
 
+def _tar_filter(member, dest: str):
+    """The stdlib 'data' filter, with symlink targets resolved from the link's own
+    directory. Bootstrap interpreters (Ubuntu 22.04 ships 3.10) resolve them from
+    the archive root and reject python-build-standalone's terminfo links."""
+    import tarfile
+
+    if member.issym():
+        if os.path.isabs(member.linkname):
+            raise tarfile.AbsoluteLinkError(member)
+        name = member.name.rstrip("/")
+        placed = os.path.realpath(os.path.join(dest, name))
+        link_dir = os.path.dirname(name)
+        target = os.path.realpath(os.path.join(dest, link_dir, member.linkname))
+        for path in (placed, target):
+            if os.path.commonpath([path, dest]) != dest:
+                raise tarfile.LinkOutsideDestinationError(member, path)
+        return member.replace(deep=False, uid=None, gid=None, uname=None, gname=None, mode=None)
+    return tarfile.data_filter(member, dest)
+
+
 def extract(archive: Path, dest: Path) -> None:
     import tarfile
 
@@ -145,8 +156,9 @@ def extract(archive: Path, dest: Path) -> None:
     dest.mkdir(parents=True, exist_ok=True)
     name = archive.name.lower()
     if name.endswith((".tar.gz", ".tgz", ".tar.xz", ".txz", ".tar.bz2")):
+        real_dest = os.path.realpath(dest)
         with tarfile.open(archive) as tf:
-            tf.extractall(dest, filter="data")
+            tf.extractall(dest, filter=lambda member, path: _tar_filter(member, real_dest))
     elif name.endswith(".zip"):
         _extract_zip(archive, dest)
     else:
@@ -236,7 +248,7 @@ def tree_digest(root: Path) -> str:
         descend = []
         for name in sorted(dirnames):
             path = Path(dirpath) / name
-            if path.is_symlink() or path.is_junction():
+            if path.is_symlink() or is_junction(path):
                 files.append((path.relative_to(root).as_posix(), path))
             elif name != "__pycache__":
                 descend.append(name)
@@ -250,7 +262,7 @@ def tree_digest(root: Path) -> str:
     for rel, path in files:
         digest.update(rel.encode("utf-8"))
         digest.update(b"\0")
-        if path.is_symlink() or path.is_junction():
+        if path.is_symlink() or is_junction(path):
             digest.update(os.readlink(path).encode("utf-8"))
         else:
             with open(path, "rb") as f:
@@ -295,7 +307,7 @@ class Store:
             entry_name = f"fetch-{digest}"
             entry = self.entry(entry_name)
             files = list(entry.iterdir()) if entry.is_dir() else []
-            if len(files) == 1 and files[0].is_file() and sha256_file(files[0]) == digest:
+            if len(files) == 1 and files[0].is_file():
                 destination = files[0]
             else:
                 if entry.exists():

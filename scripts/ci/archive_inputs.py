@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 import json
 from pathlib import Path, PurePosixPath
@@ -85,7 +86,7 @@ def pinned_inputs(repo: Path, *, target: str | None = None, packages: set[str] |
                     continue  # OCI digests belong to the container registry, not HTTP archives.
                 pins.append(_pin(label, row, "tool"))
     if packages is None and target in (None, TERMUX_TARGET):
-        table = json.loads((repo / "scripts/termux/runtime_libs.json").read_text(encoding="utf-8"))
+        table = json.loads((repo / "pm" / "termux_runtime_libs.json").read_text(encoding="utf-8-sig"))
         pins.extend(_pin(name, row, "library") for name, row in table["libs"].items())
         if table.get("licenses") is not None:
             pins.append(_pin("termux-licenses", table["licenses"], "license"))
@@ -148,15 +149,19 @@ def _download_upstream(pin: InputPin, local: Path) -> str:
 
 
 def stage_inputs(pins: list[InputPin], *, archive: Archive, store: Store | None = None, payload: Path | None = None) -> int:
-    """Archive each digest once; optionally seed the actual stagers' inputs."""
+    """Archive all unique digests concurrently; optionally seed the stagers' inputs."""
     from scripts.termux.stage_runtime_libs import download_path
 
     groups: dict[str, list[InputPin]] = {}
     for pin in pins:
         groups.setdefault(pin.sha256, []).append(pin)
-    with tempfile.TemporaryDirectory(prefix="hermes-inputs-") as temporary:
-        local = Path(temporary) / "input"
-        for digest, references in groups.items():
+    if not groups:
+        return 0
+
+    def stage_digest(digest: str, references: list[InputPin]) -> None:
+        # Each worker owns its downloads and cleanup, including on failure.
+        with tempfile.TemporaryDirectory(prefix="hermes-inputs-") as temporary:
+            local = Path(temporary) / "input"
             origin = archive.fetch(references[0], local)
             for pin in references:
                 if pin.kind != "tool" and payload is not None:
@@ -176,8 +181,12 @@ def stage_inputs(pins: list[InputPin], *, archive: Archive, store: Store | None 
                     if entry.exists():
                         shutil.rmtree(entry)
                     store.publish(staged, entry.name)
-            local.unlink()
             print(f"  {references[0].name}: {origin} -> {object_key(digest)}", flush=True)
+
+    with ThreadPoolExecutor(max_workers=len(groups)) as pool:
+        futures = [pool.submit(stage_digest, digest, references) for digest, references in groups.items()]
+        for future in as_completed(futures):
+            future.result()
     return len(groups)
 
 

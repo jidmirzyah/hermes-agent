@@ -3,14 +3,13 @@
 The interactive_setup wizard lazy-imports its CLI helpers from
 ``hermes_cli.config`` (get_env_value / save_env_value / remove_env_value),
 ``hermes_cli.cli_output`` (prompt / prompt_yes_no / print_*), and
-``pm`` (mautrix ensure_import). We patch each at its source module so
-the wizard runs without touching pip or the network. Covers the home-channel
+``pm`` (Matrix sync_venv). We patch each at its source module so
+the wizard runs without provisioning dependencies. Covers the home-channel
 clear-on-blank behavior added in the follow-up to PR #58421.
 """
 import hermes_cli.config as config_mod
 import hermes_cli.cli_output as cli_output_mod
 import pm as pm_mod
-import pm.extras as pm_extras_mod
 from plugins.platforms.matrix.adapter import interactive_setup
 
 
@@ -31,10 +30,8 @@ def _patch_setup_io(monkeypatch, prompts, yes_no_responses, saved, removed, exis
     )
     for name in ("print_header", "print_info", "print_success", "print_warning"):
         monkeypatch.setattr(cli_output_mod, name, lambda *_a, **_kw: None)
-    # Block the auto-install path so the test never invokes pip.
-    monkeypatch.setattr(pm_extras_mod, "missing", lambda extra: ())
-    monkeypatch.setattr(pm_mod, "ensure_import", lambda *a, **kw: None)
-    monkeypatch.setattr(pm_extras_mod, "ensure_import", lambda *a, **kw: None)
+    # Setup explicitly syncs dependencies; lazy-import patches do not intercept it.
+    monkeypatch.setattr(pm_mod, "sync_venv", lambda *a, **kw: None)
 
 
 # Matrix prompts (after the E2EE yes_no): allowed_users, home_channel.

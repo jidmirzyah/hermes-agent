@@ -99,13 +99,20 @@ def configure(here, environ=None):
         sys.path.remove(site_entry)
     sys.path.insert(1 if sys.path and sys.path[0] == repo_entry else 0, site_entry)
     if not environ.get("PYTHONPYCACHEPREFIX"):
-        default = default_pycache_dir(environ)
-        if default:
-            environ["PYTHONPYCACHEPREFIX"] = default
-            # The env var is only read at interpreter startup; we ARE at
-            # startup, but setting it in os.environ cannot retro-activate
-            # it — sys.pycache_prefix is the live switch.
-            sys.pycache_prefix = default
+        # A baked payload reads its own source-adjacent __pycache__ dirs
+        # (Python's default lookup). sys.pycache_prefix must stay UNSET here:
+        # the prefix relocates reads as well as writes, so it would hide the
+        # baked bytecode and re-pay the cold-compile stall this marker exists
+        # to remove. Without the marker (old payloads), the user-level
+        # redirect below keeps bytecode writes out of the sealed tree.
+        if not os.path.exists(os.path.join(os.path.dirname(repo_entry), ".hermes-baked-pycache")):
+            default = default_pycache_dir(environ)
+            if default:
+                environ["PYTHONPYCACHEPREFIX"] = default
+                # The env var is only read at interpreter startup; we ARE at
+                # startup, but setting it in os.environ cannot retro-activate
+                # it — sys.pycache_prefix is the live switch.
+                sys.pycache_prefix = default
     return [repo_entry, site_entry]
 
 

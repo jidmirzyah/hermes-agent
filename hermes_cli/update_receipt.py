@@ -181,7 +181,7 @@ def _receipt_dir() -> Path:
     return get_hermes_home() / "logs" / "update_receipts"
 
 
-def begin_update_receipt() -> None:
+def begin_update_receipt(*, previous: dict | None = None, correlation_id: str | None = None) -> None:
     """Start recording a new update receipt.
 
     Nested updates are safe: the previous receipt (if any) is preserved
@@ -190,31 +190,14 @@ def begin_update_receipt() -> None:
     correlation. Never raises."""
     try:
         receipt = UpdateReceipt()
+        if previous:
+            receipt.data.update(copy.deepcopy(previous))
+        receipt.correlation_id = correlation_id or receipt.correlation_id
+        receipt.data.update(update_id=receipt.correlation_id, outcome="running", finished_at=None)
     except Exception as exc:  # pragma: no cover - defensive
         logger.debug("Could not start update receipt: %s", exc)
         return
     receipt.current_token = _current.set(receipt)
-
-
-def detach_update_receipt() -> Optional[dict[str, Any]]:
-    """Hand the open receipt to another process: return its data and forget it here.
-
-    The post-swap child resumes it via :func:`resume_update_receipt`; the parent's
-    command-boundary finalize then no-ops, so the run still produces exactly one receipt.
-    """
-    global _current
-    receipt, _current = _current, None
-    return None if receipt is None else receipt.data
-
-
-def resume_update_receipt(data: dict[str, Any]) -> None:
-    """Continue a receipt detached by the pre-swap interpreter (``started_at``, ``pre_update``,
-    ``argv``, steps and plan intact); records this process as the one that finished it."""
-    global _current
-    receipt = UpdateReceipt()
-    receipt.data = data
-    receipt.data["post_swap_pid"] = os.getpid()
-    _current = receipt
 
 
 def _record(method: str, what: str, *args: Any, **kwargs: Any) -> None:
@@ -283,6 +266,9 @@ def finalize_update_receipt(outcome: str, fleet: list | None = None, stop_reason
             receipt.data["stop_reason"] = stop_reason
         if fleet is not None:
             receipt.data["fleet"] = fleet
+        # Manual serve restart obligations outlive one receipt rotation: carry the previous
+        # receipt's still-pending rows forward so the startup warning survives (see
+        # update_serve_obligations).
         from hermes_cli.update_serve_obligations import retain_receipt_manual_serves
         pending = retain_receipt_manual_serves(read_latest_receipt() or {})
         if pending:
@@ -318,15 +304,16 @@ def finalize_update_receipt(outcome: str, fleet: list | None = None, stop_reason
         # the same process+second — the correlation id makes the name unique
         # per update run. Atomic write for BOTH the stamped receipt and the
         # latest.json pointer (no torn readers).
-        import utils
+        from hermes_cli.runtime_state import _atomic_bytes
 
         path = directory / (
             f"update_{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}_"
             f"{receipt.correlation_id}.json"
         )
-        utils.atomic_json_write(path, receipt.data, default=str)
+        payload = (json.dumps(receipt.data, indent=2, default=str) + "\n").encode("utf-8")
+        _atomic_bytes(path, payload)
         with suppress(Exception):  # stable pointer for the dashboard/desktop
-            utils.atomic_json_write(directory / "latest.json", receipt.data, default=str)
+            _atomic_bytes(directory / "latest.json", payload)
         _prune_old_receipts(directory)
         return path
     except Exception as exc:
@@ -384,7 +371,7 @@ def settle_latest_receipt_fleet(fleet: list[dict[str, Any]], *, discharges) -> b
     """
     try:
         path = _receipt_dir() / "latest.json"
-        receipt = json.loads(path.read_text(encoding="utf-8"))
+        receipt = json.loads(path.read_text(encoding="utf-8-sig"))
         if not isinstance(receipt, dict):
             return False
         receipt["fleet"] = list(fleet)

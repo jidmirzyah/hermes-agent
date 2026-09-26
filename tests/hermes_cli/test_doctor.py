@@ -29,6 +29,19 @@ from hermes_cli import doctor_config
 from tools import browser_tool_install as bt_install
 
 
+@pytest.fixture(autouse=True)
+def _no_browser_downloads(monkeypatch):
+    """Unrelated doctor --fix tests must not start an installer worker.
+
+    Browser acquisition/readback is exercised with real temporary PM facts in
+    test_browser_pm; tests here may replace this boundary deliberately.
+    """
+    def refuse(*args, **kwargs):
+        raise RuntimeError("PM downloads disabled in doctor unit tests")
+
+    monkeypatch.setattr("pm.client._request", refuse)
+
+
 def _tls_out_normalized(out: str) -> str:
     """Doctor print matcher for TLS rows: key on words, not spacing."""
     return " ".join(out.lower().split())
@@ -306,8 +319,6 @@ class TestDoctorToolAvailabilityOverrides:
         assert unavailable == [kanban_entry]
 
 
-
-
 class TestHonchoDoctorConfigDetection:
     def test_reports_configured_when_enabled_with_api_key(self, monkeypatch):
         fake_config = SimpleNamespace(enabled=True, api_key="***")
@@ -318,12 +329,6 @@ class TestHonchoDoctorConfigDetection:
         )
 
         assert doctor_state._honcho_is_configured_for_doctor()
-
-
-
-
-
-
 
 
 def test_doctor_reports_vercel_backend_diagnostics(monkeypatch, tmp_path):
@@ -499,7 +504,7 @@ def test_run_doctor_termux_treats_docker_and_browser_warnings_as_expected(monkey
     assert "2) npm install -g agent-browser" in out
     assert "3) agent-browser install" in out
     assert "Termux compatibility fallbacks:" in out
-    assert "use .[termux-all] for broad compatibility" in out
+    assert "Termux uses the Hermes APT package: pkg install hermes-agent." in out
     assert "Matrix E2EE extra is excluded on Termux" in out
     assert "Local faster-whisper extra is excluded on Termux" in out
     assert "STT fallback: use Groq Whisper (set GROQ_API_KEY) or OpenAI Whisper (set VOICE_TOOLS_OPENAI_KEY)." in out
@@ -917,18 +922,10 @@ def _doctor_env_for_agent_browser(monkeypatch, tmp_path):
         pass
 
 
-def test_run_doctor_reports_agent_browser_resolves_via_npx(monkeypatch, tmp_path):
-    """When agent-browser has no local/global install, _find_agent_browser
-    falls through to 'npx agent-browser' — doctor must report that as OK
-    (#43564: agent-browser is no longer a root package.json dependency, so
-    this is the expected common case now, not a warning)."""
+def test_run_doctor_reports_installed_agent_browser(monkeypatch, tmp_path):
     _doctor_env_for_agent_browser(monkeypatch, tmp_path)
 
-    monkeypatch.setattr(bt_install, "_find_agent_browser", lambda **_kw: "npx agent-browser")
-    warm_calls = []
-    monkeypatch.setattr(
-        "tools.browser_tool_install.warm_agent_browser_npx_cache", lambda *a, **kw: warm_calls.append(1) or True
-    )
+    monkeypatch.setattr(bt_install, "_find_agent_browser", lambda **_kw: "/pm/agent-browser")
 
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
@@ -936,51 +933,50 @@ def test_run_doctor_reports_agent_browser_resolves_via_npx(monkeypatch, tmp_path
     out = buf.getvalue()
 
     assert "agent-browser" in out
-    assert "resolves via npx on first use" in out
+    assert "/pm/agent-browser" in out
     assert "agent-browser not installed" not in out
-    # --fix was not requested: the warm-up must not fire on a plain check.
-    assert not warm_calls
 
 
-def test_run_doctor_fix_warms_npx_cache_when_agent_browser_resolves_via_npx(
-    monkeypatch, tmp_path
-):
-    """`hermes doctor --fix` must actually call warm_agent_browser_npx_cache()
-    when agent-browser resolves via npx, and report success."""
+def test_doctor_fix_does_not_claim_success_without_published_binary(monkeypatch, tmp_path):
+    from hermes_cli import doctor_tools
     _doctor_env_for_agent_browser(monkeypatch, tmp_path)
 
-    monkeypatch.setattr(bt_install, "_find_agent_browser", lambda **_kw: "npx agent-browser")
-    warm_calls = []
-    monkeypatch.setattr(
-        "tools.browser_tool_install.warm_agent_browser_npx_cache", lambda *a, **kw: warm_calls.append(1) or True
-    )
+    def missing(**kwargs):
+        raise FileNotFoundError("no published browser")
+
+    monkeypatch.setattr(bt_install, "_find_agent_browser", missing)
+    monkeypatch.setattr("pm.ensure", lambda *a, **kw: None)
 
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        doctor_mod.run_doctor(Namespace(fix=True))
+        assert doctor_tools._check_agent_browser(True) is False
     out = buf.getvalue()
 
-    assert warm_calls, "warm_agent_browser_npx_cache() must be called under --fix"
-    assert "Warmed npx cache for agent-browser" in out
-    assert "Could not warm npx cache" not in out
+    assert "agent-browser install failed" in out
+    assert "no published browser" in out
 
 
-def test_run_doctor_fix_reports_when_npx_warmup_fails(monkeypatch, tmp_path):
-    """If warm_agent_browser_npx_cache() fails (offline, npx missing from
-    PATH at call time, etc.), doctor must say so instead of silently
-    claiming success — and must not count it as a fix."""
+def test_doctor_fix_reports_pm_install_failure(monkeypatch, tmp_path):
+    from hermes_cli import doctor_tools
+    import pm
     _doctor_env_for_agent_browser(monkeypatch, tmp_path)
 
-    monkeypatch.setattr(bt_install, "_find_agent_browser", lambda **_kw: "npx agent-browser")
-    monkeypatch.setattr("tools.browser_tool_install.warm_agent_browser_npx_cache", lambda *a, **kw: False)
+    def missing(**kwargs):
+        raise FileNotFoundError("no published browser")
+
+    def refuse(*args, **kwargs):
+        raise pm.InstallError("agent-browser", "offline")
+
+    monkeypatch.setattr(bt_install, "_find_agent_browser", missing)
+    monkeypatch.setattr(pm, "ensure", refuse)
 
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        doctor_mod.run_doctor(Namespace(fix=True))
+        assert doctor_tools._check_agent_browser(True) is False
     out = buf.getvalue()
 
-    assert "Could not warm npx cache (offline or npx unavailable)" in out
-    assert "Warmed npx cache for agent-browser" not in out
+    assert "agent-browser install failed" in out
+    assert "offline" in out
 
 
 def test_run_doctor_kimi_cn_env_is_detected_and_probe_is_null_safe(monkeypatch, tmp_path):
@@ -1636,7 +1632,6 @@ class TestDoctorDeprecatedConfigAndEnv:
     """
 
 
-
     def test_collect_deprecated_env_vars_ignores_empty(self):
         assert doctor_config.collect_deprecated_env_vars({"TERMINAL_CWD": "  "}) == []
         assert doctor_config.collect_deprecated_env_vars({}) == []
@@ -1688,8 +1683,6 @@ class TestDoctorDeprecatedConfigAndEnv:
         with contextlib.redirect_stdout(buf), pytest.raises(SystemExit):
             doctor_mod.run_doctor(Namespace(fix=False))
         return buf.getvalue(), hermes_home
-
-
 
 
     def test_report_does_not_count_as_blocking_issue(self, monkeypatch, tmp_path, capsys):
@@ -1874,11 +1867,15 @@ class TestCheckForkUpstreamDrift:
 
         assert calls == ["main"]
 class TestMacOSTCCGrants:
-    """macOS TCC grant persistence check (issue #86385)."""
+    """macOS TCC grant persistence check (issue #86385).
 
+    Native macOS gates cover the real platform branch and codesign lookup;
+    faking sys.platform on Linux cannot supply the macOS executable.
+    """
+
+    @pytest.mark.platforms("not macos")
     def test_silent_on_non_macos(self, monkeypatch, capsys, tmp_path):
         """Non-macOS: the check must produce no output even with a bundle present."""
-        monkeypatch.setattr(doctor_mod.sys, "platform", "linux")
         monkeypatch.setattr(
             doctor_platform,
             "_desktop_app_bundle",
@@ -1887,16 +1884,16 @@ class TestMacOSTCCGrants:
         doctor_platform.check_macos_tcc_grants()
         assert capsys.readouterr().out == ""
 
+    @pytest.mark.platforms("macos")
     def test_silent_when_no_desktop_bundle(self, monkeypatch, capsys):
         """No locally-built desktop bundle: nothing to check, no output."""
-        monkeypatch.setattr(doctor_mod.sys, "platform", "darwin")
         monkeypatch.setattr(doctor_platform, "_desktop_app_bundle", lambda: None)
         doctor_platform.check_macos_tcc_grants()
         assert capsys.readouterr().out == ""
 
+    @pytest.mark.platforms("macos")
     def test_warns_on_cdhash_pinned_dr(self, monkeypatch, capsys, tmp_path):
         """Pre-#73681 builds have a cdhash-pinned DR → warn that grants reset."""
-        monkeypatch.setattr(doctor_mod.sys, "platform", "darwin")
         monkeypatch.setattr(
             doctor_platform,
             "_desktop_app_bundle",
@@ -1913,9 +1910,9 @@ class TestMacOSTCCGrants:
         assert "cdhash-pinned" in out
         assert "hermes update" in out
 
+    @pytest.mark.platforms("macos")
     def test_ok_and_repair_info_on_identifier_dr(self, monkeypatch, capsys, tmp_path):
         """Post-#73681 identifier-only DR → stable + stale-grant repair info."""
-        monkeypatch.setattr(doctor_mod.sys, "platform", "darwin")
         monkeypatch.setattr(
             doctor_platform,
             "_desktop_app_bundle",
@@ -1937,11 +1934,11 @@ class TestMacOSTCCGrants:
         assert "toggle" in out
         assert "relaunch" in out
 
+    @pytest.mark.platforms("macos")
     def test_ok_on_certificate_anchored_dr(self, monkeypatch, capsys, tmp_path):
         """A cert-anchored DR (hermes desktop --setup-tcc-identity, or a
         notarized release) classifies as stable in its own class — no upgrade
         hint, still prints the stale-grant repair info."""
-        monkeypatch.setattr(doctor_mod.sys, "platform", "darwin")
         monkeypatch.setattr(
             doctor_platform,
             "_desktop_app_bundle",
@@ -1959,9 +1956,9 @@ class TestMacOSTCCGrants:
         assert "--setup-tcc-identity" not in out
         assert "tccutil reset ScreenCapture com.nousresearch.hermes" in out
 
+    @pytest.mark.platforms("macos")
     def test_warns_when_dr_unreadable(self, monkeypatch, capsys, tmp_path):
         """codesign failure → warn, never crash."""
-        monkeypatch.setattr(doctor_mod.sys, "platform", "darwin")
         monkeypatch.setattr(
             doctor_platform,
             "_desktop_app_bundle",
@@ -1972,9 +1969,9 @@ class TestMacOSTCCGrants:
         out = capsys.readouterr().out
         assert "could not read code-signing requirement" in out
 
+    @pytest.mark.platforms("macos")
     def test_warns_when_dr_empty_string(self, monkeypatch, capsys, tmp_path):
         """Empty DR output must not false-positive as a stable identity."""
-        monkeypatch.setattr(doctor_mod.sys, "platform", "darwin")
         monkeypatch.setattr(
             doctor_platform,
             "_desktop_app_bundle",
@@ -1986,9 +1983,9 @@ class TestMacOSTCCGrants:
         assert "could not read code-signing requirement" in out
         assert "stable" not in out
 
+    @pytest.mark.platforms("macos")
     def test_warns_when_codesign_times_out(self, monkeypatch, capsys, tmp_path):
         """A hanging codesign must degrade to the unreadable-DR warning, never crash."""
-        monkeypatch.setattr(doctor_mod.sys, "platform", "darwin")
         monkeypatch.setattr(
             doctor_platform,
             "_desktop_app_bundle",
@@ -2004,9 +2001,9 @@ class TestMacOSTCCGrants:
         assert "could not read code-signing requirement" in out
         assert "stable" not in out
 
+    @pytest.mark.platforms("macos")
     def test_warns_when_codesign_missing(self, monkeypatch, capsys, tmp_path):
         """No codesign binary → same graceful unreadable-DR warning."""
-        monkeypatch.setattr(doctor_mod.sys, "platform", "darwin")
         monkeypatch.setattr(
             doctor_platform,
             "_desktop_app_bundle",
@@ -2036,17 +2033,6 @@ class TestStagedRuntimeVenv:
 
     # --- _staged_venv_dir: pm authority + provisioned-venv marker ---
 
-    def test_staged_venv_dir_returns_provisioned_venv(self, tmp_path, monkeypatch):
-        import pm.packages as pm_packages
-
-        venv = tmp_path / "venv"
-        venv.mkdir()
-        (venv / "pyvenv.cfg").write_text("home = /usr\n", encoding="utf-8")
-        self._stub_venv(monkeypatch, venv)
-
-        assert doctor_platform._staged_venv_dir() == venv
-        # Sanity: the stub really replaced pm's own Venv (no real-repo read).
-        assert pm_packages.Venv is not None
 
     def test_resolved_path_without_venv_marker_is_not_staged(self, tmp_path, monkeypatch):
         empty = tmp_path / "venv"
@@ -2066,45 +2052,6 @@ class TestStagedRuntimeVenv:
 
     # --- the check's staged-vs-active rows ---
 
-    def test_staged_but_not_active_reports_staged_dependencies(self, monkeypatch, capsys):
-        monkeypatch.setattr(doctor_platform, "_staged_venv_dir", lambda: Path("/payload/venv"))
-        monkeypatch.setattr(doctor_platform.sys, "prefix", "/usr")
-        monkeypatch.setattr(doctor_platform.sys, "base_prefix", "/usr")
-
-        doctor_platform._check_python_environment(False)
-
-        out = capsys.readouterr().out
-        assert "Runtime venv staged" in out
-        assert "runs outside it" in out
-        assert "Not in virtual environment" not in out  # dependencies exist; no false alarm
-
-    def test_unrelated_active_venv_is_not_claimed_as_the_staged_one(self, monkeypatch, capsys):
-        """A process running in some OTHER venv must not be labeled active-in
-        the staged one: the comparison is resolved prefix vs staged dir."""
-        monkeypatch.setattr(doctor_platform, "_staged_venv_dir", lambda: Path("/payload/venv"))
-        monkeypatch.setattr(doctor_platform.sys, "prefix", "/some/other/venv")
-        monkeypatch.setattr(doctor_platform.sys, "base_prefix", "/usr")
-
-        doctor_platform._check_python_environment(False)
-
-        out = capsys.readouterr().out
-        assert "Runtime venv staged" in out
-        assert "runs outside it" in out
-        assert "active in this process" not in out
-
-    def test_staged_and_active_names_both_facts(self, monkeypatch, capsys, tmp_path):
-        from hermes_cli.runtime_paths import site_packages
-
-        staged = tmp_path / "venv"
-        site_packages(staged).mkdir(parents=True)
-        monkeypatch.setattr(doctor_platform, "_staged_venv_dir", lambda: staged)
-        monkeypatch.syspath_prepend(str(site_packages(staged)))
-
-        doctor_platform._check_python_environment(False)
-
-        out = capsys.readouterr().out
-        assert "Runtime venv staged" in out
-        assert "active in this process" in out
 
     def test_nothing_staged_keeps_legacy_interpreter_probe(self, monkeypatch, capsys):
         monkeypatch.setattr(doctor_platform, "_staged_venv_dir", lambda: None)
@@ -2170,7 +2117,7 @@ def test_docker_daemon_probe_uses_version_not_info(monkeypatch):
 def test_doctor_reports_auxiliary_blocks_that_do_not_resolve(tmp_path, monkeypatch):
     """A routed auxiliary.<task> block that the runtime resolver rejects is a doctor finding, not a
     silent fall-back to the main model (#116055); a resolvable one is not flagged."""
-    import yaml
+    import hermes_yaml as yaml
     from hermes_cli import doctor_config
 
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")

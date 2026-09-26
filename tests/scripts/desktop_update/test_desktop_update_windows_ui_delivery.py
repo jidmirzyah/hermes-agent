@@ -16,7 +16,7 @@ from urllib.request import Request, urlopen
 import pytest
 
 pytestmark = pytest.mark.platforms("windows")
-SCRIPT = Path(__file__).resolve().parents[1] / "scripts/desktop-update/windows.ps1"
+SCRIPT = Path(__file__).resolve().parents[3] / "scripts/desktop-update/windows.ps1"
 
 
 @contextmanager

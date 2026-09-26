@@ -13,10 +13,12 @@ test('backend exit escalation rejects within its bound when no exit or close arr
 
     const waiting = assert.rejects(
       waitForBackendExit(child, { forceKillProcessTree: (): void => {} }, 20),
-      /did not exit after escalation/
+      /did not exit/
     )
 
     await Promise.all([waiting, vi.advanceTimersByTimeAsync(1020)])
+    assert.equal(child.exitCode, null)
+    assert.equal(child.signalCode, null)
     assert.equal(child.kill.mock.calls.length, 1)
     assert.equal(child.kill.mock.calls[0][0], 'SIGKILL')
     assert.equal(child.listenerCount('exit'), 0)

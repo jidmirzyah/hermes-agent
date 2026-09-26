@@ -18,7 +18,10 @@ from typing import Dict, List, Optional, Tuple
 
 from hermes_cli.archive_safe import archive_root_dirs, make_targz, normalize_archive_parts, safe_extract_targz
 from hermes_cli.home_data_layout import PM_RUNTIME_ROOT_DIRS
-from hermes_constants import PROFILE_ID_RE, clear_named_profile_deleted, mark_named_profile_deleted, named_profile_is_deleted
+from hermes_constants import (
+    LOCAL_RUNTIME_ROOT_DIRS, PROFILE_ID_RE, clear_named_profile_deleted, mark_named_profile_deleted,
+    named_profile_has_identity, named_profile_is_deleted, named_profile_is_live,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +51,7 @@ _CLONE_ALL_STRIP: list[str] = ["gateway.pid", "gateway_state.json", "processes.j
 # allow-list instead (``_DEFAULT_EXPORT_INCLUDE_ROOT``): an archive is a portable snapshot,
 # a clone must run. The runtime trio is ``LOCAL_RUNTIME_ROOT_DIRS``, shared with
 # ``hermes_cli.backup._EXCLUDED_ROOT_DIRS`` so the two lists cannot drift.
-_CLONE_ALL_DEFAULT_EXCLUDE_ROOT: frozenset[str] = frozenset({
+_CLONE_ALL_DEFAULT_EXCLUDE_ROOT: frozenset[str] =  frozenset({
     "hermes-agent",
     ".worktrees",
     "profiles",
@@ -58,7 +61,7 @@ _CLONE_ALL_DEFAULT_EXCLUDE_ROOT: frozenset[str] = frozenset({
     # (install/profile bucket split; see test_install_bucket_separation).
     ".hermes-runtime",
     "node",
-})
+}) | LOCAL_RUNTIME_ROOT_DIRS
 
 # Per-profile history excluded from --clone-all for ANY source: SQLite session store
 # (+wal/shm, can reach many GB), session dirs, `hermes backup` archives, quick-backup
@@ -76,11 +79,6 @@ _CLONE_ALL_HISTORY_EXCLUDE_ROOT: frozenset[str] = frozenset({
 # seed_profile_skills() callers (fresh-create, `hermes update` all-profile sync, the
 # dashboard) skip bundled-skill seeding. Delete the file to opt back in.
 NO_BUNDLED_SKILLS_MARKER = ".no-bundled-skills"
-
-# ``profile.yaml`` ``role`` values. A role grants backend capabilities (the setup toolset), so
-# only the backend writes one, and a copy of a profile (clone-all, import) never inherits it.
-SETUP_ROLE = "setup"
-PROFILE_ROLES = frozenset({SETUP_ROLE})
 
 # Header seeded into a profile's empty .env so it owns a credentials file from day one.
 _PLACEHOLDER_ENV = (
@@ -159,7 +157,7 @@ _DEFAULT_EXPORT_EXCLUDE_ROOT = DEFAULT_EXPORT_EXCLUDE_ROOT = frozenset({
     "gateway.pid", "gateway_state.json", "processes.json",
     "auth.json",            # API keys, OAuth tokens, credential pools
     ".env",                 # API keys (dotenv)
-    "auth.lock", "active_profile", ".update_check",
+    "auth.lock", "active_profile", ".update_check", "source-checks",
     "errors.log",
     ".hermes_history",
     # Caches (regenerated on use)
@@ -600,8 +598,6 @@ class ProfileInfo:
     # appends here). Lets Bot Mode group chats re-link persisted member
     # descriptors to the renamed live profile (#110200).
     previous_names: List[str] = field(default_factory=list)
-    # Backend-assigned role (``SETUP_ROLE`` or None). Only ``hermes_cli.setup_profile`` writes it.
-    role: Optional[str] = None
 
 
 def _load_yaml_dict(path: Path) -> Optional[dict]:
@@ -711,11 +707,11 @@ def _seed_model_config(profile_dir: Path) -> None:
     with contextlib.suppress(Exception):  # creation must not fail over this; `hermes model` sets it later
         import hermes_yaml as yaml
         from hermes_constants import get_hermes_home
-        from hermes_cli.config import atomic_config_write, read_user_config_raw
+        from hermes_cli.config import read_user_config_raw
         source = get_hermes_home() / "config.yaml"
         seed = launch_model_seed(read_user_config_raw(source)) if source.is_file() else {}
         if seed:
-            atomic_config_write(config_path, seed)
+            config_path.write_text(yaml.safe_dump(seed, sort_keys=False), encoding="utf-8")
 
 
 def _check_gateway_running(profile_dir: Path) -> bool:
@@ -848,7 +844,6 @@ def read_profile_meta(profile_dir: Path) -> dict:
             "display_name": str(data.get("display_name") or "").strip(),
             "bot_title": bot_title,
             "previous_names": _clean_previous_names(data.get("previous_names")),
-            "role": data.get("role") if data.get("role") in PROFILE_ROLES else None,
         }
 
     # A copy per caller (list included): the cached value is shared, and a caller that mutates
@@ -876,19 +871,13 @@ def _clean_previous_names(raw) -> List[str]:
 def write_profile_meta(
     profile_dir: Path, *, description: Optional[str] = None, description_auto: Optional[bool] = None,
     display_name: Optional[str] = None, previous_names: Optional[List[str]] = None,
-    role: Optional[str] = None,
 ) -> None:
     """Update ``profile.yaml`` in place: only passed fields are overwritten; the file is
-    created if missing. The profile directory itself must exist. ``role`` grants backend
-    capabilities, so no client-facing writer passes it through."""
+    created if missing. The profile directory itself must exist."""
     if not profile_dir.is_dir():
         raise FileNotFoundError(f"profile directory does not exist: {profile_dir}")
-    if role is not None and role not in PROFILE_ROLES:
-        raise ValueError(f"unknown profile role: {role!r}")
     path = profile_dir / "profile.yaml"
     existing: dict = _load_yaml_dict(path) or {}
-    if role is not None:
-        existing["role"] = role
     if description is not None:
         existing["description"] = description.strip()
     if description_auto is not None:
@@ -910,17 +899,6 @@ def write_profile_meta(
     # Atomic write: bare open("w") truncates before the dump, and the read path swallows
     # parse errors as {}, so a crashed write would silently drop unspecified fields.
     # See #51356.
-    from utils import atomic_yaml_write
-    atomic_yaml_write(path, existing, sort_keys=False)
-
-
-def drop_profile_role(profile_dir: Path) -> None:
-    """Remove ``role`` from a copied ``profile.yaml``: a copy is an ordinary profile."""
-    path = profile_dir / "profile.yaml"
-    existing = _load_yaml_dict(path)
-    if not existing or "role" not in existing:
-        return
-    existing.pop("role")
     from utils import atomic_yaml_write
     atomic_yaml_write(path, existing, sort_keys=False)
 
@@ -988,92 +966,19 @@ def list_profiles(*, lazy_skill_count: bool = False) -> List[ProfileInfo]:
     return profiles
 
 
-#: One signature/result per home: the webhook and
-#: api-server callers run :func:`profiles_to_serve` per inbound request, so the reader
-#: must not re-parse a profile's config.yaml every time.
-_STANDALONE_MEMO: Dict[str, Tuple[Optional[tuple], Optional[bool]]] = {}
-_STANDALONE_WARNED = False
-
-_STANDALONE_DEFAULT_WARNING = (
-    "gateway.standalone is ignored on the default profile: it is the host gateway")
-
-
-def profile_is_standalone(home: Path) -> bool:
-    """Does ``home``'s own config.yaml opt this profile out of the host multiplexer
-    (``gateway.standalone: true``)? Memoised by file signature. The DEFAULT profile is
-    never standalone — it IS the host — and warns once per process if the key is set there."""
-    global _STANDALONE_WARNED
-    from yaml import YAMLError
-    from utils import file_signature
-
-    home = Path(home)
-    cfg_path = home / "config.yaml"
-    key = str(home)
-    try:
-        signature = file_signature(cfg_path.stat())
-    except FileNotFoundError:
-        signature = None
-    except OSError as exc:
-        signature = ("stat-error", exc.errno)
-        if _STANDALONE_MEMO.get(key) != (signature, False):
-            logger.warning("Cannot read gateway.standalone from %s (%s); treating as not standalone",
-                           cfg_path, type(exc).__name__)
-        _STANDALONE_MEMO[key] = (signature, False)
-        return False
-    cached = _STANDALONE_MEMO.get(key)
-    if cached is not None and cached[0] == signature and cached[1] is not None:
-        return cached[1]
-    value = None
-    if signature is not None:
-        from hermes_cli.config import read_user_config_raw
-        try:
-            cfg = read_user_config_raw(cfg_path) or {}
-        except (YAMLError, OSError, UnicodeError) as exc:
-            if cached is None or cached[0] != signature:
-                logger.warning("Cannot read gateway.standalone from %s (%s); treating as not standalone",
-                               cfg_path, type(exc).__name__)
-            # Access can recover without changing the signature. None retains the
-            # warning receipt without caching a transient failure as config.
-            _STANDALONE_MEMO[key] = (signature, False if isinstance(exc, YAMLError) else None)
-            return False
-        if isinstance(cfg.get("gateway"), dict):
-            value = cfg["gateway"].get("standalone")
-    result = _standalone_truthy(value)
-    if home == _get_default_hermes_home():
-        if result and not _STANDALONE_WARNED:
-            logger.warning(_STANDALONE_DEFAULT_WARNING)
-            _STANDALONE_WARNED = True
-        result = False
-    _STANDALONE_MEMO[key] = (signature, result)
-    return result
-
-
-def _standalone_truthy(value: object) -> bool:
-    """``gateway.standalone`` truthiness via the shared bool parser; only the
-    ``gateway:`` section's ``standalone`` key is read (no top-level alias)."""
-    from gateway.config import _bool_token
-    if isinstance(value, str):
-        return _bool_token(value) is True
-    return bool(value)
-
-
-def profiles_to_serve(multiplex: bool, *, include_standalone: bool = False) -> List[Tuple[str, Path]]:
+def profiles_to_serve(multiplex: bool) -> List[Tuple[str, Path]]:
     """``(profile_name, hermes_home)`` pairs a gateway should serve — the single chokepoint
     for "which profiles does the inbound gateway handle".
 
     ``multiplex=False``: exactly one entry for the *active* profile (byte-for-byte the
     historical single-profile behavior; name is ``"default"`` or the named profile's id).
     ``multiplex=True``: default plus every live named profile under ``profiles/`` (tombstoned
-    profiles skipped). Pure directory read: never creates a profile dir (#94590).
-
-    Named profiles that authored ``gateway.standalone: true`` are skipped because they opted
-    out of the host multiplexer; callers enumerating INSTALLED profiles pass ``include_standalone=True``."""
+    profiles skipped). Pure directory read: never creates a profile dir (#94590)."""
     active = get_active_profile_name() or "default"
     if not multiplex:
         return [(active, get_profile_dir(active))]
     serve: List[Tuple[str, Path]] = [("default", _get_default_hermes_home())]
-    serve.extend((entry.name, entry) for entry in _iter_named_profile_dirs()
-                 if include_standalone or not profile_is_standalone(entry))
+    serve.extend((entry.name, entry) for entry in _iter_named_profile_dirs())
     return serve
 
 
@@ -1180,10 +1085,9 @@ def _copytree_keep_junctions(src: Path, dst: Path, ignore, dirs_exist_ok: bool =
 
 
 def _clone_all_into(source_dir: Path, profile_dir: Path, canon: str) -> None:
-    """--clone-all: full copytree minus infrastructure/history, then strip runtime files,
-    the backend-assigned role, and cloned single-use OAuth grants."""
+    """--clone-all: full copytree minus infrastructure/history, then strip runtime files
+    and cloned single-use OAuth grants."""
     _copytree_keep_junctions(source_dir, profile_dir, _clone_all_copytree_ignore(source_dir))
-    drop_profile_role(profile_dir)
     materialized = _materialize_symlinked_files(profile_dir)
     if materialized:
         logger.info("profile %s: materialized symlinked %s so the clone never writes through to %s",
@@ -2073,7 +1977,8 @@ def export_profile(name: str, output_path: str, extra_files: Optional[Dict[str, 
     # copy under a temp dir named after the canonical id: root allow-list for default,
     # credential exclusion for named profiles.
     def _ignore_credentials(directory: str, contents: list) -> set:
-        ignored = _EXPORT_CREDENTIAL_FILES & set(contents)
+        ignored = _non_exportable_entries(directory, contents)
+        ignored.update(_EXPORT_CREDENTIAL_FILES & set(contents))
         if Path(directory) == profile_dir:
             ignored |= PM_RUNTIME_ROOT_DIRS & set(contents)
         return ignored

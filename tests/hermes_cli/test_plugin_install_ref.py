@@ -4,14 +4,25 @@ from __future__ import annotations
 
 import argparse
 import json
-import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
+
+from tests.hermes_cli.plugin_worker_support import (
+    isolated_python as isolated_python,
+    plugin_world as plugin_world,
+)
 import hermes_yaml as yaml
 
 from hermes_cli.subcommands.plugins import build_plugins_parser
+
+
+@pytest.fixture(autouse=True)
+def _offline_pm(plugin_world):
+    # Keep real worker publication/rollback, without provisioning pinned tools
+    # into every temporary home. These installs start with no plugin selection.
+    (plugin_world.home / "config.yaml").unlink()
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -307,18 +318,26 @@ def test_checkout_mismatch_is_rejected(monkeypatch, tmp_path):
         _checkout_exact_revision(clone, "git", old_sha)
 
 
-def test_metadata_write_failure_rolls_back_new_install(monkeypatch, tmp_path):
-    from hermes_cli.plugins_cmd import _install_plugin_core
+def test_metadata_write_failure_rolls_back_new_install(monkeypatch, tmp_path, isolated_python):
+    from hermes_cli.plugins_cmd import _install_plugin_core, PluginOperationError
+    from pm import client
+    from tests.pm._fixtures import worker_toolchain
 
     repo, old_sha, _new_sha = _plugin_repo(tmp_path)
     home = tmp_path / "home"
     monkeypatch.setenv("HERMES_HOME", str(home))
-    monkeypatch.setattr(
-        "hermes_cli.plugins_cmd._write_install_metadata",
-        lambda _metadata: (_ for _ in ()).throw(OSError("disk full")),
-    )
+    metadata = home / "plugins" / ".install-metadata.json"
+    # The PM worker process publishes the plugin; fail its metadata write there.
+    worker_toolchain(client, monkeypatch, isolated_python,
+        "import pm.publication as publication\n"
+        "original = publication._atomic_bytes\n"
+        "def fail_metadata(path, data):\n"
+        f"    if Path(path) == Path({str(metadata)!r}):\n"
+        "        raise OSError('disk full')\n"
+        "    return original(path, data)\n"
+        "publication._atomic_bytes = fail_metadata\n")
 
-    with pytest.raises(OSError, match="disk full"):
+    with pytest.raises(PluginOperationError, match="disk full"):
         _install_plugin_core(repo.as_uri(), force=False, ref=old_sha)
 
     assert not (home / "plugins" / "demo").exists()
@@ -350,7 +369,8 @@ def test_metadata_write_failure_rolls_back_removal(monkeypatch, tmp_path):
 
 
 def test_reinstall_after_manual_directory_removal_retains_pin(monkeypatch, tmp_path):
-    from hermes_cli.plugins_cmd import _install_plugin_core, _rmtree_force
+    from hermes_cli.plugins_cmd import _install_plugin_core
+    from utils import rmtree_readonly
 
     repo, old_sha, _new_sha = _plugin_repo(tmp_path)
     home = tmp_path / "home"
@@ -358,7 +378,7 @@ def test_reinstall_after_manual_directory_removal_retains_pin(monkeypatch, tmp_p
     target, _manifest, _name = _install_plugin_core(
         repo.as_uri(), force=False, ref=old_sha
     )
-    _rmtree_force(target)
+    rmtree_readonly(target)
 
     target, _manifest, _name = _install_plugin_core(repo.as_uri(), force=False)
 

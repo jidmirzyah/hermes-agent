@@ -18,6 +18,7 @@ export interface BackendConnectionState<TProcess, TConnection> {
   startAttempt(): BackendConnectionAttempt<TConnection>
   setPromise(attempt: BackendConnectionAttempt<TConnection>, promise: Promise<TConnection>): boolean
   isCurrentAttempt(attempt: BackendConnectionAttempt<TConnection>): boolean
+  assertCurrentAttempt(attempt: BackendConnectionAttempt<TConnection>): void
   attachProcess(attempt: BackendConnectionAttempt<TConnection>, process: TProcess): BackendProcessOwner<TProcess> | null
   claimProcess(
     attempt: BackendConnectionAttempt<TConnection>,

@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, symlinkSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, symlinkSync, statSync, utimesSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { createRequire } from 'node:module'
@@ -210,10 +210,128 @@ test('TUI failure does not publish or disturb a previous product, and missing pr
   expect(existsSync(out)).toBe(false)
   dependency(source, '', 'esbuild')
   await buildTui({ source, out })
+  const { productCurrent } = await import('../scripts/build/freshness.mjs')
+  expect(productCurrent({ source, product: 'tui', out: path.join(out, 'dist') })).toBe(true)
   const previous = readFileSync(path.join(out, 'dist/entry.js'))
   put(source, 'ui-tui/src/entry.tsx', 'const broken = ;')
   await expect(buildTui({ source, out })).rejects.toThrow()
+  expect(productCurrent({ source, product: 'tui', out: path.join(out, 'dist') })).toBe(false)
   expect(readFileSync(path.join(out, 'dist/entry.js'))).toEqual(previous)
   await expect(buildTui({ source, out: source })).rejects.toThrow(/output/i)
   expect(existsSync(path.join(source, 'ui-tui/src/entry.tsx'))).toBe(true)
+})
+
+test('built web freshness follows shared sources and build inputs, not mtimes or generated trees', async () => {
+  const { productCurrent } = await import('../scripts/build/freshness.mjs')
+  const base = fixture()
+  const source = path.join(base, 'source')
+  const icons = path.join(base, 'icons')
+  const out = path.join(base, 'web')
+  webSource(source)
+  dependency(source, '', 'typescript')
+  dependency(source, '', 'vite')
+  put(icons, 'web/public/favicon.ico', 'icon')
+  put(source, 'apps/shared/src/client.ts', 'export const version = 1')
+  put(source, 'scripts/build/web.mjs', '// build input')
+  await buildWeb({ source, icons, out })
+  expect(productCurrent({ source, product: 'web', out })).toBe(true)
+  put(source, 'web/node_modules/.tmp/tsbuildinfo', 'generated')
+  expect(productCurrent({ source, product: 'web', out })).toBe(true)
+  put(icons, 'web/public/favicon.ico', 'changed prepared icon')
+  expect(productCurrent({ source, product: 'web', out })).toBe(false)
+  await buildWeb({ source, icons, out })
+  expect(readFileSync(path.join(out, 'favicon.ico'), 'utf8')).toBe('changed prepared icon')
+  for (const input of ['apps/shared/src/client.ts', 'scripts/build/web.mjs', 'assets/icon.svg', 'package-lock.json']) {
+    put(source, input, 'changed input')
+    expect(productCurrent({ source, product: 'web', out }), input).toBe(false)
+    await buildWeb({ source, icons, out })
+    expect(productCurrent({ source, product: 'web', out })).toBe(true)
+  }
+  expect(productCurrent({ source, product: 'desktop', out })).toBe(false)
+  rmSync(path.join(out, 'favicon.ico'))
+  expect(productCurrent({ source, product: 'web', out })).toBe(false)
+}, 30_000)
+
+test('built TUI stays current after documentation, test and unrelated recipe changes', async () => {
+  const { productCurrent } = await import('../scripts/build/freshness.mjs')
+  const base = fixture()
+  const source = path.join(base, 'source')
+  const out = path.join(base, 'tui')
+  tuiSource(source)
+  dependency(source, '', 'esbuild')
+  put(source, 'apps/shared/src/value.ts', 'export const value: string = "shared source";')
+  await buildTui({ source, out })
+  const entry = path.join(out, 'dist/entry.js')
+  const before = readFileSync(entry)
+  for (const name of [
+    'ui-tui/README.md', 'ui-tui/src/__tests__/new.test.ts', 'ui-tui/src/value.spec.ts',
+    'ui-tui/packages/hermes-ink/src/value.test.ts', 'apps/shared/src/value.test.ts',
+    'apps/shared/README.md', 'scripts/build/web.mjs', 'scripts/build/desktop.mjs',
+    'scripts/build/README.md', 'scripts/build/node-deps.mjs',
+  ]) {
+    put(source, name, 'not a compiler input')
+    expect(productCurrent({ source, product: 'tui', out: path.join(out, 'dist') }), name).toBe(true)
+  }
+  await buildTui({ source, out })
+  expect(readFileSync(entry)).toEqual(before)
+  expect(execFileSync(process.execPath, [entry], { encoding: 'utf8' }).trim()).toBe('prepared source')
+})
+
+test('TUI freshness invalidates source, configuration and compiler inputs and damaged outputs', async () => {
+  const { productCurrent } = await import('../scripts/build/freshness.mjs')
+  const base = fixture()
+  const source = path.join(base, 'source')
+  const out = path.join(base, 'tui')
+  tuiSource(source)
+  dependency(source, '', 'esbuild')
+  // Include the shared workspace in the real compiler graph, not just the receipt.
+  put(source, 'ui-tui/src/value.ts', 'export const value: string = "shared source";')
+  put(source, 'apps/shared/src/value.ts', 'export { value } from "../../../ui-tui/src/value";')
+  put(source, 'ui-tui/src/entry.tsx', 'import { value } from "../../apps/shared/src/value"; console.log(value);')
+  put(source, 'package-lock.json', '{"lockfileVersion":3}')
+  const preservedTimes = new Date('2020-01-01T00:00:00Z')
+  const sameLengthChanges = [
+    ['ui-tui/src/value.ts', 'shared', 'edited'],
+    ['apps/shared/src/value.ts', 'value', 'VALUE'],
+    ['package.json', 'true', 'null'],
+    ['package-lock.json', ':3', ':2'],
+  ]
+  for (const [name] of sameLengthChanges) utimesSync(path.join(source, name), preservedTimes, preservedTimes)
+  await buildTui({ source, out })
+  const current = () => productCurrent({ source, product: 'tui', out: path.join(out, 'dist') })
+  expect(current()).toBe(true)
+  for (const [name, from, to] of sameLengthChanges) {
+    const file = path.join(source, name), previous = readFileSync(file, 'utf8'), before = statSync(file)
+    expect(previous).toContain(from)
+    writeFileSync(file, previous.replace(from, to))
+    utimesSync(file, preservedTimes, preservedTimes)
+    expect([statSync(file).size, statSync(file).mtimeMs]).toEqual([before.size, before.mtimeMs])
+    expect(current(), `same-size and same-mtime change in ${name}`).toBe(false)
+    writeFileSync(file, previous)
+    utimesSync(file, preservedTimes, preservedTimes)
+    expect(current(), `restored ${name}`).toBe(true)
+  }
+  for (const name of [
+    'ui-tui/src/value.ts', 'apps/shared/src/value.ts',
+    'ui-tui/packages/hermes-ink/src/entry-exports.ts',
+    'ui-tui/tsconfig.json', 'ui-tui/packages/hermes-ink/tsconfig.json', 'apps/shared/tsconfig.json',
+    'ui-tui/package.json', 'ui-tui/packages/hermes-ink/package.json', 'apps/shared/package.json',
+    'tsconfig.json', 'package.json', 'package-lock.json', '.npmrc', 'pm/lock.json',
+    'scripts/build/tui.mjs', 'scripts/build/frontend-common.mjs', 'scripts/build/freshness.mjs',
+  ]) {
+    const file = path.join(source, name)
+    const previous = existsSync(file) ? readFileSync(file) : null
+    put(source, name, 'changed input')
+    expect(current(), name).toBe(false)
+    if (previous) writeFileSync(file, previous)
+    else rmSync(file)
+    expect(current(), `restored ${name}`).toBe(true)
+  }
+  put(source, 'ui-tui/src/value.ts', 'export const value: string = "rebuilt source";')
+  await buildTui({ source, out })
+  expect(current()).toBe(true)
+  const entry = path.join(out, 'dist/entry.js')
+  expect(execFileSync(process.execPath, [entry], { encoding: 'utf8' }).trim()).toBe('rebuilt source')
+  writeFileSync(entry, 'damaged output')
+  expect(current()).toBe(false)
 })

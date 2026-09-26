@@ -1359,7 +1359,7 @@ class TestQuarantineBundleBinaryAssets:
         assert (q_path / "SKILL.md").read_bytes() == bundle.files["SKILL.md"].encode("utf-8")
         assert content_hash(q_path) == bundle_content_hash(bundle)
 
-    @pytest.mark.windows_only
+    @pytest.mark.platforms("windows")
     def test_quarantine_bundle_hash_matches_bundle_on_windows(self, tmp_path):
         """Real Windows text mode: the quarantined SKILL.md hashes like the fetched bundle (#117181)."""
         import tools.skills_hub as hub

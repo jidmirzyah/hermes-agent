@@ -497,7 +497,7 @@ def allowlist_path() -> Path:
 def load_allowlist() -> Dict[str, Any]:
     """Return the parsed allowlist, or an empty skeleton if absent."""
     try:
-        raw = json.loads(allowlist_path().read_text(encoding="utf-8-sig"))  # MERGE-CHECK: kept ours (utf-8-sig BOM tolerance) + theirs (raw=None path)
+        raw = json.loads(allowlist_path().read_text(encoding="utf-8-sig"))
     except (json.JSONDecodeError, OSError):
         raw = None
     if not isinstance(raw, dict):

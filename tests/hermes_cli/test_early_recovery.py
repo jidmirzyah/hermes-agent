@@ -90,7 +90,7 @@ def test_recovery_obeys_live_owner_and_single_flight(tmp_path, monkeypatch):
 
 
 def test_missing_environment_cannot_write_a_retry_marker_without_lock(tmp_path, monkeypatch):
-    from hermes_cli.runtime_paths import install_state_dir, runtime_facts_path
+    from pm.environments import install_state_dir, runtime_facts_path
     from pm.lock import Facts
 
     root = _project(tmp_path)

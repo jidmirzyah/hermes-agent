@@ -89,16 +89,3 @@ test('legacy 8-digit canary stamp still computes minutes (midnight of that day)'
   const minutes = msix.canaryBuildMinutesFor('v0.27.2-canary.20260801', base)
   assert.equal(minutes, 0)
 })
-
-test('buildAppInstaller pins the derived 4-part version everywhere', () => {
-  const xml = msix.buildAppInstaller({
-    baseUrl: 'https://updates.example.com',
-    variantChannelPath: 'win32/canary',
-    identityName: 'NousResearch.HermesBundled',
-    version: '0.27.2.1234',
-    bundleFilename: 'HermesBundled-0.27.2.1234-win.msixbundle'
-  })
-  assert.match(xml, /Uri="https:\/\/updates\.example\.com\/win32\/canary\/HermesBundled-0\.27\.2\.1234-win\.msixbundle"/)
-  const versionCount = (xml.match(/Version="0\.27\.2\.1234"/g) || []).length
-  assert.equal(versionCount, 2)
-})

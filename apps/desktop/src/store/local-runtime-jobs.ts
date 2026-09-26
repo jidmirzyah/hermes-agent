@@ -1,274 +1,372 @@
-import { atom } from 'nanostores'
+import type { QueryClient } from '@tanstack/react-query'
+import {
+  MutationObserver,
+  type Query,
+  type QueryCacheNotifyEvent,
+  type QueryKey,
+  QueryObserver,
+  type QueryObserverResult,
+  queryOptions,
+  useQuery,
+  useQueryClient,
+  type UseQueryOptions,
+  type UseQueryResult
+} from '@tanstack/react-query'
+import { useEffect, useMemo } from 'react'
 
-import { getApiRequestConnection } from '@/api/client'
-import { getLocalModelsJobs, installLocalRuntime } from '@/hermes'
+import { $apiRequestScope, getApiRequestConnection, getApiRequestProfile } from '@/api/client'
+import type { LocalModelsScope } from '@/api/local-models'
+import {
+  getLocalCatalog,
+  getLocalHardware,
+  getLocalModelsJobs,
+  getLocalModelsStatus,
+  installLocalRuntime
+} from '@/hermes'
 import { translateNow } from '@/i18n'
-import { $activeGatewayRoute } from '@/store/gateway'
-import { $localModelsEnabled } from '@/store/local-models-flag'
+import { queryClient } from '@/lib/query-client'
+import { useStoresSelector } from '@/lib/use-session-slice'
 import { notify, notifyError } from '@/store/notifications'
 import { $connection } from '@/store/session'
-import type { LocalRuntimeJob } from '@/types/hermes'
+import type { LocalCatalogModel, LocalHardware, LocalModelsStatus, LocalRuntimeJob } from '@/types/hermes'
 
-// App-level tracker for local-runtime jobs (runtime installs, model
-// downloads). The AUTHORITY is the backend job registry — this store is a
-// cache of it (desktop guide: server truth is cached, not owned). Living at
-// the store layer, not in the settings pane, is what makes a download
-// survive the pane unmounting: anything can start a job, the poller follows
-// it to completion, and completion/failure notify app-wide exactly once.
+export interface LocalModelsOwner extends LocalModelsScope {
+  // Legacy primary routes have no registry pin. Fence them by endpoint instead.
+  legacyBaseUrl?: string
+}
 
-export const $localRuntimeJobs = atom<readonly LocalRuntimeJob[]>([])
+export function localModelsOwner(profile?: string, connectionId?: string): LocalModelsOwner {
+  const pin: string | null = connectionId ?? getApiRequestConnection()
 
-export const $localRuntimeInstallStarting = atom(false)
+  return {
+    connectionId: pin,
+    profile: profile ?? getApiRequestProfile() ?? 'default',
+    ...(pin ? {} : { legacyBaseUrl: $connection.get()?.baseUrl ?? '' })
+  }
+}
 
-// Shared by the settings button and the campaign CTA. This is request state,
-// not invented job progress; the backend registry still owns the actual work.
-export function localRuntimeInstallBusy(): boolean {
-  return (
-    $localRuntimeInstallStarting.get() ||
-    $localRuntimeJobs
-      .get()
-      .some(job => job.status === 'running' && (job.kind === 'runtime-install' || job.kind === 'quickstart'))
+export function useLocalModelsOwner(profile?: string, connectionId?: string): LocalModelsOwner {
+  const identity: string = useStoresSelector([$apiRequestScope, $connection], (): string =>
+    JSON.stringify(localModelsOwner(profile, connectionId))
   )
+
+  return useMemo((): LocalModelsOwner => JSON.parse(identity) as LocalModelsOwner, [identity])
 }
 
-export async function startLocalRuntimeInstall(): Promise<void> {
-  if (localRuntimeInstallBusy()) {
-    return
+export function localModelsKey(owner: LocalModelsOwner, resource?: string): QueryKey {
+  return [
+    'local-models',
+    owner.connectionId ?? `legacy:${owner.legacyBaseUrl ?? ''}`,
+    owner.profile,
+    ...(resource ? [resource] : [])
+  ]
+}
+
+export function localModelsRequestScope(owner: LocalModelsOwner): LocalModelsScope {
+  if (!owner.connectionId && owner.legacyBaseUrl !== ($connection.get()?.baseUrl ?? '')) {
+    throw new Error('Local models connection changed')
   }
 
-  const owner = activeContext
-  owner.postPending = true
-  $localRuntimeInstallStarting.set(true)
+  return { connectionId: owner.connectionId, profile: owner.profile }
+}
 
-  try {
-    const { job_id } = await installLocalRuntime()
-    owner.acceptedIds.add(job_id)
-    owner.postPending = false
-    owner.readPending = true
-    owner.acceptedInstall++
+export function isCurrentLocalModelsOwner(owner: LocalModelsOwner): boolean {
+  return JSON.stringify(localModelsKey(owner)) === JSON.stringify(localModelsKey(localModelsOwner()))
+}
 
-    if (owner !== activeContext) {
+export function localModelsNotificationTitle(owner: LocalModelsOwner): string {
+  localModelsRequestScope(owner)
+  const title: string = translateNow('settings.localModels.title')
+
+  return isCurrentLocalModelsOwner(owner)
+    ? title
+    : `${title} · ${owner.connectionId ?? owner.legacyBaseUrl} / ${owner.profile}`
+}
+
+export function localModelsStatusOptions(owner: LocalModelsOwner): UseQueryOptions<LocalModelsStatus> {
+  return queryOptions({
+    queryKey: localModelsKey(owner, 'status'),
+    queryFn: async (): Promise<LocalModelsStatus> => {
+      const status: LocalModelsStatus = await getLocalModelsStatus(localModelsRequestScope(owner))
+      localModelsRequestScope(owner)
+
+      return status
+    },
+    retry: false
+  })
+}
+
+interface StatusWatch {
+  observer: QueryObserver<LocalModelsStatus>
+  users: number
+}
+const statusWatches: WeakMap<QueryClient, Map<string, StatusWatch>> = new WeakMap()
+
+export function useLocalModelsStatus(
+  owner: LocalModelsOwner,
+  enabled: boolean = true
+): UseQueryResult<LocalModelsStatus> {
+  const client: QueryClient = useQueryClient()
+  const result: UseQueryResult<LocalModelsStatus> = useQuery({ ...localModelsStatusOptions(owner), enabled: false })
+  useEffect((): (() => void) | undefined => {
+    if (!enabled) {
       return
     }
 
-    // The pane can mount while this POST resolves. Hold the shared lock
-    // through a fresh read, not merely until the request was accepted.
-    await polling
+    let watches: Map<string, StatusWatch> | undefined = statusWatches.get(client)
 
-    if (owner !== activeContext) {
-      return
+    if (!watches) {
+      watches = new Map()
+      statusWatches.set(client, watches)
     }
 
-    await poll()
-  } catch (error) {
-    if (owner === activeContext) {
-      notifyError(error, translateNow('settings.localModels.installFailed'))
-    }
-  } finally {
-    owner.postPending = false
+    const key: string = JSON.stringify(localModelsKey(owner, 'status'))
+    let watch: StatusWatch | undefined = watches.get(key)
 
-    if (owner === activeContext && !owner.readPending) {
-      $localRuntimeInstallStarting.set(false)
+    if (!watch) {
+      const observer: QueryObserver<LocalModelsStatus> = new QueryObserver<LocalModelsStatus>(client, {
+        ...localModelsStatusOptions(owner),
+        refetchInterval: 2_000
+      })
+
+      watch = { observer, users: 0 }
+      watches.set(key, watch)
+      observer.subscribe((): void => {})
     }
-  }
+
+    const acquired: StatusWatch = watch
+    acquired.users += 1
+
+    return (): void => {
+      acquired.users -= 1
+
+      if (acquired.users === 0) {
+        acquired.observer.destroy()
+        watches.delete(key)
+      }
+    }
+  }, [client, owner, enabled])
+
+  return result
 }
 
-const POLL_ACTIVE_MS = 700
-const POLL_PAUSED_MS = 3_000
-let timer: null | number = null
-// Jobs we've already toasted for, so a poll race can't double-notify.
-const settledNotified = new Set<string>()
+export function localModelsCatalogOptions(owner: LocalModelsOwner): UseQueryOptions<LocalCatalogModel[]> {
+  return queryOptions({
+    queryKey: localModelsKey(owner, 'catalog'),
+    queryFn: async (): Promise<LocalCatalogModel[]> => {
+      const { models } = await getLocalCatalog(localModelsRequestScope(owner))
+      localModelsRequestScope(owner)
 
-// The active set: running OR paused. Paused is NOT settled — it is user
-// intent, not failure — and a paused job that later runs again must stay
-// tracked so its eventual done/error notifies exactly once.
+      return models
+    },
+    retry: false
+  })
+}
+
+export function localModelsHardwareOptions(owner: LocalModelsOwner): UseQueryOptions<LocalHardware> {
+  return queryOptions({
+    queryKey: localModelsKey(owner, 'hardware'),
+    queryFn: async (): Promise<LocalHardware> => {
+      const hardware: LocalHardware = await getLocalHardware(localModelsRequestScope(owner))
+      localModelsRequestScope(owner)
+
+      return hardware
+    },
+    retry: false
+  })
+}
+
+const EMPTY_JOBS: readonly LocalRuntimeJob[] = []
+
 function isActive(status: LocalRuntimeJob['status']): boolean {
   return status === 'paused' || status === 'running'
 }
 
-// A job is the same observation unless ANY user-visible payload changed —
-// bytes, percent, phase, detail, error, control flags, and the per-file
-// ranges. The backend re-sorts jobs per poll, so compare by id, not index.
-function jobEqual(a: LocalRuntimeJob, b: LocalRuntimeJob): boolean {
-  return (
-    a.job_id === b.job_id &&
-    a.status === b.status &&
-    a.phase === b.phase &&
-    a.detail === b.detail &&
-    a.done_bytes === b.done_bytes &&
-    a.total_bytes === b.total_bytes &&
-    a.percent === b.percent &&
-    a.error === b.error &&
-    a.can_pause === b.can_pause &&
-    a.can_resume === b.can_resume &&
-    a.pause_requested === b.pause_requested &&
-    rangesEqual(a.ranges, b.ranges)
-  )
-}
+export function localModelsJobsOptions(owner: LocalModelsOwner): UseQueryOptions<readonly LocalRuntimeJob[]> {
+  return queryOptions({
+    queryKey: localModelsKey(owner, 'jobs'),
+    refetchOnMount: 'always',
+    queryFn: async (): Promise<readonly LocalRuntimeJob[]> => {
+      const { jobs } = await getLocalModelsJobs(localModelsRequestScope(owner))
+      localModelsRequestScope(owner)
 
-function rangesEqual(
-  a: Record<string, [number, number][]> | undefined,
-  b: Record<string, [number, number][]> | undefined
-): boolean {
-  if (a === b) {
-    return true
-  }
+      // Normalize backend ordering; QueryClient does all structural sharing.
+      return [...jobs].sort((a: LocalRuntimeJob, b: LocalRuntimeJob): number => a.job_id.localeCompare(b.job_id))
+    },
+    refetchInterval: (query: Query<readonly LocalRuntimeJob[]>): number | false => {
+      if (!owner.connectionId && owner.legacyBaseUrl !== ($connection.get()?.baseUrl ?? '')) {
+        return false
+      }
 
-  if (!a || !b) {
-    return false
-  }
+      const jobs: readonly LocalRuntimeJob[] = query.state.data ?? EMPTY_JOBS
 
-  const keysA = Object.keys(a)
-  const keysB = Object.keys(b)
-
-  if (keysA.length !== keysB.length) {
-    return false
-  }
-
-  return keysA.every(key => {
-    const ra = a[key]
-    const rb = b[key]
-
-    if (!ra || !rb || ra.length !== rb.length) {
-      return false
-    }
-
-    return ra.every((range, i) => range[0] === rb[i]?.[0] && range[1] === rb[i]?.[1])
+      return jobs.some((job: LocalRuntimeJob): boolean => job.status === 'running')
+        ? 700
+        : jobs.some((job: LocalRuntimeJob): boolean => job.status === 'paused')
+          ? 3_000
+          : false
+    },
+    refetchIntervalInBackground: true,
+    retry: false
   })
 }
 
-function jobsEqual(a: readonly LocalRuntimeJob[], b: readonly LocalRuntimeJob[]) {
-  return a.length === b.length && a.every(job => b.some(other => jobEqual(job, other)))
+// Only observers and transition identities live here. All payloads, request
+// deduplication, structural sharing and poll scheduling belong to QueryClient.
+const watchers: WeakMap<QueryClient, Map<string, QueryObserver<readonly LocalRuntimeJob[]>>> = new WeakMap()
+
+export function refreshLocalModels(owner: LocalModelsOwner, client: QueryClient = queryClient): void {
+  if (!owner.connectionId && !isCurrentLocalModelsOwner(owner)) {
+    return
+  }
+
+  void client.invalidateQueries(
+    { queryKey: localModelsKey(owner), predicate: (query: Query): boolean => query.queryKey[3] !== 'jobs' },
+    { cancelRefetch: false }
+  )
+  void client.invalidateQueries(
+    {
+      predicate: (query: Query): boolean =>
+        query.queryKey[0] === 'model-options' &&
+        query.queryKey[1] === owner.profile &&
+        (owner.connectionId ? query.queryKey[4] === owner.connectionId : query.queryKey.length === 3)
+    },
+    { cancelRefetch: false }
+  )
 }
 
-function notifySettled(previous: readonly LocalRuntimeJob[], next: readonly LocalRuntimeJob[]) {
-  const wasActive = new Set(previous.filter(j => isActive(j.status)).map(j => j.job_id))
+export function watchLocalRuntimeJobs(
+  owner: LocalModelsOwner = localModelsOwner(),
+  client: QueryClient = queryClient
+): void {
+  let owners: Map<string, QueryObserver<readonly LocalRuntimeJob[]>> | undefined = watchers.get(client)
 
-  for (const job of next) {
-    if (isActive(job.status) || !wasActive.has(job.job_id) || settledNotified.has(job.job_id)) {
-      continue
+  if (!owners) {
+    owners = new Map()
+    watchers.set(client, owners)
+    client.getQueryCache().subscribe((event: QueryCacheNotifyEvent): void => {
+      if (event.type === 'removed') {
+        const id: string = JSON.stringify(event.query.queryKey)
+        const observer: QueryObserver<readonly LocalRuntimeJob[]> | undefined = watchers.get(client)?.get(id)
+
+        if (!observer) {
+          return
+        }
+
+        observer.destroy()
+        watchers.get(client)?.delete(id)
+      }
+    })
+  }
+
+  const key: QueryKey = localModelsKey(owner, 'jobs')
+  const id: string = JSON.stringify(key)
+
+  if (owners.has(id)) {
+    // In-flight refresh signals need one trailing read. All callers await the
+    // same Query promise, then QueryClient coalesces their trailing refetches.
+    if (client.getQueryState(key)?.fetchStatus === 'fetching') {
+      void client
+        .fetchQuery({ ...localModelsJobsOptions(owner), staleTime: 0 })
+        .catch((): void => {})
+        .then((): Promise<void> => client.refetchQueries({ queryKey: key, exact: true }, { cancelRefetch: false }))
+    } else {
+      void client.refetchQueries({ queryKey: key, exact: true }, { cancelRefetch: false })
     }
 
-    settledNotified.add(job.job_id)
-    acceptedIds.delete(job.job_id)
+    return
+  }
 
-    if (job.status === 'done') {
-      notify({
-        durationMs: 6_000,
-        kind: 'success',
-        title: translateNow('settings.localModels.title'),
-        message:
-          job.kind === 'model-download'
-            ? translateNow('settings.localModels.downloadDoneToast', job.target)
-            : job.kind === 'model-activate'
-              ? translateNow('settings.localModels.activateDoneToast', job.target)
-              : job.kind === 'quickstart'
-                ? translateNow('settings.localModels.quickstartDoneToast', job.target)
-                : translateNow('settings.localModels.installDoneToast')
-      })
-    } else {
-      notifyError(
-        new Error(job.error ?? job.detail ?? 'failed'),
+  const observer: QueryObserver<readonly LocalRuntimeJob[]> = new QueryObserver<readonly LocalRuntimeJob[]>(
+    client,
+    localModelsJobsOptions(owner)
+  )
+
+  owners.set(id, observer)
+  let active: Set<string> = new Set()
+  let downloading: Set<string> = new Set()
+  const settledNotified: Set<string> = new Set()
+  observer.subscribe((result: QueryObserverResult<readonly LocalRuntimeJob[]>): void => {
+    if (!result.isSuccess || result.isFetching) {
+      return
+    }
+
+    const jobs: readonly LocalRuntimeJob[] = result.data
+
+    const nextDownloads: Set<string> = new Set(
+      runningModelDownloads(jobs).map((job: LocalRuntimeJob): string => job.job_id)
+    )
+
+    let changed: boolean = [...downloading].some((jobId: string): boolean => !nextDownloads.has(jobId))
+
+    for (const job of jobs) {
+      if (isActive(job.status) || !active.has(job.job_id) || settledNotified.has(job.job_id)) {
+        continue
+      }
+
+      settledNotified.add(job.job_id)
+      changed = true
+      notifySettled(owner, job)
+    }
+
+    active = new Set(
+      jobs
+        .filter((job: LocalRuntimeJob): boolean => isActive(job.status))
+        .map((job: LocalRuntimeJob): string => job.job_id)
+    )
+    downloading = nextDownloads
+
+    if (changed) {
+      refreshLocalModels(owner, client)
+    }
+  })
+}
+
+export function useLocalRuntimeJobs<T>(
+  owner: LocalModelsOwner,
+  select: (jobs: readonly LocalRuntimeJob[]) => T,
+  enabled: boolean = true
+): T {
+  const client: QueryClient = useQueryClient()
+  const result: UseQueryResult<T> = useQuery({ ...localModelsJobsOptions(owner), enabled: false, select })
+  useEffect((): void => {
+    if (enabled) {
+      watchLocalRuntimeJobs(owner, client)
+    }
+  }, [client, owner, enabled])
+
+  return result.data ?? select(EMPTY_JOBS)
+}
+
+function notifySettled(owner: LocalModelsOwner, job: LocalRuntimeJob): void {
+  if (job.status === 'done') {
+    notify({
+      durationMs: 6_000,
+      kind: 'success',
+      title: localModelsNotificationTitle(owner),
+      message:
         job.kind === 'model-download'
+          ? translateNow('settings.localModels.downloadDoneToast', job.target)
+          : job.kind === 'model-activate'
+            ? translateNow('settings.localModels.activateDoneToast', job.target)
+            : job.kind === 'quickstart'
+              ? translateNow('settings.localModels.quickstartDoneToast', job.target)
+              : translateNow('settings.localModels.installDoneToast')
+    })
+  } else {
+    notifyError(
+      new Error(job.error ?? job.detail ?? 'failed'),
+      localModelsNotificationTitle(owner) +
+        ': ' +
+        (job.kind === 'model-download'
           ? translateNow('settings.localModels.downloadFailed', job.target)
           : job.kind === 'model-activate'
             ? translateNow('settings.localModels.activateFailed', job.target)
             : job.kind === 'quickstart'
               ? translateNow('settings.localModels.quickstartFailed')
-              : translateNow('settings.localModels.installFailed')
-      )
-    }
+              : translateNow('settings.localModels.installFailed'))
+    )
   }
-}
-
-let inFlight = false
-let refreshRequested = false
-
-async function poll(): Promise<void> {
-  timer = null
-  inFlight = true
-
-  try {
-    const { jobs } = await getLocalModelsJobs()
-    const previous = $localRuntimeJobs.get()
-
-    if (!jobsEqual(previous, jobs)) {
-      notifySettled(previous, jobs)
-      $localRuntimeJobs.set(jobs)
-    }
-  } catch {
-    // Preserve the last snapshot while the backend is unreachable.
-  } finally {
-    inFlight = false
-  }
-
-  if (refreshRequested) {
-    refreshRequested = false
-    void poll()
-
-    return
-  }
-
-  const jobs = $localRuntimeJobs.get()
-  const anyRunning = jobs.some(job => job.status === 'running')
-
-  if (anyRunning || jobs.some(job => job.status === 'paused')) {
-    timer = window.setTimeout(() => void poll(), anyRunning ? POLL_ACTIVE_MS : POLL_PAUSED_MS)
-  }
-
-  timer = null
-  polling = (async () => {
-    try {
-      const { jobs } = await getLocalModelsJobs()
-
-      if (context !== generation || accepted !== owner.acceptedInstall) {
-        return
-      }
-
-      const previous = $localRuntimeJobs.get()
-
-      // Acceptance can arrive after a pane already read the terminal job.
-      notifySettled(previous, jobs)
-
-      if (!jobsEqual(previous, jobs)) {
-        $localRuntimeJobs.set(jobs)
-      }
-
-      owner.jobs = jobs
-
-      if (owner.readPending) {
-        owner.readPending = false
-        $localRuntimeInstallStarting.set(owner.postPending)
-      }
-    } catch {
-      // Backend unreachable — keep the last snapshot; the next poll retries.
-    } finally {
-      if (context === generation) {
-        polling = null
-
-        if (owner.readPending || $localRuntimeJobs.get().some(j => j.status === 'running')) {
-          timer = setTimeout(() => void poll(), POLL_ACTIVE_MS)
-        }
-      }
-    }
-  })()
-
-  return polling
-}
-
-export function watchLocalRuntimeJobs(): void {
-  if (inFlight) {
-    refreshRequested = true
-
-    return
-  }
-
-  if (timer !== null) {
-    window.clearTimeout(timer)
-    timer = null
-  }
-
-  void poll()
 }
 
 // Selector: the in-flight (running or paused) download job for a catalog
@@ -301,4 +399,83 @@ export function runningModelDownloads(jobs: readonly LocalRuntimeJob[]): LocalRu
 
 export function runningRuntimeInstall(jobs: readonly LocalRuntimeJob[]): LocalRuntimeJob | null {
   return jobs.find(j => j.kind === 'runtime-install' && isActive(j.status)) ?? null
+}
+
+interface RuntimeInstallResult {
+  backend: string
+  job_id: string
+  tag: string
+}
+
+export function localRuntimeInstallStarting(
+  owner: LocalModelsOwner = localModelsOwner(),
+  client: QueryClient = queryClient
+): boolean {
+  return client.isMutating({ mutationKey: localModelsKey(owner, 'install') }) > 0
+}
+
+export function localRuntimeInstallBusy(
+  owner: LocalModelsOwner = localModelsOwner(),
+  client: QueryClient = queryClient
+): boolean {
+  const jobs: readonly LocalRuntimeJob[] = client.getQueryData(localModelsKey(owner, 'jobs')) ?? EMPTY_JOBS
+
+  return (
+    localRuntimeInstallStarting(owner, client) ||
+    jobs.some(
+      (job: LocalRuntimeJob): boolean =>
+        isActive(job.status) && (job.kind === 'runtime-install' || job.kind === 'quickstart')
+    )
+  )
+}
+
+export async function startLocalRuntimeInstall(
+  owner: LocalModelsOwner = localModelsOwner(),
+  client: QueryClient = queryClient
+): Promise<void> {
+  if (localRuntimeInstallBusy(owner, client)) {
+    return
+  }
+
+  const observer: MutationObserver<RuntimeInstallResult, Error, void> = new MutationObserver(client, {
+    mutationKey: localModelsKey(owner, 'install'),
+    mutationFn: (): Promise<RuntimeInstallResult> => installLocalRuntime(undefined, localModelsRequestScope(owner))
+  })
+
+  try {
+    await observer.mutate()
+    watchLocalRuntimeJobs(owner, client)
+    await client.fetchQuery({ ...localModelsJobsOptions(owner), staleTime: 0 })
+  } catch (error) {
+    if (isCurrentLocalModelsOwner(owner)) {
+      notifyError(error, translateNow('settings.localModels.installFailed'))
+    }
+  }
+}
+
+const updateNotified: Set<string> = new Set()
+
+export async function checkLocalRuntimeUpdate(owner: LocalModelsOwner = localModelsOwner()): Promise<void> {
+  const identity: string = JSON.stringify(localModelsKey(owner))
+
+  if (updateNotified.has(identity)) {
+    return
+  }
+
+  try {
+    const status: LocalModelsStatus = await queryClient.fetchQuery(localModelsStatusOptions(owner))
+    localModelsRequestScope(owner)
+
+    if (status.enabled && status.update_available && !updateNotified.has(identity)) {
+      updateNotified.add(identity)
+      notify({
+        durationMs: 10_000,
+        kind: 'info',
+        title: localModelsNotificationTitle(owner),
+        message: translateNow('settings.localModels.updateToast', status.configured_tag)
+      })
+    }
+  } catch {
+    // Older backends may not have this endpoint. The next boot can retry.
+  }
 }

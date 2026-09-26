@@ -17,60 +17,64 @@ from tests.ci.test_desktop_release_tag_admission import _BASH, _child_env, _git,
 
 @pytest.mark.parametrize("variant", ["bundled", "light"])
 def test_desktop_build_reaches_the_managed_payload_with_commit_ref(tmp_path, monkeypatch, variant):
+    from scripts.bundles import desktop_prepare
+    from scripts.bundles.desktop_inputs import build_environment
+    from scripts.bundles.desktop_prepare import BuildRequest, PreparedDesktop
+
     _, repo = _seed_repo(tmp_path)
     sha = _git("rev-parse", "HEAD", cwd=repo)
-    (repo / "pyproject.toml").write_text('[project]\nname="x"\nversion="9.9.9"\n', encoding='utf-8')
     monkeypatch.setenv("HERMES_PAYLOAD_TAG", "v9.9.9")
     monkeypatch.setenv("GITHUB_SHA", "b" * 40)
     monkeypatch.setenv("BUILD_NUMBER", "123")
     defaults = {"HERMES_GUEST_ONBOARDING": "1", "HERMES_DATA_DIR_SUFFIX": "magic-test", "HERMES_HOME": None}
     monkeypatch.setenv("HERMES_BUNDLE_ENV_JSON", json.dumps(defaults))
-    monkeypatch.setattr(desktop.shutil, "which", lambda name: None if name == "uv" else name)
-    monkeypatch.setattr(desktop, "npm_command", lambda node: [node, "npm-cli.js"])
-    monkeypatch.setattr("scripts.build.windows_deps.prepare_windows_environment", lambda **kwargs: dict(kwargs["env"]))
-    from pm.store import current_target
-    target_arch = current_target().split("-")[1]
-    def capture(argv, cwd):
-        if argv[0] == "git":
-            return _git(*argv[1:], cwd=cwd)
-        if "process.arch" in argv:
-            return target_arch
-        return "26.7.0"
-    monkeypatch.setattr(desktop, "capture", capture)
-    (repo / "package-lock.json").write_text("{}", encoding="utf-8")
-    (repo / "node_modules").mkdir()
-    (repo / 'apps/desktop').mkdir(parents=True)
-    (repo / 'ui-tui/dist').mkdir(parents=True)
-    (repo / 'ui-tui/dist/entry.js').write_text('source fixture', encoding='utf-8')
-    (repo / 'hermes_cli/web_dist').mkdir(parents=True)
-    (repo / 'hermes_cli/web_dist/index.html').write_text('source fixture', encoding='utf-8')
+    request = BuildRequest.create(repo, tag=None, commit=sha, variant=variant,
+                                  work=tmp_path / "work", cache=tmp_path / "cache", bundle_env=defaults)
+    from pm.lock import Facts, Lockfile
+    from pm.registry import get_package
+    from pm.store import tree_digest
+    (repo / "pm").mkdir(exist_ok=True)
+    shutil.copy2(Path(__file__).resolve().parents[2] / "pm/lock.json", repo / "pm/lock.json")
+    lock = Lockfile(repo / "pm/lock.json")
+    store = request.cache / "tools"
+    binaries = {}
+    for name in ("python", "node", "npm"):
+        package = get_package(name)
+        version = lock.version(name)
+        assert version is not None
+        entry = store / package.store_entry(version, request.target)
+        binary = package.binary(entry, request.target)
+        assert binary is not None
+        binary.parent.mkdir(parents=True)
+        binary.write_bytes(b"published fixture")
+        Facts(store / "facts.json").record(name, version, entry.name, package.env(entry, request.target), store,
+                                           target=request.target, artifacts=[a["sha256"] for a in lock.artifacts(name, request.target)],
+                                           digest=tree_digest(entry))
+        binaries[name] = binary
+    prepared = PreparedDesktop(request, binaries["python"], binaries["node"], Path(sys.executable),
+                               tmp_path / "native", tmp_path / "packager", None, {}, "fixture-toolchain")
+    env = build_environment(prepared, variant, os.environ)
+    assert env.get("HERMES_PAYLOAD_TAG", "") == ""
+    assert env["HERMES_BUILD_COMMIT"] == sha
+    assert env["GITHUB_SHA"] == sha
+    assert env["HERMES_PYTHON"] == str(binaries["python"])
+    assert env["HERMES_PAYLOAD_VERSION"] == "0.1.2"
+    assert json.loads(env["HERMES_BUNDLE_ENV_JSON"]) == defaults
+    assert "BUILD_NUMBER" not in env
+    shutil.rmtree(repo / "pm")
+
+    # Composition crosses the preparation seam exactly once; native/Node build
+    # behavior is exercised through their real provider tests, not command spies.
     calls = []
-    def run(argv, *, cwd, env):
-        assert cwd.resolve().is_relative_to(repo.resolve())
-        calls.append((argv, cwd, env.copy()))
-        assert env.get("HERMES_PAYLOAD_TAG", "") == ""
-        assert env["HERMES_BUILD_COMMIT"] == sha
-        assert env["GITHUB_SHA"] == sha
-        assert env["HERMES_PYTHON"] == sys.executable
-        assert env["HERMES_PAYLOAD_VERSION"] == "0.1.2"
-        assert json.loads(env["HERMES_BUNDLE_ENV_JSON"]) == defaults
-        if "scripts.bundles.stage" in argv:
-            assert argv[argv.index("--ref") + 1] == sha
-            assert "--tui" in argv and "--web" in argv
-            payload = repo / 'apps/desktop/build/agent-payload'
-            (payload / 'hermes-agent').mkdir(parents=True)
-            (payload / 'manifest.json').write_text(json.dumps({'repo': 'hermes-agent', 'target': current_target()}), encoding='utf-8')
-    monkeypatch.setattr(desktop, "run", run)
+    def prepare(value):
+        calls.append(value)
+        return tmp_path / "prepared.json"
+    built = []
+    monkeypatch.setattr(desktop_prepare, "prepare", prepare)
+    monkeypatch.setattr(desktop, "build_prepared", lambda path, args: built.append((path, args)))
     desktop.build(repo, None, variant, ['--publish=never'], commit_build=sha)
-    assert any('scripts.bundles.stage' in argv for argv, _, _ in calls) == (variant != 'light')
-    argv, cwd, env = calls[-1]
-    assert argv[:5] == ['node', 'npm-cli.js', 'run', 'builder', '--']
-    assert '-c.extraMetadata.version=0.1.2' in argv
-    assert argv[-1] == '--publish=never'
-    assert cwd == repo / 'apps/desktop'
-    assert env['HERMES_DESKTOP_VARIANT'] == variant
-    if os.name == 'nt':
-        assert 'BUILD_NUMBER' not in env
+    assert len(calls) == 1 and calls[0].commit == sha and calls[0].variant == variant
+    assert built == [(tmp_path / "prepared.json", ['--publish=never'])]
     before = len(calls)
     for tag, commit in [('v0.1.2', sha), (None, 'b' * 40), (None, 'short')]:
         with pytest.raises(ValueError):

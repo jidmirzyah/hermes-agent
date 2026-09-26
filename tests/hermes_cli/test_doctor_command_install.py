@@ -10,7 +10,7 @@ import sys
 import pytest
 
 from hermes_cli import _launchers, doctor, doctor_platform
-from hermes_cli.runtime_paths import install_state_dir, site_packages
+from pm.environments import install_state_dir, site_packages
 
 
 def _tree(tmp_path, monkeypatch):
@@ -46,8 +46,9 @@ def _pm_source(project, home):
     root = Path(__file__).resolve().parents[2]
     for relative in (
         "hermes", "hermes_bootstrap.py", "hermes_constants.py", "hermes_cli/__init__.py",
-        "hermes_cli/runtime_paths.py", "hermes_cli/runtime_state.py",
+        "pm/environments.py", "hermes_cli/runtime_state.py",
         "hermes_cli/_early_recovery.py", "hermes_cli/_parser.py",
+        "hermes_cli/venv_sync.py", "hermes_cli/steward.py", "hermes_cli/stderr_timestamp.py",
     ):
         target = project / relative
         target.parent.mkdir(parents=True, exist_ok=True)

@@ -1,35 +1,16 @@
 #!/usr/bin/env node
-// stage-msixbundle.mjs — the out-of-store MSIX distribution job.
-//
-// Runs on a Windows runner of the release workflow AFTER all legs built
-// (needs: build). Two responsibilities:
-//
-//  1. OUT-OF-STORE FEED: bundle the x64 + arm64 per-arch .msix into one
-//     universal .msixbundle, sign the bundle envelope, write the per-channel
-//     .appinstaller, and upload both to the win32 feed dirs — bundle FIRST,
-//     .appinstaller pointer LAST (a failed bundle upload leaves the previous
-//     feed intact):
-//         releases/win32/<stable|canary>/<name>-<ver>.win.msixbundle
-//         releases/win32/<stable|canary>/stable.appinstaller (or canary.*)
-//     The .appinstaller is the install + auto-update entry point; the bundle
-//     is what the OS installs and swaps on update. Per-arch .msix files stay
-//     in the immutable releases/tag/<tag>/ archive (uploaded by the legs).
-//
-//  2. STORE ARCHIVE: re-upload the Store-submission .msix files (built by
-//     the win legs, prefixed Store-) to the tag archive. The Store is the
-//     distribution for those — they never touch a feed dir.
-//
-// Usage (win runner, bash):
-//   node scripts/stage-msixbundle.mjs --tag vX.Y.Z [--variant bundled|light]
-// Reads HERMES_DESKTOP_VARIANT (bundled|light) from the environment; the
-// workflow runs this job once per variant.
+// Native Windows adapter: bundle x64 + arm64 MSIX packages and sign the
+// envelope. Every mode stops at the artifact; CI stages it for native smoke
+// before the separate release Python publisher can write an App Installer feed.
+// Usage: node scripts/stage-msixbundle.mjs --tag vX.Y.Z --candidate
+//        node scripts/stage-msixbundle.mjs --tag vX.Y.Z-canary.STAMP
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
 
-import { appIdentity, buildAppInstaller } from './msix-shared.mjs'
+import { appIdentity, channelBuildRequest } from './msix-shared.mjs'
 import { ensureWindowsBundleTools } from '../apps/desktop/scripts/windows-bundle-tools.mjs'
 
 
@@ -38,7 +19,11 @@ const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..
 const { values } = parseArgs({ options: {
   tag: { type: 'string' }, commit: { type: 'string' }, version: { type: 'string' },
   variant: { type: 'string' }, 'no-upload': { type: 'boolean' }, candidate: { type: 'boolean' },
+  'channel-request': { type: 'string' },
 } })
+const channelRequest = values['channel-request']
+  ? channelBuildRequest({ ...process.env, HERMES_DESKTOP_VARIANT: values.variant || 'bundled',
+    _HERMES_CHANNEL_REQUEST_JSON: fs.readFileSync(values['channel-request'], 'utf8') }) : null
 const tag = values.tag
 const commitBuild = values.commit || ''
 const commitVersion = values.version || ''
@@ -46,10 +31,14 @@ const noUpload = values['no-upload'] === true
 const candidate = values.candidate === true
 const variant = values.variant || process.env.HERMES_DESKTOP_VARIANT || 'bundled'
 
+if (channelRequest && (tag || commitBuild || values.version || candidate || variant !== 'bundled'
+    || process.env.HERMES_PAYLOAD_TAG || process.env.HERMES_BUILD_COMMIT)) {
+  throw new Error('Channel requests cannot select tag, commit, Store or candidate inputs')
+}
 if (commitBuild && (tag || process.env.HERMES_PAYLOAD_TAG || candidate)) {
   throw new Error('Commit builds cannot select a release tag or candidate mode')
 }
-if (!commitBuild && (values.version !== undefined || noUpload)) {
+if (!commitBuild && !channelRequest && (values.version !== undefined || noUpload)) {
   throw new Error('--version and --no-upload require --commit')
 }
 
@@ -79,7 +68,7 @@ if (commitBuild) {
   }
   process.env.HERMES_BUILD_COMMIT = commitBuild
   process.env.HERMES_PAYLOAD_VERSION = commitVersion
-} else if (!tag) {
+} else if (!tag && !channelRequest) {
   console.error('[stage-msixbundle] --tag=<vX.Y.Z> is required')
   process.exit(1)
 }
@@ -93,13 +82,13 @@ if (process.platform !== 'win32') {
 }
 
 const canary = /-canary\./.test(tag)
-if (!commitBuild && !canary && !candidate) throw new Error('Stable bundles must use the staged stable-release workflow')
-const channel = canary ? 'canary' : 'stable'
-const channelDir = `releases/win32/${variant === 'light' ? 'light/' : ''}${channel}`
+if (!commitBuild && !channelRequest && !canary && !candidate) throw new Error('Stable bundles must use the staged stable-release workflow')
 
 const desktop = path.join(REPO_ROOT, 'apps', 'desktop')
 const releaseDir = path.join(desktop, 'release')
-const { identity, version, name, fileVersion } = appIdentity(desktop, tag)
+const { version, name, fileVersion } = channelRequest
+  ? { version: channelRequest.windowsVersion, name: channelRequest.identity.artifactNamePascal, fileVersion: channelRequest.version }
+  : appIdentity(desktop, tag)
 
 // Per-arch .msix files are found by the name electron-builder gave them
 // (appInfo.version = the 3-part or full-canary string, NOT the 4-part feed
@@ -180,57 +169,6 @@ if (signing) {
   console.warn('[stage-msixbundle] AZURE_SIGN_* not set — bundle will be UNSIGNED')
 }
 
-if (candidate) {
-  execFileSync(signtool, ['verify', '/pa', bundle], { stdio: 'inherit' })
-  console.log(`[stage-msixbundle] candidate ready: ${bundle}`)
-  process.exit(0)
-}
-
-// Commit-only mode stops here: the workflow hands the bundle to R2 through
-// scripts.releases.handoff (schema-2 receipt) — never a feed dir.
-if (commitBuild) {
-  console.log(`[stage-msixbundle] commit bundle ready (no upload): ${bundle}`)
-  process.exit(0)
-}
-
-// ── 2. .appinstaller + uploads ─────────────────────────────────────────────
-const baseUrl = String(process.env.CLOUDFLARE_R2_PUBLIC_URL || '').replace(/\/+$/, '')
-if (!baseUrl) {
-  console.error('[stage-msixbundle] CLOUDFLARE_R2_PUBLIC_URL is required (feed dir URLs come from it)')
-  process.exit(1)
-}
-
-const appinstaller = buildAppInstaller({
-  baseUrl,
-  variantChannelPath: channelDir,
-  identityName: identity.msixAppIdWithOrg,
-  version,
-  bundleFilename: `${name}-${version}-win.msixbundle`
-})
-const appinstallerName = `${channel}.appinstaller`
-fs.writeFileSync(path.join(releaseDir, appinstallerName), appinstaller)
-
-const upload = (key, file, keyIsFull = true) => {
-  // NOTE: no fs.readFileSync here — the msixbundle can exceed Node's 2GiB
-  // buffer limit (ERR_FS_FILE_TOO_LARGE). scripts.releases.r2 put reads + hashes
-  // the file itself; log the size via stat instead.
-  const { size } = fs.statSync(file)
-  console.log(`[stage-msixbundle] upload ${key} (${size} bytes)`)
-  // Feed-dir keys are FULL object keys (releases/win32/<ch>/…) — pass
-  // --key-is-full so r2 put does NOT wrap them under releases/tag/<tag>/.
-  // scripts.releases.r2 put derives Content-Type from the key extension.
-  execFileSync(process.env.HERMES_PYTHON || 'python', ['-m', 'scripts.releases.r2', 'put', '--tag', tag, '--key', key, '--file', file, ...(keyIsFull ? ['--key-is-full'] : [])], {
-    cwd: REPO_ROOT,
-    stdio: 'inherit'
-  })
-}
-
-// C22 ordering: bundle FIRST, pointer LAST. scripts.releases.r2 PUTs then
-// HEAD-verifies the remote content-length — a failed/short upload throws
-// and aborts this job before the pointer is written.
-upload(`${channelDir}/${name}-${version}-win.msixbundle`, bundle)
-upload(`${channelDir}/${appinstallerName}`, path.join(releaseDir, appinstallerName))
-
-// The Store-submission .msix files were already uploaded to the tag archive
-// by the win legs (Store- prefix); nothing for this job to re-upload.
-console.log('[stage-msixbundle] done — feed manifests + bundle staged')
+// Local assembly may be unsigned. CI's native smoke requires a valid signature
+// on the receipt-bound download before any release publication can proceed.
+console.log(`[stage-msixbundle] bundle ready (no upload): ${bundle}`)

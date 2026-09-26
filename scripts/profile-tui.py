@@ -518,7 +518,7 @@ def main() -> int:
             print(f"\n⚠ no baseline at {path} — run with --save {args.compare} first")
         else:
             before = json.loads(path.read_text(encoding="utf-8-sig"))
-            print(f"\n═══ A/B diff vs /tmp/perf-{args.compare}.json ═══")
+            print(f"\n═══ A/B diff vs {path} ═══")
             print(format_diff(before, metrics))
 
     if not data["react"] and not data["frame"]:

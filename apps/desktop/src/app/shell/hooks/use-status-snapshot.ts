@@ -112,7 +112,11 @@ export function useStatusSnapshot(
         }
 
         if (statusResult.status === 'fulfilled') {
-          setStatusSnapshot(statusResult.value)
+          const next = statusResult.value
+          // Preserve reference identity on a no-op: the 60s tick re-reads a
+          // usually-unchanged snapshot, and a fresh object for the same content
+          // re-renders every consumer for nothing.
+          setStatusSnapshot(previous => (JSON.stringify(previous) === JSON.stringify(next) ? previous : next))
           const warning: boolean = Boolean(statusResult.value.shared_profile_warning)
 
           // Keep dismissal until the conflict clears. A new overlap can warn again.

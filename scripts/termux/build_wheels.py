@@ -44,9 +44,9 @@ def normalize_reqs(export: Path, lock: Path, resolved: Path) -> None:
     from packaging.requirements import Requirement
     from packaging.utils import canonicalize_name
 
-    packages = tomllib.loads(lock.read_text(encoding="utf-8"))["package"]
+    packages = tomllib.loads(lock.read_text(encoding="utf-8-sig"))["package"]
     rows = []
-    for line in export.read_text(encoding="utf-8").splitlines():
+    for line in export.read_text(encoding="utf-8-sig").splitlines():
         if not line.strip() or line.lstrip().startswith("#"):
             continue
         req = Requirement(line)
@@ -171,13 +171,13 @@ def build_wheels(build_set: list[str], specs: dict[str, str], wheelhouse: Path,
                     # also (re)writes ./configure WITHOUT the exec bit
                     # (setup.py then 127s) -- chmod after bootstrap.
                     proc = subprocess.run(["bash", "autogen.sh"], cwd=libuv,
-                                          check=False, capture_output=True, text=True)
+                                          check=False, capture_output=True, text=True, encoding="utf-8")
                     if proc.returncode == 0 and (libuv / "configure").is_file():
                         # Run configure under the container's own sh
                         # (its #!/bin/sh shebang can't exec here).
                         cfg_proc = subprocess.run(
                             [os.environ["PREFIX"] + "/bin/sh", "./configure"],
-                            cwd=libuv, check=False, capture_output=True, text=True,
+                            cwd=libuv, check=False, capture_output=True, text=True, encoding="utf-8",
                         )
                         if cfg_proc.returncode != 0:
                             print(f"FIXUP FAILED (libuv configure) for {name}")
@@ -188,7 +188,7 @@ def build_wheels(build_set: list[str], specs: dict[str, str], wheelhouse: Path,
                         # autogen needs autoreconf when configure is
                         # stale; fall back to explicit bootstrap
                         proc2 = subprocess.run(["autoreconf", "-i"], cwd=libuv,
-                                               check=False, capture_output=True, text=True)
+                                               check=False, capture_output=True, text=True, encoding="utf-8")
                         if proc2.returncode != 0:
                             print(f"FIXUP FAILED (libuv bootstrap) for {name}")
                             print("autogen stdout:", proc.stdout[-1200:])
@@ -198,7 +198,7 @@ def build_wheels(build_set: list[str], specs: dict[str, str], wheelhouse: Path,
                 proc = subprocess.run(
                     [python, "-m", "pip", "wheel", "--no-deps", "--no-build-isolation",
                      "-w", str(wheelhouse), str(src)],
-                    check=False, cwd=tmp, capture_output=True, text=True,
+                    check=False, cwd=tmp, capture_output=True, text=True, encoding="utf-8",
                 )
                 if proc.returncode != 0:
                     print(f"BUILD FAILED: {name}")
@@ -215,7 +215,7 @@ def build_wheels(build_set: list[str], specs: dict[str, str], wheelhouse: Path,
             proc = subprocess.run(
                 [python, "-m", "pip", "wheel", "--no-deps",
                  "--no-binary", ":all:", "-w", str(wheelhouse), req],
-                check=False, capture_output=True, text=True,
+                check=False, capture_output=True, text=True, encoding="utf-8",
             )
             if proc.returncode != 0:
                 print(f"BUILD FAILED: {name}")
@@ -255,7 +255,7 @@ def _marker_admits(marker: str) -> bool:
 def _parse_full(resolved: Path) -> list[tuple[str, str, str, str]]:
     """Name, wheel version, marker and optional build source for each entry."""
     out: list[tuple[str, str, str, str]] = []
-    for line in resolved.read_text(encoding="utf-8").splitlines():
+    for line in resolved.read_text(encoding="utf-8-sig").splitlines():
         if not line.strip():
             continue
         parts = line.split("\t")
@@ -295,7 +295,7 @@ def fetch_pure_wheels(build_set: list[str], specs: dict[str, str], wheelhouse: P
     proc = subprocess.run(
         [sys.executable, "-m", "pip", "download", "--no-deps",
          "--only-binary", ":all:", "-d", str(wheelhouse), *reqs],
-        check=False, capture_output=True, text=True,
+        check=False, capture_output=True, text=True, encoding="utf-8",
     )
     if proc.returncode != 0:
         print("PURE-WHEEL FETCH FAILED")
@@ -334,6 +334,11 @@ def import_native_modules(build_set: list[str]) -> None:
     modules = {
         "ruamel-yaml-clib": "_ruamel_yaml", "cffi": "_cffi_backend",
         "pillow": "PIL._imaging", "pyyaml": "yaml._yaml", "firecrawl-anydoc": "anydoc",
+        # import pillow_heif alone never fails on a dead link: its
+        # __init__ swallows the _pillow_heif ImportError into a
+        # DeferredError that only fires on first use. Import the C
+        # extension directly so the dlopen itself is what's proven.
+        "pillow-heif": "_pillow_heif",
     }
     for name in build_set:
         module = modules.get(name, name.replace("-", "_"))
@@ -360,7 +365,7 @@ def wheelhouse_gates(resolved: Path, wheelhouse: Path, build_set: list[str]) -> 
         reqs = tmp / "reqs.txt"
         write_reqs_file(resolved, reqs)
         vp = build_requirements_environment(
-            reqs.read_text(encoding="utf-8").splitlines(), out=tmp / "venv",
+            reqs.read_text(encoding="utf-8-sig").splitlines(), out=tmp / "venv",
             python=Path(sys.executable), wheelhouse=wheelhouse, offline=True, explicit=True,
         )
         print("  completeness gate: offline install of the marker-admitted graph OK")
@@ -381,7 +386,7 @@ def main() -> int:
         return 0
     args = parse_args()
     resolved = Path(args.resolved)
-    build_set = [l.strip() for l in Path(args.build_set).read_text(encoding="utf-8").splitlines() if l.strip()]
+    build_set = [l.strip() for l in Path(args.build_set).read_text(encoding="utf-8-sig").splitlines() if l.strip()]
     wheelhouse = Path(args.wheelhouse)
     wheelhouse.mkdir(parents=True, exist_ok=True)
     specs = load_entries(resolved)

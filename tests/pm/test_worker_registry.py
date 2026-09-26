@@ -10,7 +10,6 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-import shutil
 import tarfile
 import textwrap
 
@@ -18,6 +17,7 @@ import pytest
 
 import pm
 from pm import registry
+from tests.pm._fixtures import isolated_python as worker_python  # noqa: F401
 from tests.pm._range_server import RangeHandler, dl_server, url  # noqa: F401
 
 
@@ -26,21 +26,12 @@ def restore_registry(monkeypatch):
     monkeypatch.setattr(registry, "_packages", dict(registry._packages))
 
 
-@pytest.fixture(scope="module")
-def worker_python(tmp_path_factory):
-    from pm.runtime_stage import stage_runtime
-
-    environment = tmp_path_factory.mktemp("registry-worker-python")
-    uv = shutil.which("uv")
-    assert uv, "the worker contract requires real uv"
-    return stage_runtime(Path(uv), Path(sys.executable), environment)
-
 
 @pytest.mark.parametrize("operation", ["ensure", "stage_only"])
 def test_registered_package_installs_archive_in_real_worker(tmp_path, monkeypatch, worker_python, dl_server, operation):
     from pm import paths
 
-    monkeypatch.setattr("pm.runtime.runtime_python", lambda: worker_python)
+    monkeypatch.setattr("pm.runtime.runtime_python", lambda **kwargs: worker_python)
     monkeypatch.setenv("HERMES_RUNTIME_DIR", str(tmp_path / "store"))
     monkeypatch.setattr(paths, "lockfile_path", lambda: tmp_path / "lock.json")
     source = tmp_path / "package.py"
@@ -58,7 +49,8 @@ def test_registered_package_installs_archive_in_real_worker(tmp_path, monkeypatc
             def verify(self, entry, target):
                 return '' if (entry / 'payload.txt').read_text() == 'plugin archive' else 'bad payload'
         """))
-    _load_file(source, monkeypatch)
+    module = _load_file(source, monkeypatch)
+    pm.register(module.ArchivePackage)
     payload = b"plugin archive"
     stream = io.BytesIO()
     with tarfile.open(fileobj=stream, mode="w:gz") as archive:
@@ -73,7 +65,7 @@ def test_registered_package_installs_archive_in_real_worker(tmp_path, monkeypatc
         "url": url(dl_server, "/plugin.tar.gz"), "sha256": hashlib.sha256(data).hexdigest(),
     }})
     lock.save()
-    engine = importlib.import_module("pm.ensure")
+    engine = importlib.import_module("pm.install")
     monkeypatch.setattr(engine, operation, lambda *a, **kw: pytest.fail("install ran in caller"))
     if operation == "ensure":
         pm.ensure("registry-worker-archive", explicit=True)
@@ -166,11 +158,11 @@ def test_non_importable_registration_fails_with_package_remedy(kind):
 
 
 def test_file_registered_package_runs_its_own_definition_in_child(tmp_path, monkeypatch):
+    existing = registry.package_definitions()
     source = tmp_path / "package.py"
     source.write_text(textwrap.dedent("""\
         from pm import Package, InstallError, register
 
-        @register
         class ExternalPackage(Package):
             name = "external-worker-test"
 
@@ -181,7 +173,9 @@ def test_file_registered_package_runs_its_own_definition_in_child(tmp_path, monk
     # Public registration also works without a decorator at import time.
     pm.register(module.ExternalPackage)
     definitions = registry.package_definitions()
-    assert [item["name"] for item in definitions] == [module.ExternalPackage.name]
+    assert [item["name"] for item in definitions] == [
+        *[item["name"] for item in existing], module.ExternalPackage.name,
+    ]
     result = _child(definitions, """\
         package = get_package('external-worker-test')
         try:

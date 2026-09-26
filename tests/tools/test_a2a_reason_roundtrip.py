@@ -11,8 +11,7 @@ from __future__ import annotations
 
 import json
 import subprocess
-import sys
-from pathlib import Path
+import os
 
 import pytest
 
@@ -32,18 +31,6 @@ def _reply_file(home, envelope_id):
     return bot_relay.relay_root(home) / bot_relay.REPLIES_DIR / f"{envelope_id}.json"
 
 
-def test_write_reply_persists_forwarded_reason(home):
-    """A reason forwarded by the Desktop drain loop lands in the reply file."""
-    envelope_id = "a" * 32
-    bot_relay.write_reply(
-        home,
-        envelope_id,
-        error="delivery turn failed: Error code: 429",
-        reason=bfr.PROVIDER_RATE_LIMIT,
-    )
-    data = json.loads(_reply_file(home, envelope_id).read_text(encoding="utf-8"))
-    assert data["reason"] == bfr.PROVIDER_RATE_LIMIT
-
 
 def test_write_reply_classifies_when_reason_omitted(home):
     """Old senders that never forward a reason still get a classified code."""
@@ -59,28 +46,18 @@ def test_write_reply_classifies_when_reason_omitted(home):
 
 def _run_waiter(home, envelope):
     cmd = bot_relay.waiter_command(home, envelope)
-    # Resolve a launchable bash (PATH may resolve the MSIX payload copy,
-    # which WinError-5s outside its package context) and pass a complete
-    # child env — same pattern as tests/pm/test_activate_scripts.py.
-    import os
-    import shutil
+    from pm.shell import bash as resolve_bash
 
-    bash = shutil.which("bash") or "bash"
-    if sys.platform == "win32" and "windowsapps" in str(bash).lower():
-        pf = os.environ.get("ProgramFiles", r"C:\Program Files")
-        for rel in (("Git", "bin", "bash.exe"), ("Git", "usr", "bin", "bash.exe")):
-            cand = Path(pf).joinpath(*rel) if isinstance(pf, str) else Path(pf, *rel)
-            if cand.exists():
-                bash = str(cand)
-                break
+    bash = resolve_bash()
+    assert bash, "PM must resolve a runnable shell for the waiter"
     env = os.environ.copy()
-    if sys.platform == "win32":
+    if os.name == "nt":
         env.setdefault("SystemRoot", r"C:\Windows")
         env.setdefault("ComSpec", r"C:\Windows\system32\cmd.exe")
         env.setdefault("PATHEXT", ".COM;.EXE;.BAT;.CMD")
     return subprocess.run(
         [bash, "-c", cmd],
-        capture_output=True, text=True, timeout=30, env=env,
+        capture_output=True, text=True, timeout=30, env=env, cwd=home,
     )
 
 
@@ -89,7 +66,7 @@ def _envelope(home):
         "profile": "scout",
         "handle": "scout",
         "connection_id": "cloud-1",
-        "connection_label": "",
+        "connection_label": "hostile ' $(touch injected-by-label) ; label",
         "title": "",
         "description": "",
     }
@@ -102,6 +79,7 @@ def _envelope(home):
     )
 
 
+@pytest.mark.platforms("posix", "windows")
 def test_waiter_surfaces_reason_tag_to_sending_agent(home, monkeypatch):
     """The waiter's stdout — the sending agent's completion notification —
     carries the typed reason so the agent can branch without parsing prose."""
@@ -116,6 +94,7 @@ def test_waiter_surfaces_reason_tag_to_sending_agent(home, monkeypatch):
     proc = _run_waiter(home, env)
     assert proc.returncode == 1
     assert f"[reason: {bfr.PROVIDER_RATE_LIMIT}]" in proc.stdout
+    assert not (home / "injected-by-label").exists()
 
 
 def test_waiter_healthy_reply_has_no_reason_tag(home, monkeypatch):

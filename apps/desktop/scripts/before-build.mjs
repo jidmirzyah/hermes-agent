@@ -90,6 +90,9 @@ function writeMsixExtensions() {
   //     declares no uap3 prefix. A/B-verified fine.
   //   * children of uap3:Properties are UNPREFIXED (xs:any content, per
   //     Microsoft's copilot-key-state sample).
+  //   * Id caps at 39 chars (opaque makeappx maxLength violation otherwise) —
+  //     it only discriminates within the package, so it stays a fixed short
+  //     literal and DisplayName carries the variant name.
   const copilot = light
     ? ''
     : `<uap3:Extension
@@ -97,7 +100,7 @@ function writeMsixExtensions() {
     Category="windows.appExtension">
   <uap3:AppExtension
       Name="com.microsoft.windows.copilotkeyprovider"
-      Id="${artifactNamePascal}CopilotKeyProvider"
+      Id="CopilotKeyProvider"
       DisplayName="${displayName}"
       Description="Launch ${displayName} with the Copilot key"
       PublicFolder="Public">

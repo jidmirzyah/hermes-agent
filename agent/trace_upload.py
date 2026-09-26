@@ -11,7 +11,6 @@ import json
 import logging
 import os
 import uuid
-from contextlib import suppress
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 

@@ -6,7 +6,7 @@ description: "将 Hermes Agent 设置为钉钉聊天机器人"
 
 # 钉钉设置
 
-本页的 Python 依赖命令使用 [PM 准备的源码环境](/reference/package-management#developer-workflow)。
+本页的 Python 依赖命令使用 [PM 准备的源码环境](../../reference/package-management.md#developer-workflow)。
 依赖变更后，请重新激活该 checkout 并重启 Hermes。
 
 Hermes Agent 可作为聊天机器人集成到钉钉（DingTalk），让你通过单聊或群聊与 AI 助手对话。机器人通过钉钉的 Stream Mode（流模式）连接——一种长连接 WebSocket，无需公网 URL 或 webhook 服务器——并通过钉钉的 session webhook API 以 markdown 格式回复消息。

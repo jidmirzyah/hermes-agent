@@ -6,7 +6,7 @@ description: "将 Hermes Agent 与 Microsoft Foundry 配合使用——OpenAI �
 
 # Microsoft Foundry
 
-本页的 Python 依赖命令使用 [PM 准备的源码环境](/reference/package-management#developer-workflow)。
+本页的 Python 依赖命令使用 [PM 准备的源码环境](../reference/package-management.md#developer-workflow)。
 依赖变更后，请重新激活该 checkout 并重启 Hermes。
 
 Hermes Agent 的 `azure-foundry` provider 支持 Microsoft Foundry（原 Azure AI Foundry）和 Azure OpenAI。单个 Foundry 资源可以托管两种不同传输格式的模型：

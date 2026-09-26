@@ -193,7 +193,7 @@ def test_clear_fallback_spawns_no_shell(monkeypatch):
     assert calls == [(["/usr/bin/clear"], {"stdin": sp.DEVNULL, "creationflags": 0, "check": False})]
 
 
-@pytest.mark.windows_only
+@pytest.mark.platforms("windows")
 def test_clear_fallback_windows_runs_cls_with_hidden_console(monkeypatch):
     """Native Windows: `cls` is a cmd builtin, so the argv is cmd /c cls, run with the
     real windows_hide_flags() (CREATE_NO_WINDOW) so no console flashes (#116904)."""

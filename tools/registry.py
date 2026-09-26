@@ -71,7 +71,6 @@ def _module_registers_tools(module_path: Path) -> bool:
     Only module-body statements count, so helpers registering inside a function are skipped;
     a text prefilter avoids ``ast.parse`` for files lacking both words."""
     try:
-        # MERGE-CHECK: our utf-8-sig read fix kept (BOM-tolerant; ours read tool modules this way)
         source = module_path.read_text(encoding="utf-8-sig")
         if "registry" not in source or "register" not in source:
             return False

@@ -1,5 +1,5 @@
-import { useStore } from '@nanostores/react'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { type QueryClient, useIsMutating, useQuery, useQueryClient } from '@tanstack/react-query'
+import { type ReactElement, useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router'
 
 import { NEW_CHAT_ROUTE } from '@/app/routes'
@@ -11,9 +11,6 @@ import {
   downloadBrowsedModel,
   downloadLocalModel,
   ejectLocalModel,
-  getLocalCatalog,
-  getLocalHardware,
-  getLocalModelsStatus,
   type HFFileGroup,
   type HFSearchHit,
   listHFRepoFiles,
@@ -41,19 +38,28 @@ import {
 } from '@/lib/icons'
 import { cn } from '@/lib/utils'
 import {
-  $localRuntimeInstallStarting,
-  $localRuntimeJobs,
+  isCurrentLocalModelsOwner,
+  localModelsCatalogOptions,
+  localModelsHardwareOptions,
+  localModelsKey,
+  localModelsNotificationTitle,
+  type LocalModelsOwner,
+  localModelsRequestScope,
+  refreshLocalModels,
   runningDownloadFor,
   runningRuntimeInstall,
   startLocalRuntimeInstall,
+  useLocalModelsOwner,
+  useLocalModelsStatus,
+  useLocalRuntimeJobs,
   watchLocalRuntimeJobs
 } from '@/store/local-runtime-jobs'
 import { notify, notifyError } from '@/store/notifications'
-import type { LocalCatalogModel, LocalHardware, LocalModelsStatus, LocalRuntimeJob } from '@/types/hermes'
+import type { LocalCatalogModel, LocalRuntimeJob } from '@/types/hermes'
 
 import {
+  downloadStatusText,
   gbLabel,
-  isDownloadPhase,
   LocalModelDownloadActions,
   LocalModelDownloadProgress,
   ProgressBar
@@ -82,97 +88,51 @@ function isActiveStatus(status: LocalRuntimeJob['status']): boolean {
   return status === 'paused' || status === 'running'
 }
 
-export function LocalModelsSettings() {
+export function LocalModelsSettings(): ReactElement {
+  const owner: LocalModelsOwner = useLocalModelsOwner()
+
+  return <ScopedLocalModelsSettings key={JSON.stringify(localModelsKey(owner))} owner={owner} />
+}
+
+function ScopedLocalModelsSettings({ owner }: { owner: LocalModelsOwner }): ReactElement {
   const { t } = useI18n()
   const copy = t.settings.localModels
-  const installStarting = useStore($localRuntimeInstallStarting)
-  const [status, setStatus] = useState<LocalModelsStatus | null>(null)
-  const [hardware, setHardware] = useState<LocalHardware | null>(null)
-  const [catalog, setCatalog] = useState<LocalCatalogModel[] | null>(null)
+  const client: QueryClient = useQueryClient()
+  const installStarting: boolean = useIsMutating({ mutationKey: localModelsKey(owner, 'install') }) > 0
+  const { data: status } = useLocalModelsStatus(owner)
+  const { data: hardware } = useQuery(localModelsHardwareOptions(owner))
+  const { data: catalog } = useQuery(localModelsCatalogOptions(owner))
   const [deleting, setDeleting] = useState<null | string>(null)
-  const [serverBusy, setServerBusy] = useState(false)
+  const [serverBusy, setServerBusy] = useState<boolean>(false)
   // Quickstart escape hatch: true once the user asks for the full pane
   // (model list, HF browser) instead of the one-button setup card.
-  const [configure, setConfigure] = useState(() => $localRuntimeInstallStarting.get())
-  // Jobs live in the app-level store (they must survive this pane
-  // unmounting); the pane just renders the slice it cares about.
-  const jobs = useStore($localRuntimeJobs)
+  const [configure, setConfigure] = useState<boolean>(false)
 
-  const refresh = useCallback(() => {
-    void getLocalModelsStatus()
-      .then(setStatus)
-      .catch(() => setStatus(null))
-    void getLocalCatalog()
-      .then(data => setCatalog(data.models))
-      .catch(() => setCatalog([]))
-  }, [])
+  const jobs: readonly LocalRuntimeJob[] = useLocalRuntimeJobs(
+    owner,
+    (value: readonly LocalRuntimeJob[]): readonly LocalRuntimeJob[] => value
+  )
 
-  // Snappy first paint: status + catalog immediately; hardware (may shell out
-  // to nvidia-smi) backfills and pops in-place. The job watcher also kicks
-  // here so reopening the pane rediscovers work started before.
-  useEffect(() => {
-    refresh()
-    watchLocalRuntimeJobs()
-    void getLocalHardware()
-      .then(setHardware)
-      .catch(() => setHardware(null))
-  }, [refresh])
+  const refresh = useCallback((): void => refreshLocalModels(owner, client), [owner, client])
 
-  // The pane is LIVE while visible: residency changes without user action
-  // (boot warm finishing, idle sweep unloading, another surface ejecting),
-  // and a stale snapshot here reads as a broken feature — 'VRAM full but
-  // the pane says Not in memory'. The status route is built cheap for
-  // polling; setTimeout chain, never overlapping.
-  useEffect(() => {
-    let cancelled = false
-    let timer: number | undefined
+  async function handleInstallRuntime(): Promise<void> {
+    await startLocalRuntimeInstall(owner, client)
+  }
 
-    const tick = async () => {
-      try {
-        const next = await getLocalModelsStatus()
-
-        if (!cancelled) {
-          setStatus(next)
-        }
-      } catch {
-        // Backend briefly unreachable — keep the last snapshot.
-      }
-
-      if (!cancelled) {
-        timer = window.setTimeout(() => void tick(), 4_000)
-      }
-    }
-
-    timer = window.setTimeout(() => void tick(), 4_000)
-
-    return () => {
-      cancelled = true
-
-      if (timer !== undefined) {
-        window.clearTimeout(timer)
-      }
-    }
-  }, [])
-
-  // A job finishing (download done, install done) changes what status/catalog
-  // should show — refresh whenever the running set shrinks.
-  const runningCount = jobs.filter(j => j.status === 'running').length
-  useEffect(() => {
-    refresh()
-  }, [refresh, runningCount])
-
-  async function handleQuickstart() {
+  async function handleQuickstart(): Promise<void> {
     try {
-      await quickstartLocalModels()
-      watchLocalRuntimeJobs()
+      await quickstartLocalModels(undefined, localModelsRequestScope(owner))
+      watchLocalRuntimeJobs(owner, client)
     } catch (err) {
-      notifyError(err, copy.quickstartFailed)
+      if (isCurrentLocalModelsOwner(owner)) {
+        notifyError(err, copy.quickstartFailed)
+      }
     }
   }
 
-  async function handleDownload(model: LocalCatalogModel) {
+  async function handleDownload(model: LocalCatalogModel): Promise<void> {
     try {
-      const res = await downloadLocalModel(model.id)
+      const res = await downloadLocalModel(model.id, localModelsRequestScope(owner))
 
       if (res.already_downloaded || !res.job_id) {
         refresh()
@@ -180,55 +140,63 @@ export function LocalModelsSettings() {
         return
       }
 
-      watchLocalRuntimeJobs()
+      watchLocalRuntimeJobs(owner, client)
     } catch (err) {
-      notifyError(err, copy.downloadFailed(model.display_name))
+      if (isCurrentLocalModelsOwner(owner)) {
+        notifyError(err, copy.downloadFailed(model.display_name))
+      }
     }
   }
 
-  async function handleActivate(target: null | string, displayName: string) {
+  async function handleActivate(target: null | string, displayName: string): Promise<void> {
     if (!target) {
       return
     }
 
     try {
-      await activateLocalModel(target)
-      watchLocalRuntimeJobs()
+      await activateLocalModel(target, localModelsRequestScope(owner))
+      watchLocalRuntimeJobs(owner, client)
     } catch (err) {
-      notifyError(err, copy.activateFailed(displayName))
+      if (isCurrentLocalModelsOwner(owner)) {
+        notifyError(err, copy.activateFailed(displayName))
+      }
     }
   }
 
-  async function handleEject(modelId: string) {
+  async function handleEject(modelId: string): Promise<void> {
     try {
-      await ejectLocalModel(modelId)
-      notify({ durationMs: 3_000, kind: 'success', message: copy.ejected, title: copy.title })
+      await ejectLocalModel(modelId, localModelsRequestScope(owner))
+      notify({ durationMs: 3_000, kind: 'success', message: copy.ejected, title: localModelsNotificationTitle(owner) })
       refresh()
     } catch (err) {
-      notifyError(err, copy.ejectFailed)
+      if (isCurrentLocalModelsOwner(owner)) {
+        notifyError(err, copy.ejectFailed)
+      }
     }
   }
 
-  async function handleServer(action: 'start' | 'stop') {
+  async function handleServer(action: 'start' | 'stop'): Promise<void> {
     setServerBusy(true)
 
     try {
-      await setLocalServer(action)
+      await setLocalServer(action, localModelsRequestScope(owner))
       notify({
         durationMs: 3_500,
         kind: 'success',
         message: action === 'stop' ? copy.serverStopped : copy.serverStarted,
-        title: copy.title
+        title: localModelsNotificationTitle(owner)
       })
       refresh()
     } catch (err) {
-      notifyError(err, action === 'stop' ? copy.serverStopFailed : copy.serverStartFailed)
+      if (isCurrentLocalModelsOwner(owner)) {
+        notifyError(err, action === 'stop' ? copy.serverStopFailed : copy.serverStartFailed)
+      }
     } finally {
       setServerBusy(false)
     }
   }
 
-  async function handleDelete(target: string, rowId: string) {
+  async function handleDelete(target: string, rowId: string): Promise<void> {
     if (!window.confirm(copy.deleteConfirm(target))) {
       return
     }
@@ -236,11 +204,18 @@ export function LocalModelsSettings() {
     setDeleting(rowId)
 
     try {
-      await deleteLocalModel(target)
-      notify({ durationMs: 2_500, kind: 'success', message: copy.deleted(target), title: copy.title })
+      await deleteLocalModel(target, localModelsRequestScope(owner))
+      notify({
+        durationMs: 2_500,
+        kind: 'success',
+        message: copy.deleted(target),
+        title: localModelsNotificationTitle(owner)
+      })
       refresh()
     } catch (err) {
-      notifyError(err, copy.deleteFailed)
+      if (isCurrentLocalModelsOwner(owner)) {
+        notifyError(err, copy.deleteFailed)
+      }
     } finally {
       setDeleting(null)
     }
@@ -276,7 +251,7 @@ export function LocalModelsSettings() {
     }
   }, [jobs, navigate])
 
-  if (!status || catalog === null) {
+  if (!status || !catalog) {
     return <SettingsSkeleton sections={[{ rows: 2 }, { rows: 4 }]} />
   }
 
@@ -305,7 +280,11 @@ export function LocalModelsSettings() {
     j => (j.kind === 'runtime-install' || j.kind === 'model-download') && isActiveStatus(j.status)
   )
 
-  if ((qJob || (needsSetup && !configure && heroModel)) && !otherActiveJob) {
+  const failedInstall: boolean = jobs.some(
+    (job: LocalRuntimeJob): boolean => job.kind === 'runtime-install' && job.status === 'error'
+  )
+
+  if ((qJob || (needsSetup && !configure && heroModel)) && !otherActiveJob && !installStarting && !failedInstall) {
     // Stage rail derived from the job phase: engine -> model -> finish.
     const phase = qJob?.phase ?? ''
 
@@ -335,17 +314,13 @@ export function LocalModelsSettings() {
 
             {qJob ? (
               <>
-                {/* Byte counter only while bytes actually move: each stage
-                    recomputes percent against ITS OWN download plan, and a
-                    stage hand-off resets the counter by design — showing it
-                    across a hand-off would read as progress loss. Paused
-                    rows keep the frozen counter they parked with. */}
+                {/* The shared status line: state · bytes · speed · ETA. Each
+                    stage recomputes percent against ITS OWN download plan, so
+                    the composer drops speed/ETA when bytes aren't moving —
+                    showing a stale rate across a stage hand-off would read as
+                    progress loss. A paused job keeps its frozen counter. */}
                 <p className="mt-2 min-h-10 text-[0.8rem] leading-5 text-muted-foreground">
-                  {qJob.status === 'paused'
-                    ? copy.downloadPausedLabel
-                    : isDownloadPhase(qJob) && (qJob.detail || qJob.total_bytes)
-                      ? qJob.detail || copy.downloadProgress(gbLabel(qJob.done_bytes), gbLabel(qJob.total_bytes))
-                      : qJob.detail || copy.installing}
+                  {downloadStatusText(qJob, copy)}
                 </p>
 
                 <div className="mt-5">
@@ -356,7 +331,7 @@ export function LocalModelsSettings() {
                     when controls exist (engine legs, server start report
                     false); the paused state always offers Resume. */}
                 <div className="mt-5 flex items-center justify-center gap-3">
-                  <LocalModelDownloadActions job={qJob} />
+                  <LocalModelDownloadActions job={qJob} owner={owner} />
                 </div>
 
                 {/* Stage rail: engine -> model -> finish. */}
@@ -468,7 +443,7 @@ export function LocalModelsSettings() {
           />
         ) : rJob ? (
           <ListRow
-            action={<LocalModelDownloadActions job={rJob} />}
+            action={<LocalModelDownloadActions job={rJob} owner={owner} />}
             below={<LocalModelDownloadProgress job={rJob} />}
             description={rJob.detail || copy.installing}
             title={
@@ -510,7 +485,7 @@ export function LocalModelsSettings() {
 
         {rJob && status.runtime_installed && (
           <ListRow
-            action={<LocalModelDownloadActions job={rJob} />}
+            action={<LocalModelDownloadActions job={rJob} owner={owner} />}
             below={<LocalModelDownloadProgress job={rJob} />}
             description={rJob.detail || copy.updating}
             title={
@@ -677,7 +652,7 @@ export function LocalModelsSettings() {
                       </Tip>
                     </div>
                   ) : dJob ? (
-                    <LocalModelDownloadActions job={dJob} />
+                    <LocalModelDownloadActions job={dJob} owner={owner} />
                   ) : (
                     <Button
                       disabled={!model.fits || anyDownloadRunning || !status.runtime_installed}
@@ -695,13 +670,7 @@ export function LocalModelsSettings() {
                     <div className="mt-2 grid gap-1">
                       <ProgressBar paused={dJob.status === 'paused'} percent={dJob.percent} />
 
-                      <p className="text-[0.68rem] text-muted-foreground">
-                        {dJob.status === 'paused'
-                          ? copy.downloadPausedLabel
-                          : !dJob.done_bytes && dJob.detail
-                            ? dJob.detail
-                            : copy.downloadProgress(gbLabel(dJob.done_bytes), gbLabel(dJob.total_bytes))}
-                      </p>
+                      <p className="text-[0.68rem] text-muted-foreground">{downloadStatusText(dJob, copy)}</p>
                     </div>
                   ) : undefined
                 }
@@ -880,7 +849,7 @@ export function LocalModelsSettings() {
         {lastError?.kind === 'model-download' && <p className="text-[0.75rem] text-destructive">{lastError.error}</p>}
       </SettingsSection>
 
-      <BrowseSection onChanged={refresh} />
+      <BrowseSection onChanged={refresh} owner={owner} />
     </SettingsContent>
   )
 }
@@ -909,16 +878,23 @@ function browsedModelId(group: HFFileGroup): string {
   return first.replace(/-\d{5}-of-\d{5}\.gguf$/i, '').replace(/\.gguf$/i, '')
 }
 
-function BrowseSection({ onChanged }: { onChanged: () => void }) {
+function BrowseSection({ owner, onChanged }: { owner: LocalModelsOwner; onChanged: () => void }): ReactElement {
+  const client: QueryClient = useQueryClient()
   const { t } = useI18n()
   const copy = t.settings.localModels
-  const jobs = useStore($localRuntimeJobs)
-  const [query, setQuery] = useState('')
+
+  const jobs: readonly LocalRuntimeJob[] = useLocalRuntimeJobs(
+    owner,
+    (value: readonly LocalRuntimeJob[]): readonly LocalRuntimeJob[] => value,
+    false
+  )
+
+  const [query, setQuery] = useState<string>('')
   const [hits, setHits] = useState<HFSearchHit[]>([])
-  const [searching, setSearching] = useState(false)
+  const [searching, setSearching] = useState<boolean>(false)
   const [openRepo, setOpenRepo] = useState<null | string>(null)
   const [files, setFiles] = useState<HFFileGroup[]>([])
-  const [listing, setListing] = useState(false)
+  const [listing, setListing] = useState<boolean>(false)
   const [error, setError] = useState<null | string>(null)
   // Guard against the past: a stale search result must never overwrite a
   // newer query's hits (the desktop guide's out-of-order rule).
@@ -937,9 +913,9 @@ function BrowseSection({ onChanged }: { onChanged: () => void }) {
     const seq = ++searchSeq.current
     setSearching(true)
 
-    const handle = setTimeout(() => {
-      searchHFModels(q)
-        .then(r => {
+    const handle: ReturnType<typeof setTimeout> = setTimeout((): void => {
+      searchHFModels(q, 20, localModelsRequestScope(owner))
+        .then((r: { hits: HFSearchHit[] }): void => {
           if (searchSeq.current === seq) {
             setHits(r.hits)
             setError(null)
@@ -958,64 +934,84 @@ function BrowseSection({ onChanged }: { onChanged: () => void }) {
     }, 350)
 
     return () => clearTimeout(handle)
-  }, [query])
+  }, [query, owner])
 
-  const openFiles = useCallback((repo: string) => {
-    setOpenRepo(repo)
-    setFiles([])
-    setListing(true)
-    listHFRepoFiles(repo)
-      .then(r => setFiles(r.files))
-      .catch((e: Error) => setError(e.message))
-      .finally(() => setListing(false))
-  }, [])
+  const openFiles = useCallback(
+    (repo: string): void => {
+      setOpenRepo(repo)
+      setFiles([])
+      setListing(true)
+      listHFRepoFiles(repo, localModelsRequestScope(owner))
+        .then((r: { files: HFFileGroup[] }): void => setFiles(r.files))
+        .catch((e: Error) => setError(e.message))
+        .finally(() => setListing(false))
+    },
+    [owner]
+  )
 
   const startBrowsedDownload = useCallback(
-    (repo: string, group: HFFileGroup) => {
-      downloadBrowsedModel(repo, group.paths)
-        .then(r => {
+    (repo: string, group: HFFileGroup): void => {
+      downloadBrowsedModel(repo, group.paths, localModelsRequestScope(owner))
+        .then((r: Awaited<ReturnType<typeof downloadBrowsedModel>>): void => {
           if (r.already_downloaded) {
-            notify({ durationMs: 3_000, kind: 'info', message: copy.browseAlreadyDownloaded, title: copy.browseTitle })
+            notify({
+              durationMs: 3_000,
+              kind: 'info',
+              message: copy.browseAlreadyDownloaded,
+              title: localModelsNotificationTitle(owner)
+            })
 
             return
           }
 
           // Same feedback loop as catalog downloads: the job store polls
           // and the tile renders live progress from it.
-          watchLocalRuntimeJobs()
+          watchLocalRuntimeJobs(owner, client)
           notify({
             durationMs: 3_000,
             kind: 'info',
             message: copy.browseDownloadStarted.replace('{name}', r.model_id),
-            title: copy.browseTitle
+            title: localModelsNotificationTitle(owner)
           })
           onChanged()
         })
-        .catch((e: Error) => notifyError(e, copy.browseTitle))
+        .catch((e: Error): void => {
+          if (isCurrentLocalModelsOwner(owner)) {
+            notifyError(e, copy.browseTitle)
+          }
+        })
     },
-    [copy.browseAlreadyDownloaded, copy.browseDownloadStarted, copy.browseTitle, onChanged]
+    [copy.browseAlreadyDownloaded, copy.browseDownloadStarted, copy.browseTitle, onChanged, owner, client]
   )
 
-  const sideload = useCallback(() => {
+  const sideload = useCallback((): void => {
     window.hermesDesktop
       .selectPaths({ filters: [{ extensions: ['gguf'], name: 'GGUF models' }], title: copy.sideloadTitle })
-      .then(paths => {
+      .then((paths: string[]): Promise<void> | undefined => {
         if (!paths.length) {
           return
         }
 
-        return sideloadLocalModel(paths[0]).then(r => {
-          notify({
-            durationMs: 3_000,
-            kind: 'success',
-            message: r.already_present ? copy.sideloadAlreadyPresent : copy.sideloadDone.replace('{name}', r.model_id),
-            title: copy.browseTitle
-          })
-          onChanged()
-        })
+        return sideloadLocalModel(paths[0], localModelsRequestScope(owner)).then(
+          (r: Awaited<ReturnType<typeof sideloadLocalModel>>): void => {
+            notify({
+              durationMs: 3_000,
+              kind: 'success',
+              message: r.already_present
+                ? copy.sideloadAlreadyPresent
+                : copy.sideloadDone.replace('{name}', r.model_id),
+              title: localModelsNotificationTitle(owner)
+            })
+            onChanged()
+          }
+        )
       })
-      .catch((e: Error) => notifyError(e, copy.browseTitle))
-  }, [copy.browseTitle, copy.sideloadAlreadyPresent, copy.sideloadDone, copy.sideloadTitle, onChanged])
+      .catch((e: Error): void => {
+        if (isCurrentLocalModelsOwner(owner)) {
+          notifyError(e, copy.browseTitle)
+        }
+      })
+  }, [copy.browseTitle, copy.sideloadAlreadyPresent, copy.sideloadDone, copy.sideloadTitle, onChanged, owner])
 
   return (
     <SettingsSection
@@ -1117,14 +1113,10 @@ function BrowseSection({ onChanged }: { onChanged: () => void }) {
                             <ProgressBar paused={dJob.status === 'paused'} percent={dJob.percent} />
 
                             <span className="text-[0.68rem] text-muted-foreground">
-                              {dJob.status === 'paused'
-                                ? copy.downloadPausedLabel
-                                : !dJob.done_bytes && dJob.detail
-                                  ? dJob.detail
-                                  : copy.downloadProgress(gbLabel(dJob.done_bytes), gbLabel(dJob.total_bytes))}
+                              {downloadStatusText(dJob, copy)}
                             </span>
 
-                            <LocalModelDownloadActions job={dJob} />
+                            <LocalModelDownloadActions job={dJob} owner={owner} />
                           </>
                         ) : (
                           <span className="flex items-center justify-between gap-2">

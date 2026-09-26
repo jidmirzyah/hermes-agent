@@ -22,19 +22,6 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Ensure boto3/botocore are installed before any code in this module runs.
-# Upstream removed boto3 from [all] extras (PRs #24220, #24515); pm
-# handles on-demand installation so the Bedrock provider still works in the
-# EKS deployment without baking boto3 into the base image.
-# ---------------------------------------------------------------------------
-try:
-    from pm import ensure_import
-    ensure_import("bedrock")
-except Exception:
-    pass  # pm unavailable or install failed — let downstream imports surface the real error
-
-
 _bedrock_runtime_client_cache: Dict[str, Any] = {}
 _bedrock_control_client_cache: Dict[str, Any] = {}
 # Routed multiplex profiles: one client per (profile home, region). boto3 freezes the credential
@@ -98,6 +85,14 @@ _MIN_BOTO3_VERSION = (1, 34, 59)
 def _require_boto3():
     """Import boto3; converse_stream() needs >= 1.34.59 (a system boto3 can shadow the venv pin)."""
     try:
+        # boto3 left [all] (PRs #24220, #24515); PM installs the [bedrock] extra on first use. This
+        # runs at the first client build, never at import: an import-time sync would rebuild the
+        # dependency environment of whatever process happens to import this module.
+        try:
+            from pm import ensure_import
+            ensure_import("bedrock")
+        except Exception as exc:  # the import below reports the real failure
+            logger.warning("boto3 lazy install did not complete: %s", exc)
         import boto3
     except ImportError:
         raise ImportError(

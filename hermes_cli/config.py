@@ -2536,6 +2536,18 @@ def load_env() -> Dict[str, str]:
     return load_env_file(get_env_path())
 
 
+def _parse_env_value(raw_value: str) -> str:
+    """Frozen compat surface name (tests/compat/old_updater_surface.json).
+
+    Pre-PM updaters lazy-import ``hermes_cli.config._parse_env_value`` after the
+    checkout swap. The tokenizer moved to ``agent.secret_scope._parse_env_value``
+    (c849bc383a), so this forwards there — behavior-preserving by construction.
+    """
+    from agent.secret_scope import _parse_env_value as _parse
+
+    return _parse(raw_value)
+
+
 def invalidate_env_cache() -> None:
     """Drop the ``.env`` memo so the next ``load_env()`` sees a write even on coarse-mtime filesystems
     (save_env_value / remove_env_value / sanitize_env_file call this)."""

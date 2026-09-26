@@ -6,7 +6,7 @@ import pytest
 
 
 def test_install_runtime_selection_is_scoped_and_read_only(tmp_path, monkeypatch):
-    from hermes_cli import runtime_paths
+    from pm import environments as runtime_paths
 
     home = tmp_path / "home"
     monkeypatch.setenv("HERMES_HOME", str(home))
@@ -33,7 +33,7 @@ def test_boot_uses_one_selected_dependency_tree_in_fresh_process(tmp_path, monke
     import os
     import subprocess
     import sys
-    from hermes_cli import runtime_paths
+    from pm import environments as runtime_paths
 
     root = tmp_path / "repo"
     base = root / "venv"
@@ -53,7 +53,7 @@ def test_boot_uses_one_selected_dependency_tree_in_fresh_process(tmp_path, monke
         "venv": {"environment": str(selected)}
     }}))
     code = (
-        "import sys; from pathlib import Path; from hermes_cli.runtime_paths import activate_dependencies; "
+        "import sys; from pathlib import Path; from pm.environments import activate_dependencies; "
         "sys.path.insert(0, sys.argv[2]); activate_dependencies(Path(sys.argv[1])); "
         "import probe_package, importlib.util; print(probe_package.version); "
         "print(importlib.util.find_spec('base_only') is None)"
@@ -70,7 +70,7 @@ def test_broken_environment_keeps_explicit_repair_entry_reachable(tmp_path, monk
     import os
     import subprocess
     import sys
-    from hermes_cli.runtime_paths import runtime_facts_path
+    from pm.environments import runtime_facts_path
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
     repo = Path(__file__).resolve().parents[2]
@@ -90,7 +90,7 @@ def test_manual_repair_bypasses_damaged_generation_activation(tmp_path, monkeypa
     import os
     import subprocess
     import sys
-    from hermes_cli.runtime_paths import install_state_dir, runtime_facts_path, site_packages
+    from pm.environments import install_state_dir, runtime_facts_path, site_packages
 
     repo = Path(__file__).resolve().parents[2]
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
@@ -112,7 +112,7 @@ def test_manual_repair_bypasses_damaged_generation_activation(tmp_path, monkeypa
 
 @pytest.mark.parametrize("data", [[], {"packages": []}, {"packages": {"venv": []}}])
 def test_malformed_selection_has_actionable_error(tmp_path, monkeypatch, data):
-    from hermes_cli import runtime_paths
+    from pm import environments as runtime_paths
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
     record = runtime_paths.runtime_facts_path(tmp_path / "repo")
     record.parent.mkdir(parents=True)
@@ -123,7 +123,7 @@ def test_malformed_selection_has_actionable_error(tmp_path, monkeypatch, data):
 
 @pytest.mark.parametrize("bad_path", ["outside", "missing"])
 def test_invalid_selected_environment_never_silently_falls_back(tmp_path, monkeypatch, bad_path):
-    from hermes_cli import runtime_paths
+    from pm import environments as runtime_paths
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
     root = tmp_path / "repo"

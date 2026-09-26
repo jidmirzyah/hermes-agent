@@ -101,7 +101,6 @@ def _read_lines(path: Path, fail_log: str) -> List[str]:
     if not path.exists():
         return []
     try:
-        # MERGE-CHECK: our utf-8-sig read fix kept (BOM-tolerant; ours read metadata files this way)
         return [s for s in (line.strip() for line in path.read_text(encoding="utf-8-sig").splitlines()) if s]
     except OSError as e:
         logger.debug(fail_log, e)
@@ -161,7 +160,6 @@ def _read_hub_installed_names() -> Set[str]:
     try:
         # errors="replace": hub descriptions can carry Windows-1252 high bytes; a strict read raises
         # UnicodeDecodeError (a ValueError, not caught below) and would 500 the whole /api/skills endpoint.
-        # MERGE-CHECK: utf-8-sig kept from ours (BOM-tolerant lock.json read).
         data = json.loads(lock_path.read_text(encoding="utf-8-sig", errors="replace"))
         installed = (data.get("installed") or {}) if isinstance(data, dict) else None
         if not isinstance(installed, dict):

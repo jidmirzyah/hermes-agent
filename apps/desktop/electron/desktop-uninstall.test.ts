@@ -10,6 +10,11 @@
  */
 
 import assert from 'node:assert/strict'
+import { type ChildProcess, spawn } from 'node:child_process'
+import { once } from 'node:events'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 
 import { test } from 'vitest'
 
@@ -159,7 +164,61 @@ test('shouldRemoveAppBundle requires packaged AND a resolved path', () => {
   assert.equal(shouldRemoveAppBundle(false, null), false)
 })
 
-// --- buildPosixCleanupScript ---
+test.skipIf(process.platform === 'win32').each(['gui', 'lite', 'full'] as const)(
+  'POSIX cleanup executes %s in its sandbox and preserves its sibling',
+  async (mode: string): Promise<void> => {
+    const root: string = fs.mkdtempSync(path.join(os.tmpdir(), "uninstall-o'brien-"))
+    const app: string = path.join(root, 'App with spaces')
+    const sibling: string = path.join(root, 'App with spaces-other')
+    const recorder: string = path.join(root, "recorder's.cjs")
+    const resultFile: string = path.join(root, 'observed.json')
+    const script: string = path.join(root, 'cleanup.sh')
+    let child: ChildProcess | undefined
+
+    try {
+      fs.mkdirSync(app)
+      fs.mkdirSync(sibling)
+      fs.writeFileSync(
+        recorder,
+        `require('node:fs').writeFileSync(${JSON.stringify(resultFile)}, JSON.stringify({argv:process.argv.slice(2), home:process.env.HERMES_HOME, pythonPath:process.env.PYTHONPATH, cwd:process.cwd()}))`
+      )
+      fs.writeFileSync(
+        script,
+        buildPosixCleanupScript({
+          desktopPid: 0,
+          pythonExe: process.execPath,
+          pythonPath: mode === 'gui' ? null : root,
+          agentRoot: root,
+          uninstallArgs: [recorder, ...uninstallArgsForMode(mode)],
+          appPath: mode === 'lite' ? null : app,
+          hermesHome: root
+        })
+      )
+      child = spawn('bash', [script], {
+        env: { ...process.env, PYTHONPATH: 'inherited', HERMES_HOME: root },
+        stdio: 'ignore'
+      })
+      await once(child, 'close')
+      assert.equal(child.exitCode, 0)
+      assert.deepEqual(JSON.parse(fs.readFileSync(resultFile, 'utf8')), {
+        argv: ['-m', 'hermes_cli.uninstall', '--mode', mode],
+        home: root,
+        pythonPath: mode === 'gui' ? 'inherited' : `${root}:inherited`,
+        cwd: root
+      })
+      assert.equal(fs.existsSync(app), mode === 'lite')
+      assert.equal(fs.existsSync(sibling), true)
+      assert.equal(fs.existsSync(script), false)
+    } finally {
+      if (child && child.exitCode === null && child.signalCode === null) {
+        child.kill()
+        await once(child, 'close')
+      }
+
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  }
+)
 
 test('buildPosixCleanupScript waits for the PID, runs the uninstall module, removes bundle', (): void => {
   const script = buildPosixCleanupScript({
@@ -180,68 +239,6 @@ test('buildPosixCleanupScript waits for the PID, runs the uninstall module, remo
   assert.match(script, /'-m' 'hermes_cli\.uninstall' '--mode' 'gui'/)
   assert.match(script, /rm -rf '\/opt\/hermes\/linux-unpacked'/)
   assert.match(script, /export HERMES_HOME='\/home\/x\/\.hermes'/)
-})
-
-test('buildPosixCleanupScript exports PYTHONPATH when pythonPath is set (lite/full)', () => {
-  const script = buildPosixCleanupScript({
-    desktopPid: 1,
-    pythonExe: '/usr/bin/python3',
-    pythonPath: '/home/x/.hermes/hermes-agent',
-    agentRoot: '/home/x/.hermes/hermes-agent',
-    uninstallArgs: ['-m', 'hermes_cli.uninstall', '--mode', 'full'],
-    appPath: null,
-    hermesHome: '/home/x/.hermes'
-  })
-
-  // System python + source on PYTHONPATH so import hermes_cli works while the
-  // venv is torn down.
-  assert.match(script, /export PYTHONPATH='\/home\/x\/\.hermes\/hermes-agent'/)
-  assert.match(script, /'\/usr\/bin\/python3' '-m' 'hermes_cli\.uninstall' '--mode' 'full'/)
-})
-
-test('buildPosixCleanupScript omits PYTHONPATH when pythonPath is null (gui)', () => {
-  const script = buildPosixCleanupScript({
-    desktopPid: 1,
-    pythonExe: '/p/python',
-    pythonPath: null,
-    agentRoot: '/a',
-    uninstallArgs: ['-m', 'hermes_cli.uninstall', '--mode', 'gui'],
-    appPath: null,
-    hermesHome: '/h'
-  })
-
-  assert.doesNotMatch(script, /export PYTHONPATH/)
-})
-
-test('buildPosixCleanupScript omits the bundle rm when appPath is null', () => {
-  const script = buildPosixCleanupScript({
-    desktopPid: 1,
-    pythonExe: '/p/python',
-    pythonPath: null,
-    agentRoot: '/a',
-    uninstallArgs: ['-m', 'hermes_cli.uninstall', '--mode', 'lite'],
-    appPath: null,
-    hermesHome: '/h'
-  })
-
-  assert.doesNotMatch(script, /rm -rf '\//)
-  // Still runs the uninstall.
-  assert.match(script, /'-m' 'hermes_cli\.uninstall' '--mode' 'lite'/)
-})
-
-test('buildPosixCleanupScript single-quote-escapes paths with apostrophes', () => {
-  const script = buildPosixCleanupScript({
-    desktopPid: 1,
-    pythonExe: "/home/o'brien/python",
-    pythonPath: null,
-    agentRoot: '/a',
-    uninstallArgs: ['-m', 'hermes_cli.uninstall', '--mode', 'gui'],
-    appPath: null,
-    hermesHome: '/h'
-  })
-
-  // The apostrophe is closed-escaped-reopened so the shell sees the literal.
-  assert.match(script, /'\/home\/o'\\''brien\/python'/)
 })
 
 // --- buildWindowsCleanupScript ---

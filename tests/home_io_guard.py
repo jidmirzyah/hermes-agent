@@ -8,7 +8,17 @@ import os
 from pathlib import Path
 import shutil
 import sqlite3
+import sys
 import threading
+
+_INTERPRETER_PREFIXES = tuple({
+    Path(p).resolve() for p in (sys.prefix, sys.base_prefix, sys.exec_prefix, sys.base_exec_prefix)
+} | {
+    # A PM-activated developer shell runs sys.prefix's python against a dependency generation
+    # whose site-packages sits under the (real) Hermes home; third-party imports from it are the
+    # interpreter's installation, not Hermes state.
+    Path(p).resolve() for p in sys.path if p and Path(p).name in ("site-packages", "dist-packages")
+})
 
 
 class HomeIOGuard:
@@ -17,24 +27,56 @@ class HomeIOGuard:
         self.checking = threading.local()
         self.directories: dict[int, Path] = {}
 
-    def check(self, value, *, dir_fd=None):
+    def check(self, value, *, dir_fd=None, metadata=False):
         if value is None or isinstance(value, int) or getattr(self.checking, "active", False):
             return
         self.checking.active = True
         try:
-            candidate = Path(os.fsdecode(value)).expanduser()
+            candidate = Path(os.fsdecode(value))
+            if candidate.parts and candidate.parts[0].startswith("~"):
+                # A test may have patched Path.expanduser to fail; the guard must not
+                # turn that into its own crash — the unexpanded path is checked instead.
+                try:
+                    candidate = candidate.expanduser()
+                except Exception:
+                    pass
             if dir_fd is not None and not candidate.is_absolute():
                 parent = self.directories.get(dir_fd)
                 if parent is None:
                     raise AssertionError("TEST BUG: untracked dir_fd in guarded filesystem I/O")
                 candidate = parent / candidate
             absolute = Path(os.path.abspath(candidate))
+            # /proc/<pid>/fd/N is descriptor inspection (deleted-WAL holder scans stat the magic
+            # link to compare inode identity); resolving it names whatever file that fd holds,
+            # which is not I/O against the home.
+            if metadata and absolute.is_relative_to("/proc"):
+                return
             roots = self.roots()
+            # Resolving the root itself (get_default_hermes_root's relative_to
+            # probe) reads no state; only its contents are guarded.
+            if metadata and absolute in roots:
+                return
+            # ``shutil.which`` stats/accesses ``<PATH entry>/<name>``. A developer shell puts
+            # PM's tool store (~/.hermes/tools/...) on PATH; probing an executable there is
+            # command lookup, not reading Hermes state. CI has no such entries.
+            if metadata and any(absolute.parent == entry for entry in self._path_entries()):
+                return
+            # The interpreter's own installation (a PM-managed python under ~/.hermes/tools):
+            # stdlib source reads (linecache, traceback) are not Hermes state either, nor is
+            # realpath() walking up through its ancestors.
+            if any(absolute.is_relative_to(prefix) or (metadata and prefix.is_relative_to(absolute))
+                   for prefix in _INTERPRETER_PREFIXES):
+                return
             # Check the lexical path first: resolving must not probe a protected
             # tree merely to decide that the original path was forbidden.
             if any(absolute.is_relative_to(root) for root in roots):
                 self.refuse(value)
             resolved = absolute.resolve()
+            if metadata and resolved in roots:
+                return
+            # A fixture symlink to the running interpreter resolves into its installation.
+            if any(resolved.is_relative_to(prefix) for prefix in _INTERPRETER_PREFIXES):
+                return
             if any(resolved.is_relative_to(root) for root in roots):
                 self.refuse(value)
         finally:
@@ -47,23 +89,29 @@ class HomeIOGuard:
             "Use the isolated HERMES_HOME or a temporary fixture instead."
         )
 
+    @staticmethod
+    def _path_entries():
+        return [Path(os.path.abspath(entry)) for entry in os.environ.get("PATH", "").split(os.pathsep) if entry]
+
     def install(self, monkeypatch):
-        def wrap(module, name, parameters):
+        def wrap(module, name, parameters, *, metadata=False):
             original = getattr(module, name)
 
             @wraps(original)
             def guarded(*args, **kwargs):
                 for index, (parameter, descriptor) in enumerate(parameters):
                     value = args[index] if index < len(args) else kwargs.get(parameter)
-                    self.check(value, dir_fd=kwargs.get(descriptor) if descriptor else None)
+                    self.check(value, dir_fd=kwargs.get(descriptor) if descriptor else None, metadata=metadata)
                 return original(*args, **kwargs)
 
             monkeypatch.setattr(module, name, guarded)
 
         for module in (builtins, io):
             wrap(module, "open", (("file", None),))
-        for name in ("mkdir", "stat", "lstat", "unlink", "remove", "rmdir", "chmod", "utime", "readlink", "access"):
+        for name in ("mkdir", "unlink", "remove", "rmdir", "chmod", "utime"):
             wrap(os, name, (("path", "dir_fd"),))
+        for name in ("stat", "lstat", "readlink", "access"):
+            wrap(os, name, (("path", "dir_fd"),), metadata=True)
         for name in ("makedirs", "listdir", "scandir"):
             wrap(os, name, (("name" if name == "makedirs" else "path", None),))
         for name in ("rename", "replace"):
@@ -85,10 +133,10 @@ class HomeIOGuard:
 
         @wraps(original_close)
         def guarded_close(fd):
-            try:
-                return original_close(fd)
-            finally:
-                self.directories.pop(fd, None)
+            # Forget the old owner before close releases the number for reuse
+            # by another thread's open; afterwards we could erase its mapping.
+            self.directories.pop(fd, None)
+            return original_close(fd)
 
         monkeypatch.setattr(os, "open", guarded_open)
         monkeypatch.setattr(os, "close", guarded_close)

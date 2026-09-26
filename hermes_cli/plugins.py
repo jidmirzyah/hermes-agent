@@ -43,7 +43,7 @@ from hermes_cli.plugins_manifest import (  # noqa: F401 — re-exported
 )
 from hermes_cli.plugins_discovery import (  # noqa: F401 — re-exported
     ENTRY_POINTS_GROUP, _get_disabled_plugins, _get_enabled_plugins, collect_directory_manifests,
-    discover_entrypoint_manifests, gate_manifest, resolve_manifest_winners, scan_directory,
+    discover_entrypoint_manifests, gate_manifest, scan_directory,
 )
 from hermes_cli.plugins_loader import (
     PluginLoaderMixin, _BARE_MODULE_SCOPE, _MODULE_NAMESPACE_LOCK, _NS_PARENT, _evict_modules,
@@ -1379,7 +1379,7 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
         # Later sources win on key collision (project > user > bundled) except a flat impostor claiming a
         # bundled key from another directory (resolve_manifest_winners); gate the winners, then
         # load survivors in requires_plugins order (see resolve_plugin_load_order).
-        winners = resolve_manifest_winners(manifests)
+        winners = {manifest_key(m): m for m in manifests}
         to_load = {k: m for k, m in winners.items() if self._gate_manifest(m, disabled, enabled)}
         for lookup_key in resolve_plugin_load_order(to_load):
             manifest = to_load[lookup_key]

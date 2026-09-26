@@ -14,6 +14,23 @@ from pm.package import InstallError, Package
 _packages: dict[str, Package] = {}
 
 
+_BUILTIN_MODULES = ("pm.packages", "pm.security_packages")
+
+
+def _builtins_loaded() -> dict[str, Package]:
+    """Register the built-in definitions on first read, not on ``import pm``.
+
+    Process boot imports ``pm.environments`` before any dependency is importable;
+    pulling the whole package catalogue (downloader, network) in with it would
+    cost every launch ~40ms and break the stripped payloads that ship only the
+    pre-import files.
+    """
+    for module in _BUILTIN_MODULES:
+        if module not in sys.modules:
+            importlib.import_module(module)
+    return _packages
+
+
 def register(cls):
     instance = cls()
     if not instance.name:
@@ -23,13 +40,20 @@ def register(cls):
 
 
 def get_package(name: str) -> Package:
-    if name not in _packages:
+    packages = _builtins_loaded()
+    if name not in packages:
         raise KeyError(f"unknown package: {name}")
-    return _packages[name]
+    return packages[name]
 
 
 def all_packages() -> list[str]:
-    return sorted(_packages)
+    return sorted(_builtins_loaded())
+
+
+def source_install_packages(names: list[str]) -> list[str]:
+    """Select runtime roots; internal tools enter only through dependencies."""
+    return [name for name in names
+            if not get_package(name).internal and (name == "python" or not get_package(name).optional)]
 
 
 def package_definitions(names: list[str] | None = None) -> list[dict[str, Any]]:
@@ -39,7 +63,7 @@ def package_definitions(names: list[str] | None = None) -> list[dict[str, Any]]:
     source bodies, or the application's import path. ``names`` selects a closure.
     """
     definitions = []
-    for package in walk(names) if names is not None else list(_packages.values()):
+    for package in walk(names) if names is not None else list(_builtins_loaded().values()):
         cls = type(package)
         if cls.__module__ == "pm.packages":
             continue
@@ -116,7 +140,9 @@ def load_package_definitions(definitions: list[dict[str, Any]]) -> None:
                 definition["name"], f"cannot load package definition {module_name}.{definition['qualname']}: {exc}",
                 "keep the package definition and its dependencies importable in the isolated PM runtime",
             ) from exc
-    # Import-time decorators must not override the caller's final selection.
+    # Import-time decorators must not override the caller's final selection:
+    # load the built-ins first so a restored definition wins.
+    _builtins_loaded()
     _packages.update(restored)
 
 

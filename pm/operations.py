@@ -19,7 +19,7 @@ from pm.package import InstallError
 
 
 def _require_install_allowed(explicit: bool) -> None:
-    from pm.ensure import _refuse_lazy, lazy_installs_allowed
+    from pm.install import _refuse_lazy, lazy_installs_allowed
 
     if not explicit and not lazy_installs_allowed():
         raise _refuse_lazy("venv", "Python dependency operation requires an explicit request")
@@ -39,7 +39,7 @@ def build_environment(
     Failure removes only the destination exclusively created by this invocation.
     Sealed builds prune only the .pth files that refer to build-time state.
     """
-    from pm.environment import managed_environment, prune_site_pth
+    from pm.environment import _fresh_build, managed_environment
 
     source, out = Path(source).absolute(), Path(out).absolute()
     if not (source / "pyproject.toml").is_file():
@@ -54,17 +54,9 @@ def build_environment(
         cache=Path(cache) if cache is not None else None, env=env,
         offline=offline, explicit=explicit, output=sys.stderr,
     )
-    out.mkdir(parents=True)
-    try:
-        environment.create()
+    with _fresh_build(environment, sealed=sealed):
         environment.sync(source, extras=extras, groups=groups, only_groups=only_groups, all_extras=all_extras,
                          no_install_project=no_install_project, frozen=frozen, timeout=timeout)
-        environment.check()
-        if sealed:
-            prune_site_pth(out)
-    except BaseException:
-        shutil.rmtree(out, ignore_errors=True)
-        raise
     return environment.executable
 
 
@@ -128,7 +120,9 @@ def _environment_root(name: str, root: Path | None) -> Path:
 
 
 def _python(environment: Path) -> Path:
-    return environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    from pm.environments import venv_python
+
+    return venv_python(environment)
 
 
 def _selection(root: Path) -> dict:
@@ -195,7 +189,7 @@ def ensure_environment(
     An optional tool entrypoint is validated before publication, not afterwards.
     """
     from hermes_cli.runtime_state import _lock
-    from pm.ensure import _refuse_lazy, lazy_installs_allowed
+    from pm.install import _refuse_lazy, lazy_installs_allowed
     from pm.lock import Lockfile, _write
     from pm import paths
     from pm.store import current_target

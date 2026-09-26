@@ -7,10 +7,10 @@ import subprocess
 import sys
 import tempfile
 import argparse
+from dataclasses import asdict
 from pathlib import Path
 
-from pm.cli import _install_names
-from pm.ensure import _store, _facts, _lockfile
+from pm.install import _lockfile
 from pm.lock import Facts
 from pm.registry import get_package, walk
 from pm.store import current_target
@@ -52,17 +52,33 @@ def _arch_guard(store_dir: Path) -> list[str]:
 
 
 
-def stage_uv_cache(source: Path, destination: Path) -> None:
-    """Keep extracted wheels for offline installs, not unsigned build ZIPs.
+from pm.cache_lock import lock_package_names, prune_uv_cache_to_lock
 
-    The macOS signer reaches extracted native code, but not code inside ZIPs.
-    uv installs built wheels from their extracted cache entries.
+__all__ = ["prune_uv_cache_to_lock", "lock_package_names", "stage_uv_cache"]
+
+
+def stage_uv_cache(source: Path, destination: Path) -> None:
+    """Ship everything a per-install venv rebuild resolves from offline.
+
+    sdist source trees (including Rust target/ outputs) are build-only bulk —
+    offline rebuilds install the built wheel entries, never recompile from
+    source — so they stay out. Built wheel ZIPs (including the copies uv keeps
+    beside sdist metadata.msgpack shards) ship: without them an offline
+    rebuild falls back to wanting the sdist download and fails closed.
     """
-    shutil.copytree(source, destination)
-    for bucket in destination.glob("sdists-v*"):
-        for wheel in bucket.rglob("*.whl"):
-            if wheel.is_file():
-                wheel.unlink()
+    def ignore(directory: str, names: list[str]) -> set[str]:
+        path = Path(directory)
+        parts = path.relative_to(source).parts
+        if not parts or not parts[0].startswith("sdists-v"):
+            return set()
+        # Source trees live under a revision selected by a sibling pointer.
+        if "src" in names and (path / "src").is_dir() and any(
+            (path.parent / pointer).is_file() for pointer in ("revision.http", "revision.rev")
+        ):
+            return {"src"}
+        return set()
+
+    shutil.copytree(source, destination, ignore=ignore)
 
 
 def stage_pm_runtime(root: Path, python: Path, repo: Path, *, offline: bool = False,
@@ -80,16 +96,23 @@ def stage_pm_runtime(root: Path, python: Path, repo: Path, *, offline: bool = Fa
 
 def stage_native(args) -> int:
     """Isolate HOME and PM state, but retain the provider's reusable build cache."""
+    from pm.packages import uv_cache_dir
+
     out = Path(args.out).resolve()
     out.mkdir(parents=True, exist_ok=True)
     (out / "manifest.json").unlink(missing_ok=True)
     root = Path(__file__).resolve().parents[2]
-    cache = Path(getattr(args, "cache", None) or os.environ.get("UV_CACHE_DIR") or out.parent / ".uv-cache").resolve()
+    # Resolve before HOME isolation so the build warms the cache CI saves.
+    cache = Path(getattr(args, "cache", None) or os.environ.get("UV_CACHE_DIR") or uv_cache_dir()).resolve()
     base_env = dict(os.environ)
     if current_target() == "win32-arm64":
         from scripts.build.windows_deps import prepare_windows_environment
 
         base_env = prepare_windows_environment(source=root, state=out.parent / ".build-deps", env=base_env)
+    # Rustup resolves its installed toolchain under HOME unless these are explicit.
+    # Preserve the build host's compiler and Cargo cache before isolating app state.
+    for key, directory in (("CARGO_HOME", ".cargo"), ("RUSTUP_HOME", ".rustup")):
+        base_env.setdefault(key, str(Path.home() / directory))
     with tempfile.TemporaryDirectory(prefix=".build-", dir=out) as work:
         env = {**base_env, "HOME": work, "USERPROFILE": work,
                "HERMES_HOME": str(Path(work) / ".hermes"),
@@ -106,28 +129,50 @@ def stage_native(args) -> int:
         return subprocess.run(command, cwd=root, env=env).returncode
 
 
-def _stage_native(args) -> int:
-    """Stage a complete payload for THIS machine's target into --out:
-    repo snapshot + store + facts (via the normal install path, redirected)
-    + a relocatable venv built on the staged interpreter and synced from
-    uv.lock. Built natively per (os, arch); there is no cross-target
-    staging."""
-    import os
+def prune_staged_store(store_dir: Path, names: list[str]) -> None:
+    """Prune this build's store, never the ambient user's tool store."""
+    facts = Facts(store_dir / "facts.json", strict=True)
+    facts.retain({package.name for package in walk(names)})
+    keep = facts.entries_in_use()
+    for entry in store_dir.iterdir():
+        if entry.is_dir() and not entry.name.startswith(".") and entry.name not in keep:
+            shutil.rmtree(entry)
 
+
+def prepare_native(*, out: Path, ref: str, source: Path, cache: Path,
+                   tools: Path | None = None, env: dict | None = None) -> Path:
+    """Prepare final payload dependencies inside the caller's isolated PM process.
+
+    The caller supplies its compiler environment; only the full standalone
+    wrapper provisions machine prerequisites and isolates HOME.
+    """
+    from scripts.bundles.native_prepared import preparation_lock, prepared_path
+
+    out = Path(out).absolute()
+    if out != out.resolve():
+        raise ValueError("symlinked native output")
+    out.mkdir(parents=True, exist_ok=True)
+    with preparation_lock(out):
+        prepared_path(out).unlink(missing_ok=True)
+        (out / "manifest.json").unlink(missing_ok=True)
+        return _prepare_native(out=out, ref=ref, source=Path(source).resolve(),
+                               cache=Path(cache).resolve(), tools=tools, env=env)
+
+
+def _prepare_native(*, out: Path, ref: str, source: Path, cache: Path,
+                    tools: Path | None, env: dict | None) -> Path:
     from pm import paths
+    from pm.package import InstallError
 
-    out = Path(args.out).resolve()
     store_dir = out / "tools"
     store_dir.mkdir(parents=True, exist_ok=True)
-    # A manifest from a previous run would make this payload look sealed
-    # and refuse its own staging; it is rewritten at the end.
-    (out / "manifest.json").unlink(missing_ok=True)
-
     repo_dir = out / "hermes-agent"
-    ref = args.ref or "HEAD"
-    from scripts.bundles.payload import snapshot
+    from scripts.bundles.payload import INERT_SNAPSHOT_DIRS, snapshot
     print(f"staging repo snapshot ({ref})…", flush=True)
-    snapshot(getattr(args, "source", None) or paths.repo_root(), ref, repo_dir)
+    revision = subprocess.check_output(
+        ["git", "rev-parse", "--verify", f"{ref}^{{commit}}"], cwd=source,
+        text=True, encoding="utf-8").strip()
+    snapshot(source, revision, repo_dir, exclude=INERT_SNAPSHOT_DIRS)
     # PM's provider code reads its adjacent lock. Never combine that tool graph
     # with a revision selecting different pins.
     if (repo_dir / "pm/lock.json").read_bytes() != paths.lockfile_path().read_bytes():
@@ -137,37 +182,35 @@ def _stage_native(args) -> int:
         n for n in _bundle_package_names()
         if get_package(n).missing_reason(current_target()) is None
     ]
-    failed = _install_names(names)
+    from pm import prepare_tools, stage_tools
+
+    prepare_tools(names, out=Path(tools) if tools is not None else store_dir,
+                  target=current_target(), cache=cache)
+    if tools is not None:
+        stage_tools(names, source_store=Path(tools), out=store_dir, target=current_target())
 
     # Prune the staged store BEFORE the venv sync and packaging: drop the
     # fetch-<sha> download-cache archives (needed only at install time — dead
     # weight in the shipped payload AND in the CI cache that restores this
     # dir) and any orphaned package versions left over from an older lock
     # the cache carried in. A lean staged store = a lean CI cache.
-    if failed:
-        return 1
+
     # Only this build's store is ours to prune; machine-wide partials are not.
     # Cached facts may still name packages removed from the current selection.
     # Retain the dependency closure before using facts as the deletion roots.
-    facts = Facts(store_dir / "facts.json", strict=True)
-    facts.retain({package.name for package in walk(names)})
-    keep = facts.entries_in_use()
-    for entry in store_dir.iterdir():
-        if entry.is_dir() and not entry.name.startswith(".") and entry.name not in keep:
-            shutil.rmtree(entry)
+    prune_staged_store(store_dir, names)
 
 
-    python_fact = _facts().get("python")
+    facts = Facts(store_dir / "facts.json")
+    python_fact = facts.get("python")
     if python_fact is None:
-        print("✗ venv: no staged interpreter to build on")
-        return 1
+        raise InstallError("venv", "no staged interpreter to build on")
     python_bin = get_package("python").binary(
-        _store().entry(python_fact["entry"]), current_target()
+        store_dir / python_fact["entry"], current_target()
     )
 
     if python_bin is None:
         raise FileNotFoundError("staged Python executable is missing")
-    cache = Path(os.environ["UV_CACHE_DIR"])
     stage_pm_runtime(out, python_bin, repo_dir, cache=cache)
     print("✓ pm-runtime (independent locked dependencies)", flush=True)
 
@@ -176,41 +219,26 @@ def _stage_native(args) -> int:
     venv_dir = out / "venv"
     if venv_dir.exists():
         shutil.rmtree(venv_dir)
-    env = dict(os.environ)
-    if current_target().startswith("darwin"):
-        # python-build-standalone bakes phantom toolchain paths (its build
-        # dir's llvm-ar) into sysconfig; sdist builds then fail with
-        # "No such file or directory: .../tools/llvm/bin/llvm-ar". Point
-        # sdist builds at the machine's real toolchain.
-        env.setdefault("AR", "/usr/bin/ar")
-        env.setdefault("CC", "clang")
+    env = dict(os.environ if env is None else env)
     from pm import build_environment
-    from pm.package import InstallError
 
-    try:
-        build_environment(source=repo_dir, python=python_bin, out=venv_dir,
-                          env=env, cache=cache, all_extras=True, sealed=True, explicit=True)
-    except InstallError as exc:
-        print(f"✗ venv: {exc}")
-        return 1
+    # Cold native wheels need a larger budget than interactive installs.
+    build_environment(source=repo_dir, python=python_bin, out=venv_dir,
+                      env=env, cache=cache, all_extras=True, sealed=True, explicit=True,
+                      timeout=2 * 60 * 60)
     print("✓ venv (all extras, on the staged interpreter)")
 
     # Inventory the staged interpreter before publishing the bundle contract.
-    from pm.features import FeatureProbeError, installed_extras, write_features
+    from pm.features import installed_extras, write_features
 
-    try:
-        features = installed_extras(repo_dir, venv_dir, python_exe=python_bin)
-    except FeatureProbeError as exc:
-        print(f"✗ features: {exc}")
-        return 1
+    features = installed_extras(repo_dir, venv_dir, python_exe=python_bin)
     write_features(features, out)
     print(f"✓ enabled-features.json ({len(features)} extras recorded)")
 
-    # Ship the uv cache: the staged venv sync just warmed the hermes-owned
-    # cache with every wheel this payload needs. Copying it in makes a
-    # mutable-venv rebuild from the bundle near-free (`uv sync --offline`
-    # from a warm cache probed at 0.4s vs 1.2s cold) — the blow-away-on-
-    # update contract depends on it.
+    # Ship the full uv cache (build-only sdist sources and wheel ZIPs are
+    # already excluded by stage_uv_cache). Any per-install venv rebuild —
+    # plugin extras, feature changes — resolves entirely from the shipped
+    # wheels with zero network access, on every profile of this install.
     payload_cache = out / "uv-cache"
     if payload_cache.exists():
         shutil.rmtree(payload_cache, ignore_errors=True)
@@ -218,33 +246,77 @@ def _stage_native(args) -> int:
     if src_cache.is_dir():
         print(f"  uv-cache: copying {src_cache} → payload...", flush=True)
         stage_uv_cache(src_cache, payload_cache)
-        print("✓ uv-cache (staged — warm rebuilds for the mutable venv)")
+        pruned = prune_uv_cache_to_lock(payload_cache, repo_dir)
+        print(f"✓ uv-cache (lock-scoped: pruned {pruned} stale entries; offline rebuilds resolve from shipped wheels)", flush=True)
     else:
-        print("  uv-cache: none warm (first bundle on this machine?)")
+        raise InstallError("uv-cache", "runtime dependency cache is missing")
 
     bad = _arch_guard(store_dir)
     for line in bad:
         print(f"✗ arch: {line}")
-        failed += 1
-
-    if failed:
-        return 1
+    if bad:
+        raise InstallError("tools", "native architecture verification failed")
     from scripts.bundles.payload import record_tools
-    recorded = {name: fact["entry"] for name in names if (fact := _facts().get(name)) and "entry" in fact}
+    recorded = {name: fact["entry"] for name in names if (fact := facts.get(name)) and "entry" in fact}
     record_tools(out, paths.lockfile_path(), current_target(), recorded)
-    from scripts.build.agent import assemble
     from scripts.build.inputs import AgentInputs, RESOURCE_ENV, dependency_site
+    from scripts.bundles.native_prepared import publish_prepared
 
-    assemble(AgentInputs(
+    site = dependency_site(venv_dir, python_fact["version"], current_target())
+    (site / "hermes-agent.pth").write_text(
+        Path(os.path.relpath(repo_dir, site)).as_posix() + "\n", encoding="utf-8")
+    from scripts.bundles.payload import relativize_links
+    relativize_links(out)
+    from scripts.bundles.bytecode import bake_bytecode
+    baked = bake_bytecode(out, python_bin)
+    print(f"✓ baked bytecode ({baked['modules']} modules, unchecked-hash, read-only caches)")
+    inputs = AgentInputs(
         project=repo_dir / "pyproject.toml", code=repo_dir, repo="hermes-agent",
         placement="contained", target=current_target(), python=python_bin,
-        site_packages=dependency_site(venv_dir, python_fact["version"], current_target()), environment=venv_dir,
+        site_packages=site, environment=venv_dir,
         tools=store_dir, pm_runtime=out / "pm-runtime", ref=ref,
         resources={name: repo_dir / name for name in RESOURCE_ENV},
-        frontends=getattr(args, "frontends", {}), features=out / "enabled-features.json",
-    ), out)
+        features=out / "enabled-features.json",
+    )
+    return publish_prepared(out, source, revision, inputs)
+
+
+def finish_native(prepared: Path, frontends: dict[str, Path]) -> int:
+    """Consume verified job-local paths. No dependency acquisition or repair."""
+    from scripts.build.agent import assemble
+    from scripts.build.inputs import AgentInputs
+    from scripts.bundles.native_prepared import load_prepared, preparation_lock
+
+    prepared = Path(prepared).absolute()
+    if not prepared.name.endswith(".prepared.json") or not prepared.is_file():
+        raise ValueError("native preparation is missing or invalid; run preparation again")
+    out = prepared.with_name(prepared.name.removesuffix(".prepared.json"))
+    with preparation_lock(out):
+        (out / "manifest.json").unlink(missing_ok=True)
+        inputs = load_prepared(prepared)
+        values = asdict(inputs)
+        values["frontends"] = {name: Path(path).absolute() for name, path in frontends.items()}
+        assemble(AgentInputs.from_dict(values), out)
     print(f"✓ manifest ({out / 'manifest.json'})")
-    return 1 if failed else 0
+    return 0
+
+
+def _stage_native(args) -> int:
+    from pm import paths
+    from pm.features import FeatureProbeError
+    from pm.package import InstallError
+
+    try:
+        prepared = prepare_native(
+            out=Path(args.out), ref=args.ref or "HEAD",
+            source=getattr(args, "source", None) or paths.repo_root(),
+            cache=Path(getattr(args, "cache", None) or os.environ["UV_CACHE_DIR"]),
+            tools=getattr(args, "tools", None),
+        )
+        return finish_native(prepared, getattr(args, "frontends", {}))
+    except (InstallError, FeatureProbeError) as exc:
+        print(f"✗ {exc}")
+        return 1
 
 
 

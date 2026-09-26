@@ -64,13 +64,6 @@ def _add_file(
     zf.writestr(info, data)
 
 
-def _write_zip(path: Path, build) -> Path:
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w") as zf:
-        build(zf)
-    path.write_bytes(buf.getvalue())
-    return path
-
 
 class TestPathTraversal:
     def test_zip_entries_cannot_escape_the_destination(self, tmp_path):

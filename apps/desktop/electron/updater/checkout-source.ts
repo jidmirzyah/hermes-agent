@@ -4,24 +4,26 @@ import { promisify } from 'node:util'
 import { buildDesktopBackendEnv } from '../backend-env'
 import { hiddenWindowsChildOptions } from '../windows-child-options'
 
-export interface SourceUpdate {
-  channel: 'main' | 'stable' | 'canary'
-  latestTag?: string
-  targetSha?: string
-  error?: string
-  message?: string
-}
+import type { UpdaterStatusWire } from './index'
+
+export interface SourceUpdate extends UpdaterStatusWire {}
 
 export interface SourceUpdateProbe {
   python: string | null
   git: string
   updateRoot: string
   hermesHome: string
+  branch?: string
+  channel?: 'main' | 'stable' | 'canary'
+  force?: boolean
+  cachePath?: string
+  branchConfigPath?: string
 }
 
 const execute: typeof execFile.__promisify__ = promisify(execFile)
 
-export const SOURCE_PROBE_RECOVERY: string = 'This checkout predates desktop source-channel checks. Run `hermes update --help` in this installation, then choose the intended branch or channel explicitly before updating.'
+export const SOURCE_PROBE_RECOVERY: string =
+  'This checkout predates desktop source-channel checks. Run `hermes update --help` in this installation, then choose the intended branch or channel explicitly before updating.'
 
 export function sourceUpdateEnvironment(updateRoot: string, hermesHome: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {
@@ -48,8 +50,18 @@ export async function readSourceUpdate(probe: SourceUpdateProbe): Promise<Source
       '-c',
       // Inspect the target checkout's callable, not stderr strings or an editable
       // install elsewhere on sys.path. Exceptions inside a present probe propagate.
-      'from pathlib import Path; import runpy; p = Path("hermes_cli/source_releases.py"); entry = runpy.run_path(str(p)).get("main") if p.is_file() else None; entry() if callable(entry) else print("null")',
-      '--install-root', probe.updateRoot, '--git', probe.git
+      'from pathlib import Path; import runpy; p = Path("hermes_cli/source_check.py"); entry = runpy.run_path(str(p)).get("main") if p.is_file() else None; entry() if callable(entry) else print("null")',
+      '--install-root',
+      probe.updateRoot,
+      '--home',
+      probe.hermesHome,
+      '--git',
+      probe.git,
+      ...(probe.branch ? ['--branch', probe.branch] : []),
+      ...(probe.channel ? ['--channel', probe.channel] : []),
+      ...(probe.force ? ['--force'] : []),
+      ...(probe.cachePath ? ['--cache-path', probe.cachePath] : []),
+      ...(probe.branchConfigPath ? ['--branch-config-path', probe.branchConfigPath] : [])
     ],
     hiddenWindowsChildOptions({
       cwd: probe.updateRoot,
@@ -66,16 +78,13 @@ export async function readSourceUpdate(probe: SourceUpdateProbe): Promise<Source
     return null
   }
 
-  if (!['main', 'stable', 'canary'].includes(selection.channel)) {
-    throw new Error('The source update check returned an invalid channel.')
+  if (typeof selection.supported !== 'boolean') {
+    throw new Error('The source update check returned an invalid status.')
   }
 
-  if (
-    selection.channel !== 'main' &&
-    !selection.error &&
-    (!selection.latestTag || !/^[0-9a-f]{40}$/.test(selection.targetSha ?? ''))
-  ) {
-    throw new Error('The source update check returned no release commit.')
+  // The Python banner uses -1 for an available update with no exact count.
+  if (selection.behind === -1) {
+    selection.behind = null
   }
 
   return selection

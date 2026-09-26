@@ -49,7 +49,10 @@ def test_mixed_dispatch_is_refused_before_loading_repository_code(tmp_path):
         result = run_admission(clone, {**env, **extra})
         assert result.returncode != 0, result.stdout + result.stderr
         assert not witness.exists(), 'rejected input executed the checkout admission module'
-        assert (clone / 'outputs').read_text(encoding='utf-8') == 'prior=value\n'
+        # The R2 public-url echo precedes admission; a refused dispatch writes no sha/channel/version.
+        outputs = dict(line.split('=', 1) for line in (clone / 'outputs').read_text(encoding='utf-8').splitlines())
+        assert outputs['prior'] == 'value'
+        assert not {'sha', 'channel', 'payload-version'} & outputs.keys()
 
 
 def test_trusted_dispatch_admits_a_pushed_feature_without_switching_checkout(tmp_path):
@@ -83,7 +86,10 @@ def test_trusted_dispatch_admits_a_pushed_feature_without_switching_checkout(tmp
     result = run_admission(clone, environment(clone, commit))
     assert result.returncode == 0, result.stdout + result.stderr
     outputs = dict(line.split('=', 1) for line in (clone / 'outputs').read_text(encoding='utf-8').splitlines())
-    assert outputs == {'sha': commit, 'channel': 'commit', 'payload-version': '3.2.1'}
+    # public-root/public-base mirror the R2 public URL (empty outside CI); the admission
+    # contract is the pinned sha, the commit channel and the payload version.
+    assert {key: outputs[key] for key in ('sha', 'channel', 'payload-version')} == {
+        'sha': commit, 'channel': 'commit', 'payload-version': '3.2.1'}
     assert _git('rev-parse', 'HEAD', cwd=clone) == main
     requests = [json.loads(line) for line in permission_log.read_text(encoding='utf-8').splitlines()]
     assert requests and all(row[1] == 'repos/fixture/repo/collaborators/maintainer/permission' for row in requests)

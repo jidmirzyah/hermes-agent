@@ -7,7 +7,7 @@ description: "Use Hermes Agent inside ACP-compatible editors and collaboration p
 # ACP Host Integration
 
 Python dependency commands on this page use a
-[PM-prepared source checkout](/reference/package-management#developer-workflow).
+[PM-prepared source checkout](../../reference/package-management.md#developer-workflow).
 After a dependency change, reactivate the checkout and restart Hermes.
 
 Hermes Agent can run as an ACP server, letting ACP-compatible hosts talk to

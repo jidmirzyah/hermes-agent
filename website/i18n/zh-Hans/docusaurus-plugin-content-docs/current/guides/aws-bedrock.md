@@ -6,7 +6,7 @@ description: "将 Hermes Agent 与 Amazon Bedrock 配合使用——原生 Conve
 
 # AWS Bedrock
 
-本页的 Python 依赖命令使用 [PM 准备的源码环境](/reference/package-management#developer-workflow)。
+本页的 Python 依赖命令使用 [PM 准备的源码环境](../reference/package-management.md#developer-workflow)。
 依赖变更后，请重新激活该 checkout 并重启 Hermes。
 
 Hermes Agent 通过 **Converse API** 原生支持 Amazon Bedrock——而非 OpenAI 兼容端点。这让你可以完整访问 Bedrock 生态系统：IAM 身份验证、Guardrails、跨区域推理配置文件以及所有基础模型。

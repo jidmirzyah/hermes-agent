@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # Build + push the derived termux builder image (toolchain pre-baked).
 #
-# The image is content-addressed off the pinned base: its tag IS the
-# pm/lock.json termux-docker digest (short form), so a lock bump produces
-# a new builder image and the old one is never reused against a new base.
+# The image tag hashes the full pinned base digest and Dockerfile bytes,
+# so either a lock bump or a toolchain recipe change produces a new image.
 # Pushes to GHCR with the repo's CI identity (GITHUB_TOKEN); idempotent --
 # an existing identical tag is left alone.
 #
@@ -18,8 +17,12 @@ DIGEST="$(python3 -c 'import sys; sys.path.insert(0, "."); from pm.lock import t
 [ -n "$DIGEST" ] || { echo "termux-docker digest missing" >&2; exit 1; }
 
 BASE="termux/termux-docker@${DIGEST}"
-SHORT="${DIGEST#sha256:}"
-SHORT="${SHORT:0:12}"
+DOCKERFILE="scripts/termux/termux-builder.Dockerfile"
+SHORT="$(python3 -c '
+import hashlib, pathlib, sys
+identity = sys.argv[1].encode() + b"\0" + pathlib.Path(sys.argv[2]).read_bytes()
+print(hashlib.sha256(identity).hexdigest()[:12])
+' "$BASE" "$DOCKERFILE")"
 REGISTRY="ghcr.io"
 OWNER="${GITHUB_REPOSITORY_OWNER,,}"
 IMAGE="${REGISTRY}/${OWNER}/hermes-termux-builder:${SHORT}"
@@ -32,7 +35,7 @@ fi
 
 echo "building $IMAGE from $BASE"
 docker build \
-    -f scripts/termux/termux-builder.Dockerfile \
+    -f "$DOCKERFILE" \
     --build-arg "BASE=${BASE}" \
     -t "$IMAGE" \
     scripts/termux \

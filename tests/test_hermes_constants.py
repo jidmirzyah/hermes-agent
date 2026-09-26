@@ -8,8 +8,6 @@ from types import SimpleNamespace
 import pytest
 
 import hermes_constants
-from hermes_platform.host import runtime as host_runtime
-from hermes_platform.host import facts as host_facts
 from hermes_constants import (
     VALID_REASONING_EFFORTS,
     agent_browser_runnable,
@@ -50,6 +48,17 @@ class TestGetDefaultHermesRoot:
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
         monkeypatch.setenv("HERMES_HOME", str(profile))
         assert get_default_hermes_root() == docker_root
+
+    def test_expanded_custom_profile_returns_custom_root(self, tmp_path, monkeypatch):
+        custom_root = tmp_path / "deployment"
+        home_token = "$" + "HOME"
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv(
+            "HERMES_HOME", f"{home_token}/deployment/profiles/research"
+        )
+        monkeypatch.setattr(Path, "home", lambda: tmp_path / "native-home")
+
+        assert get_default_hermes_root() == custom_root
 
     @pytest.mark.platforms("windows")
     def test_no_hermes_home_returns_localappdata_root_on_windows(self, tmp_path, monkeypatch):
@@ -172,15 +181,8 @@ class TestGetProcessHermesHome:
 
 
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX shell stubs; Windows uses .cmd shims")
 class TestNodeToolRunnable:
-    """node_tool_runnable() rejects broken Hermes-managed npm/node wrappers."""
-
-    def _stub(self, tmp_path, name, body, mode=0o755):
-        path = tmp_path / name
-        path.write_text(body)
-        path.chmod(mode)
-        return path
+    """Empty executable paths cannot be probed."""
 
     def test_none_and_empty_rejected(self):
         assert node_tool_runnable(None) is False
@@ -194,7 +196,7 @@ class TestIsContainer:
 
     def _reset_cache(self, monkeypatch):
         """Reset the cached detection result before each test."""
-        monkeypatch.setattr(host_runtime, "_container_detected", None)
+        monkeypatch.setattr(hermes_constants, "_container_detected", None)
 
     def test_detects_dockerenv(self, monkeypatch, tmp_path):
         """/.dockerenv triggers container detection."""
@@ -218,6 +220,8 @@ class TestIsContainer:
         """#58135: a host that merely RUNS containers exposes each container's overlay lowerdir
         (``lowerdir=/var/lib/containerd/...``) at non-root mount points; only the root ('/') line
         says whether *this* process lives in a runtime overlay."""
+        from hermes_constants import _root_mount_has_marker
+
         markers = ("kubepods", "containerd", "crio")
         host = tmp_path / "host"
         host.write_text(
@@ -231,13 +235,13 @@ class TestIsContainer:
             "rw,lowerdir=/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/9/fs\n"
             "2 1 0:51 / /proc rw,nosuid - proc proc rw\n"
         )
-        assert host_runtime._root_mount_has_marker(str(host), markers) is False
-        assert host_runtime._root_mount_has_marker(str(container), markers) is True
-        assert host_runtime._root_mount_has_marker(str(tmp_path / "missing"), markers) is False
+        assert _root_mount_has_marker(str(host), markers) is False
+        assert _root_mount_has_marker(str(container), markers) is True
+        assert _root_mount_has_marker(str(tmp_path / "missing"), markers) is False
 
     def test_caches_result(self, monkeypatch):
         """Second call uses cached value without re-probing."""
-        monkeypatch.setattr(host_runtime, "_container_detected", True)
+        monkeypatch.setattr(hermes_constants, "_container_detected", True)
         assert is_container() is True
         # Even if we make os.path.exists return False, cached value wins
         monkeypatch.setattr(os.path, "exists", lambda p: False)
@@ -562,6 +566,9 @@ class TestAgentBrowserRunnable:
     def test_none_and_empty_rejected(self):
         assert agent_browser_runnable(None) is False
         assert agent_browser_runnable("") is False
+
+    def test_install_command_is_not_a_runnable_browser(self):
+        assert agent_browser_runnable("npx agent-browser") is False
 
     def test_dangling_symlink_rejected(self, tmp_path):
         link = tmp_path / "agent-browser"

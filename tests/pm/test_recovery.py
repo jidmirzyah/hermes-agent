@@ -13,12 +13,8 @@ import pytest
 
 from pm.lock import Facts
 from pm.runtime import runtime_environment
-from tests.pm.test_workspace_build_inputs import _wheel
+from tests.pm._fixtures import _wheel
 
-@pytest.fixture(autouse=True)
-def isolated_machine_home(tmp_path, monkeypatch):
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
 
 
 
@@ -29,7 +25,7 @@ def test_startup_validation_checks_real_ruamel_dependency(tmp_path, failure):
 
     import ruamel.yaml
 
-    from hermes_cli.runtime_paths import site_packages
+    from pm.environments import site_packages
     from pm.package import InstallError
     from pm.recovery import validate_environment
 
@@ -59,15 +55,8 @@ def test_startup_validation_checks_real_ruamel_dependency(tmp_path, failure):
         validate_environment(python, env=dict(os.environ), cwd=tmp_path)
 
 
-@pytest.mark.parametrize("failure", [None, "missing_lock", "corrupt_facts", "empty_environment", "missing_extras", "validation", "publication"])
-def test_repair_restores_recorded_plugin_dependencies_without_config(tmp_path, monkeypatch, failure):
-    import pm.paths as paths
-    import pm.workspace as workspace
-    from hermes_cli.runtime_paths import selected_venv, site_packages
-
-    engine = importlib.import_module("pm.ensure")
-    uv = shutil.which("uv")
-    assert uv, "recovery integration requires real uv"
+@pytest.fixture
+def recovery_graph(tmp_path):
     core = tmp_path / "core"
     core.mkdir()
     wheels = tmp_path / "wheels"
@@ -86,6 +75,19 @@ def test_repair_restores_recorded_plugin_dependencies_without_config(tmp_path, m
         '[project]\nname="repair-plugin"\nversion="1"\nrequires-python=">=3.11"\n'
         'dependencies=["plugin-dep==1.0"]\n[tool.uv]\npackage=false\n', encoding="utf-8",
     )
+    return core, plugin
+
+
+@pytest.mark.parametrize("failure", [None, "missing_lock", "corrupt_facts", "empty_environment", "missing_extras", "validation", "publication"])
+def test_repair_restores_recorded_plugin_dependencies_without_config(tmp_path, monkeypatch, recovery_graph, failure):
+    import pm.paths as paths
+    import pm.workspace as workspace
+    from pm.environments import selected_venv, site_packages
+
+    engine = importlib.import_module("pm.install")
+    uv = shutil.which("uv")
+    assert uv, "recovery integration requires real uv"
+    core, plugin = recovery_graph
     monkeypatch.setattr(paths, "repo_root", lambda: core)
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
     monkeypatch.setattr("pm._uv._toolchain", lambda **kwargs: (Path(uv), Path(sys.executable)))
@@ -157,35 +159,22 @@ def test_repair_restores_recorded_plugin_dependencies_without_config(tmp_path, m
     assert config.read_bytes() == config_before
 
 
-def test_uncertain_profile_selection_refuses_sync_but_not_recorded_repair(tmp_path, monkeypatch):
+def test_uncertain_profile_selection_refuses_sync_but_not_recorded_repair(tmp_path, monkeypatch, recovery_graph):
     import pm.paths as paths
     from hermes_cli.plugins_admission import AdmissionRefused, admit_plugin_set_change
-    from hermes_cli.runtime_paths import install_state_dir, selected_venv, site_packages
+    from pm.environments import install_state_dir, selected_venv, site_packages
 
-    engine = importlib.import_module("pm.ensure")
+    engine = importlib.import_module("pm.install")
     # Use the same engine for admission and repair with the offline uv fixture.
     monkeypatch.setattr("pm.client.sync_venv", engine.sync_venv)
     uv = shutil.which("uv")
     assert uv
-    core = tmp_path / "core"
-    core.mkdir()
-    wheels = tmp_path / "wheels"
-    wheels.mkdir()
-    _wheel(wheels, "core_dep", "1.0")
-    _wheel(wheels, "plugin_dep", "1.0")
-    (core / "pyproject.toml").write_text(
-        '[project]\nname="uncertain-core"\nversion="1"\nrequires-python=">=3.11"\n'
-        'dependencies=["core-dep==1.0"]\n[tool.uv]\npackage=false\nno-index=true\n'
-        f'find-links=[{json.dumps(wheels.as_posix())}]\n', encoding="utf-8",
-    )
+    core, original_plugin = recovery_graph
     home = tmp_path / "home"
     sibling = home / "profiles" / "worker"
     plugin = sibling / "plugins" / "worker-deps"
-    plugin.mkdir(parents=True)
-    (plugin / "pyproject.toml").write_text(
-        '[project]\nname="worker-deps"\nversion="1"\nrequires-python=">=3.11"\n'
-        'dependencies=["plugin-dep==1.0"]\n[tool.uv]\npackage=false\n', encoding="utf-8",
-    )
+    plugin.parent.mkdir(parents=True)
+    original_plugin.rename(plugin)
     active_config = home / "config.yaml"
     active_config.write_text("plugins:\n  enabled: []\n", encoding="utf-8")
     sibling_config = sibling / "config.yaml"

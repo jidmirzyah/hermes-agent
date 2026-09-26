@@ -41,7 +41,6 @@ set -euo pipefail
 PHASE="all"
 MANIFEST_URL=""
 ARCH="arm64"
-PLAYWRIGHT_VERSION="1.58.2"
 UPDATE_WATCH_TIMEOUT_MS=900000
 
 while [ "$#" -gt 0 ]; do
@@ -69,14 +68,17 @@ case "$ARCH" in arm64|x64) ;; *) echo "error: --arch must be arm64 or x64" >&2; 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 ASSETS="$REPO_ROOT/tests/install/e2e-assets"
 export TS_BASE=$SECONDS
-NODE_BIN="$(command -v node)"
+NODE_BIN="${HERMES_E2E_NODE:-$(command -v node)}"
+export HERMES_E2E_NODE="$NODE_BIN"
 
+# OS activation does not inherit the ordinary journey's sandbox overrides.
 WORK_ROOT="${HERMES_E2E_WORKROOT:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/hermes-bundled-e2e}"
 LOG_DIR="${HERMES_E2E_LOG_DIR:-$WORK_ROOT/logs}"
 HOME_SANDBOX="$WORK_ROOT/home"
 export HOME_SANDBOX
 export HERMES_HOME="$HOME_SANDBOX/.hermes"
 export HOME="$HOME_SANDBOX"   # the app must see the ISOLATED home, not the runner's
+export HERMES_DESKTOP_USER_DATA_DIR="$WORK_ROOT/electron-user-data"
 mkdir -p "$WORK_ROOT" "$LOG_DIR" "$HOME_SANDBOX" "$HERMES_HOME"
 
 step() { printf '\n=== %s ===\n' "$*"; }
@@ -123,18 +125,15 @@ manifest_side() { # $1: old|new, $2: field
 
 require_manifest() {
   [ -f "$MANIFEST" ] || fail "no bundle manifest at $MANIFEST — run the install phase first"
-  # Assert the common resolver's normalized output for this arm (schema 1,
-  # platform macos, this arch, downloaded artifacts, old != new, SAME
-  # CFBundleIdentifier, SAME teamId, same feed channel). The heavy schema/
-  # semver/sha256 validation already happened inside bundle-inputs.mjs.
+  # Revalidate normalized inputs and downloaded files before every phase.
   "$NODE_BIN" -e '
     const fs = require("node:fs")
-    const { validateBundleManifest } = require(process.argv[2])
+    const { validateDownloadedBundle } = require(process.argv[2])
     const m = JSON.parse(fs.readFileSync(process.argv[1], "utf8"))
-    validateBundleManifest(m, { platform: "macos", arch: process.env.E2E_ARCH })
+    validateDownloadedBundle(m, "macos", process.env.E2E_ARCH)
     console.log("bundle manifest valid: " + m.old.tag + " -> " + m.new.tag +
       " (identity " + m.old.identity + ", team " + m.old.teamId + ")")
-  ' "$MANIFEST" "$ASSETS/mac-bundled-manifest.cjs" 2>&1 | ts_prefix
+  ' "$MANIFEST" "$ASSETS/bundle-manifest.cjs" 2>&1 | ts_prefix
 }
 
 stage_bundle_inputs() {
@@ -225,16 +224,6 @@ phase_install() {
   ok "isolated user state seeded at $HERMES_HOME"
 }
 
-ensure_playwright() {
-  local pw_dir="$WORK_ROOT/playwright"
-  [ -d "$pw_dir/node_modules/@playwright/test" ] && { printf '%s' "$pw_dir"; return 0; }
-  mkdir -p "$pw_dir"
-  (cd "$pw_dir" && npm install --no-save --no-audit --no-fund \
-    "@playwright/test@$PLAYWRIGHT_VERSION" 2>&1 | ts_prefix > "$LOG_DIR/playwright-install.log") \
-    || { log_group "playwright install transcript" "$LOG_DIR/playwright-install.log"; fail "playwright install failed"; }
-  printf '%s' "$pw_dir"
-}
-
 phase_update() {
   require_manifest
   [ -f "$INSTALL_RECEIPT" ] || fail "no install receipt at $INSTALL_RECEIPT — run the install phase first"
@@ -260,7 +249,7 @@ phase_update() {
   # $HERMES_HOME/config.yaml; the feed base URL below is appended after.
   # shellcheck source=../e2e-assets/mock-provider.sh
   source "$ASSETS/mock-provider.sh"
-  mock_start "$WORK_ROOT"
+  PATH="$(dirname "$HERMES_E2E_NODE"):$PATH" mock_start "$WORK_ROOT"
 
   # ── the controlled loopback feed ──────────────────────────────────────
   step "building the loopback feed from the REAL NEW signed zip"
@@ -317,15 +306,10 @@ phase_update() {
 
   # ── the real user trigger ─────────────────────────────────────────────
   step "launching the OLD app and clicking About -> Update now"
-  local pw_dir
-  pw_dir="$(ensure_playwright)"
-  cp "$ASSETS/mac-bundled-update-driver.mjs" \
-     "$ASSETS/process-close.cjs" \
-     "$ASSETS/window-input.cjs" \
-     "$pw_dir/"
   local rc=0
-  (cd "$pw_dir" && node mac-bundled-update-driver.mjs \
+  (cd "$WORK_ROOT" && "$NODE_BIN" "$ASSETS/mac-bundled-update-driver.mjs" \
     --app-bin "$old_app_bin" \
+    --old-sha "$(manifest_side old commit)" --chat-out "$LOG_DIR" --mock-url "$HERMES_E2E_MOCK_URL" \
     --shots "$LOG_DIR/shots" \
     --close-timeout-ms 420000 2>&1 | ts_prefix | tee "$LOG_DIR/app-update.log") || rc=$?
   log_group "in-app update (Playwright) transcript" "$LOG_DIR/app-update.log"
@@ -404,6 +388,28 @@ phase_update() {
   grep -qF "user_state_marker=$(manifest_side old commit)" "$HERMES_HOME/desktop-bundled-marker.txt" \
     || fail "isolated user-state marker did not survive the update"
   ok "isolated user state survived"
+
+  # Only now may the driver reopen NEW; automatic relaunch already passed.
+  step "post-update-launch chat: gracefully quit verified NEW, then reopen the same binary"
+  # NSRunningApplication sends a normal Quit to this PID without accessibility
+  # permission or a LaunchServices lookup that could itself start another app.
+  osascript -l JavaScript -e 'ObjC.import("AppKit"); function run(args) {
+    const app = $.NSRunningApplication.runningApplicationWithProcessIdentifier(Number(args[0]));
+    if (!app || !app.terminate) throw new Error("normal Quit refused");
+  }' "$new_pid" || fail "could not request normal Quit of the automatically relaunched NEW app"
+  for _ in $(seq 1 60); do
+    kill -0 "$new_pid" 2>/dev/null || break
+    sleep 0.5
+  done
+  if kill -0 "$new_pid" 2>/dev/null; then
+    fail "NEW did not quit normally; no force-kill or smoke relaunch attempted"
+  fi
+  printf '{"phase":"new","launch":"post-update-launch","automaticRelaunchProof":"relaunch-proof.json"}\n' > "$LOG_DIR/desktop-chat-new-launch.json"
+  "$NODE_BIN" "$ASSETS/desktop-smoke.ts" --exe "$old_app_bin" \
+    --root "$old_app/Contents/Resources/agent-payload" --origin bundled \
+    --home "$HERMES_HOME" --user-data "$HERMES_DESKTOP_USER_DATA_DIR" \
+    --out "$LOG_DIR" --phase new --expect-commit "$new_commit" --mock-url "$HERMES_E2E_MOCK_URL" \
+    2>&1 | ts_prefix | tee "$LOG_DIR/desktop-chat-new.log"
 
   step "PASS: packaged $(manifest_side old tag) -> $new_tag via the real About -> Update now route"
 }

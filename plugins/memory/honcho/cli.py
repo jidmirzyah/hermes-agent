@@ -571,29 +571,6 @@ def _setup_identity_mapping(cfg: dict, hermes_host: dict, current_peer: str, new
 
 # ── setup wizard ───────────────────────────────────────────────────────────
 
-def _honcho_pin() -> str:
-    """The pinned honcho-ai version from the pyproject extra — the single
-    authority (a hardcoded message string would drift on every bump)."""
-    try:
-        import tomllib
-        from pathlib import Path
-
-        repo = Path(__file__).resolve().parents[3]
-        with (repo / "pyproject.toml").open("rb") as f:
-            data = tomllib.load(f)
-        specs = (
-            data.get("project", {})
-            .get("optional-dependencies", {})
-            .get("honcho", [])
-        )
-        for spec in specs:
-            if isinstance(spec, str) and spec.startswith("honcho-ai=="):
-                return spec.split("==", 1)[1]
-    except Exception:
-        pass
-    return "latest"  # never block the prompt on metadata lookup
-
-
 def _ensure_sdk_installed() -> bool:
     """Check honcho-ai is importable; offer to install if not. Returns True if ready."""
     try:
@@ -601,26 +578,19 @@ def _ensure_sdk_installed() -> bool:
         return True
     except ImportError:
         pass
-
-    pin = _honcho_pin()
     print("  honcho-ai is not installed.")
-    answer = _prompt(f"Install it now? (honcho-ai=={pin})", default="y")
-    if answer.lower() not in {"y", "yes"}:
-        print(f"  Skipping install. Run: pip install 'honcho-ai=={pin}'\n")
+    if not _yes(_prompt("Install it now? (honcho-ai==2.2.0)", default="y")):
+        print("  Skipping install. Run: pip install 'honcho-ai==2.2.0'\n")
         return False
     print("  Installing honcho-ai...", flush=True)
-    import pm
-
     try:
+        import pm
         pm.sync_venv(["honcho"], explicit=True)
         print("  Installed.\n")
         return True
     except Exception as exc:
-        print(f"  Install failed: {exc}")
-        print("  Run manually: hermes pm install\n")
+        print(f"  Install failed: {exc}\n  Run manually: hermes pm install\n")
         return False
-
-
 
 
 def _device_login_available() -> bool:
@@ -1690,9 +1660,7 @@ Honcho identity management
 
     p = Path(file_path).expanduser()
     if not p.exists():
-        print(f"  File not found: {p}\n")
-        return
-
+        return print(f"  File not found: {p}\n")
     content = p.read_text(encoding="utf-8-sig").strip()
     if not content:
         return print(f"  File is empty: {p}\n")
@@ -1821,25 +1789,7 @@ Step 4  Seed AI identity files → Honcho AI peer
         print(f"  Found: {', '.join(f.name for f in agent_files)}")
         print()
         if has_key:
-            answer = _prompt("  Seed AI identity from all detected files now?", default="y")
-            if answer.lower() in {"y", "yes"}:
-                try:
-                    from plugins.memory.honcho.client import (
-                        HonchoClientConfig,
-                        get_honcho_client,
-                        reset_honcho_client,
-                    )
-                    from plugins.memory.honcho.session import HonchoSessionManager
-
-                    reset_honcho_client()
-                    hcfg = HonchoClientConfig.from_global_config()
-                    client = get_honcho_client(hcfg)
-                    mgr = HonchoSessionManager(honcho=client, config=hcfg)
-                    session_key = hcfg.resolve_session_name()
-                    mgr.get_or_create(session_key)
-                    _migrate_seed(mgr, session_key, agent_files)
-                except Exception as e:
-                    print(f"  Failed: {e}")
+            _offer("  Seed AI identity from all detected files now?", _migrate_seed, agent_files)
         else:
             print("  Run 'hermes honcho setup' first, then seed manually:")
             print("\n".join(f"    hermes honcho identity {f}" for f in agent_files))

@@ -26,7 +26,7 @@ import pytest
 
 import hermes_cli.doctor as doctor
 import hermes_cli.macos_tcc_anchor as tcc
-from hermes_constants import venv_python_path
+from pm.environments import venv_python
 from hermes_cli import doctor_platform
 
 
@@ -128,7 +128,7 @@ class TestEnsureTccAnchorNonMacos:
         # The host check gates before any filesystem access, so a plain
         # regular-file interpreter fixture is enough: ensure must return None
         # and leave the file byte-identical. Assert the fixture's actual path
-        # (venv_python_path is host-shaped: Scripts/python.exe on Windows).
+        # (venv_python is host-shaped: Scripts/python.exe on Windows).
         venv_py = tmp_path / "checkout" / ".venv" / "bin" / "python"
         venv_py.parent.mkdir(parents=True)
         venv_py.write_bytes(b"#!fake interpreter")
@@ -144,7 +144,7 @@ class TestEnsureTccAnchor:
         signed = []
 
         monkeypatch.setattr(
-            tcc, "_macos_sign_managed_python", lambda p: signed.append(Path(p)) or True
+            "hermes_cli.macos_signing.sign_managed_python", lambda p: signed.append(Path(p)) or True
         )
         store_bin = _build_store(tmp_path)
         root = _build_checkout(tmp_path, store_bin=store_bin)
@@ -170,7 +170,7 @@ class TestEnsureTccAnchor:
         store_py.write_bytes(b"#!fake generation interpreter")
         store_py.chmod(0o755)
         root = _build_checkout(tmp_path, store_bin=store_bin)
-        venv_py = venv_python_path(root / ".venv")
+        venv_py = venv_python(root / ".venv")
         assert venv_py.is_symlink()
 
         anchored = tcc.ensure_tcc_anchor(root)
@@ -182,7 +182,7 @@ class TestEnsureTccAnchor:
     def test_anchors_uv_managed_interpreter(self, tmp_path):
         store_bin = _build_store(tmp_path)
         root = _build_checkout(tmp_path, store_bin=store_bin)
-        venv_py = venv_python_path(root / ".venv")
+        venv_py = venv_python(root / ".venv")
         assert venv_py.is_symlink()
 
         anchored = tcc.ensure_tcc_anchor(root)
@@ -202,7 +202,7 @@ class TestEnsureTccAnchor:
     def test_idempotent(self, tmp_path):
         store_bin = _build_store(tmp_path)
         root = _build_checkout(tmp_path, store_bin=store_bin, anchored=True)
-        venv_py = venv_python_path(root / ".venv")
+        venv_py = venv_python(root / ".venv")
         marker = venv_py.parent / ".tcc-anchor-source"
         before = marker.read_text(encoding="utf-8")
 
@@ -229,7 +229,7 @@ class TestEnsureTccAnchor:
     def test_reanchors_after_patch_bump(self, tmp_path):
         old_bin = _build_store(tmp_path, version="3.11.15")
         root = _build_checkout(tmp_path, store_bin=old_bin, anchored=True)
-        venv_py = venv_python_path(root / ".venv")
+        venv_py = venv_python(root / ".venv")
 
         new_bin = _build_store(tmp_path, version="3.11.16")
         new_py = new_bin / "python3.11"
@@ -250,7 +250,7 @@ class TestEnsureTccAnchor:
 
     def test_skips_homebrew_interpreter(self, tmp_path):
         root = _build_checkout(tmp_path, homebrew=True)
-        venv_py = venv_python_path(root / ".venv")
+        venv_py = venv_python(root / ".venv")
 
         assert tcc.ensure_tcc_anchor(root) is None
         assert venv_py.is_symlink()
@@ -282,7 +282,7 @@ class TestEnsureTccAnchor:
     def test_boot_gate_refusal_leaves_venv_untouched(self, tmp_path, monkeypatch):
         store_bin = _build_store(tmp_path)
         root = _build_checkout(tmp_path, store_bin=store_bin)
-        venv_py = venv_python_path(root / ".venv")
+        venv_py = venv_python(root / ".venv")
         monkeypatch.setattr(tcc, "_passes_boot_gate", lambda *a, **k: False)
 
         assert tcc.ensure_tcc_anchor(root) is None
@@ -296,7 +296,7 @@ class TestEnsureTccAnchor:
         # The next ensure retries the whole install.
         store_bin = _build_store(tmp_path)
         root = _build_checkout(tmp_path, store_bin=store_bin)
-        venv_py = venv_python_path(root / ".venv")
+        venv_py = venv_python(root / ".venv")
         monkeypatch.setattr(tcc, "_copy_alias", lambda *a, **k: False)
 
         import logging
@@ -477,7 +477,7 @@ class TestTccAnchorState:
 
         status, detail = tcc.tcc_anchor_state(root)
         assert status == "missing"
-        assert str(venv_python_path(root / ".venv")) in detail
+        assert str(venv_python(root / ".venv")) in detail
 
         tcc.ensure_tcc_anchor(root)
 
@@ -498,7 +498,7 @@ class TestTccAnchorState:
         status, _ = tcc.tcc_anchor_state(root)
         assert status == "stale"
         anchored = tcc.ensure_tcc_anchor(root)
-        assert anchored == venv_python_path(root / ".venv")
+        assert anchored == venv_python(root / ".venv")
         assert (root / ".venv" / "bin" / "python").read_bytes() == (
             new_bin / "python3.11"
         ).read_bytes()
@@ -582,6 +582,14 @@ class TestAnchoredAliasesBootE2E:
         store_bin = store / "bin"
         store_bin.mkdir(parents=True)
         shutil.copy2(real_py, store_bin / minor)
+        # The runner itself may already have PM's stable signature. Give only
+        # this disposable source a different identity so a skipped sign fails.
+        subprocess.run(
+            ["codesign", "--force", "--sign", "-", "--timestamp=none",
+             "--identifier", "test.hermes.unanchored", "--requirements",
+             '=designated => identifier "test.hermes.unanchored"', str(store_bin / minor)],
+            check=True, capture_output=True, timeout=30,
+        )
         os.symlink(base / "lib", store / "lib")
 
         root = tmp_path / "checkout"
@@ -601,6 +609,17 @@ class TestAnchoredAliasesBootE2E:
         assert anchored is not None
 
         for name in ("python", "python3", minor):
+            executable = venv_bin / name
+            assert not executable.is_symlink()
+            subprocess.run(
+                ["codesign", "--verify", "--deep", "--strict", str(executable)],
+                check=True, capture_output=True, timeout=30,
+            )
+            identity = subprocess.run(
+                ["codesign", "-d", "-r-", str(executable)],
+                check=True, capture_output=True, text=True, timeout=30,
+            )
+            assert 'designated => identifier "com.nousresearch.hermes.managed-python"' in identity.stdout
             probe = subprocess.run(
                 [str(venv_bin / name), "-c",
                  "import encodings, sys; print(sys.prefix)"],

@@ -736,42 +736,30 @@ def ensure_matrix_deps() -> bool:
     forever and broke E2EE connect with ``No module named 'asyncpg'``
     (#31116).  Rebinds module-level type globals on success.
     """
-    # Check every anchor of the matrix extra (mautrix alone is not enough:
-    # a partial install left asyncpg missing forever, #31116).
-    try:
-        from pm.extras import missing as _extra_missing, ensure_and_bind
-        missing = _extra_missing("matrix")
-    except Exception as exc:  # pragma: no cover — defensive
-        logger.debug("Matrix: extras lookup failed: %s", exc)
-        missing = ()
-        ensure_and_bind = None  # type: ignore[assignment]
-    if ensure_and_bind is None:
-        return False
-    if missing:
-        def _import():
-            from mautrix.types import (
-                ContentURI, EventID, EventType, PresenceState, RoomCreatePreset, RoomID, TrustState, UserID)
-            return {
-                "ContentURI": ContentURI,
-                "EventID": EventID,
-                "EventType": EventType,
-                    "PresenceState": PresenceState,
-                "RoomCreatePreset": RoomCreatePreset,
-                "RoomID": RoomID,
-                    "TrustState": TrustState,
-                "UserID": UserID,
-            }
+    from pm import extras
 
-        if ensure_and_bind is None:
-            return False
-        if not ensure_and_bind("matrix", _import, globals()):
-            logger.warning(
-                "Matrix: required packages not installed (%s). "
-                "Run: pip install 'mautrix[encryption]' asyncpg aiosqlite "
-                "Markdown aiohttp-socks",
-                ", ".join(missing) if missing else "matrix",
-            )
-            return False
+    def _import():
+        from mautrix.types import (
+            ContentURI, EventID, EventType, PresenceState, RoomCreatePreset, RoomID, TrustState, UserID)
+        return {
+            "ContentURI": ContentURI,
+            "EventID": EventID,
+            "EventType": EventType,
+            "PresenceState": PresenceState,
+            "RoomCreatePreset": RoomCreatePreset,
+            "RoomID": RoomID,
+            "TrustState": TrustState,
+            "UserID": UserID,
+        }
+
+    # A complete install (module-level imports already bound the types) needs no sync; only a
+    # partial one goes through ensure_and_bind, which rebinds after the install.
+    if extras.missing("matrix") and not extras.ensure_and_bind("matrix", _import, globals()):
+        logger.warning(
+            "Matrix: required packages not installed or need a restart. "
+            "Run `hermes pm install`, then restart Hermes."
+        )
+        return False
     e2ee_mode = _resolve_e2ee_mode()
     if e2ee_mode == "required" and not _check_e2ee_deps():
         logger.error(
@@ -3105,31 +3093,15 @@ def interactive_setup() -> None:
         if want_e2ee:
             save_env_value("MATRIX_ENCRYPTION", "true")
             print_success("E2EE enabled")
-        matrix_pkg = "mautrix[encryption]" if want_e2ee else "mautrix"
         try:
-            from pm import ensure_import as _lazy_ensure
-            from pm.extras import missing as _extra_missing
-            _missing_before = _extra_missing("matrix")
-            if _missing_before:
-                print_info(f"Installing {matrix_pkg} (+ {len(_missing_before)} runtime deps)...")
-                try:
-                    _lazy_ensure("matrix")
-                    print_success(f"{matrix_pkg} installed")
-                except Exception as exc:
-                    print_warning(
-                        "Install failed — run manually: pip install "
-                        "'mautrix[encryption]' asyncpg aiosqlite Markdown aiohttp-socks"
-                    )
-                    print_info(f"  Error: {exc}")
-        except ImportError:
-            try:
-                _lazy_ensure("matrix")
-                print_success(f"{matrix_pkg} installed")
-            except Exception as exc:
-                print_warning(
-                    "Install failed — run manually: pip install "
-                    "'mautrix[encryption]' asyncpg aiosqlite Markdown aiohttp-socks")
-                print_info(f"  Error: {exc}")
+            from pm import sync_venv
+
+            print_info("Preparing Matrix dependencies...")
+            sync_venv(["matrix"], explicit=True)
+            print_success("Matrix dependencies prepared. Restart Hermes to use them.")
+        except Exception as exc:
+            print_warning(f"Matrix dependencies could not be prepared: {exc}")
+            print_info("Run `hermes pm install`, then restart Hermes.")
         print_info("🔒 Security: Restrict who can use your bot")
         print_info("   Matrix user IDs look like @username:server")
         allowed_users = prompt("Allowed user IDs (comma-separated, leave empty for open access)")

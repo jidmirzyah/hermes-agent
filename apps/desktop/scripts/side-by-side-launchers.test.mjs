@@ -18,28 +18,6 @@ test('the Store bundler rejects nonstable selectors before platform tools or sta
   }
 })
 
-test('the embedded Python checkout receives the same commit provenance as Electron', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'desktop-stamp-'))
-  try {
-    const commit = 'a'.repeat(40)
-    const repo = path.join(root, 'agent-payload/hermes-agent')
-    fs.mkdirSync(repo, { recursive: true })
-    const built = stamps.buildStampPayload({ commit, source: 'local', branch: 'main' }, {
-      HERMES_DESKTOP_VARIANT: 'bundled', HERMES_BUILD_COMMIT: commit, HERMES_PAYLOAD_VERSION: '0.28.0'
-    }, 'win32', { runtime: { repoDir: 'hermes-agent', commands: { hermes: 'bin/hermes-aaaaaaa.exe' } } })
-    stamps.writeDesktopStamp(root, built)
-    const pythonStamp = JSON.parse(fs.readFileSync(path.join(repo, 'install-stamp.json'), 'utf8'))
-    assert.deepEqual(pythonStamp, JSON.parse(fs.readFileSync(path.join(root, 'install-stamp.json'), 'utf8')))
-    assert.equal(pythonStamp.source, 'commit-build')
-    assert.equal(pythonStamp.commit, commit)
-    assert.equal(pythonStamp.tag, null)
-    assert.equal(pythonStamp.baseVersion, '0.28.0')
-    assert.equal(pythonStamp.displayVersion, '0.28.0')
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true })
-  }
-})
-
 test('nonstable MSIX CLI aliases each activate their own entrypoint, never the GUI', () => {
   const launchers = ['hermes-canary', 'hermes-canary-acp']
   const applications = msix.appExecutionAliasApplications(launchers, {

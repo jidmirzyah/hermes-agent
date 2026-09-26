@@ -18,7 +18,7 @@ import importlib.metadata
 import json
 import re
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -28,7 +28,6 @@ from hermes_cli.plugins_provenance import (
     Provenance,
     ProvenanceClass,
     plugins_provenance,
-    read_sidecar_rows,
 )
 
 _FETCH_TIMEOUT = 10.0

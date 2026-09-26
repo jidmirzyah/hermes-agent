@@ -5,8 +5,14 @@ import { createRequire } from 'node:module'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 
+import { readPackagingInputs, preparationRequired } from './prepared-packaging.mjs'
+
 const require = createRequire(import.meta.url)
 
+/** @typedef {{ makeappx: string, signtool: string, dlib: string | null, dotnetRoot: string | null }} WindowsBundleTools */
+/** @typedef {{ WIN_CODESIGN_LATEST: string, getWindowsKitsBundle: (options: {winCodeSign?: NonNullable<import('app-builder-lib').Configuration['toolsets']>['winCodeSign'], resourcesDir: string}) => Promise<{kit: string}>, getAtsBundleDir: (version: string) => Promise<string>, getDotnetRuntimeDir: (version: string) => Promise<string> }} BuilderWindowsTools */
+
+/** @returns {Promise<BuilderWindowsTools>} */
 async function loadBuilderTools() {
   // app-builder-lib exports only its entry and ./internal. Resolve the
   // installed, lock-pinned package before loading its toolset implementation.
@@ -14,15 +20,39 @@ async function loadBuilderTools() {
   return import(new URL('./toolsets/winCodeSign.js', entry).href)
 }
 
+/** @param {import("app-builder-lib").Configuration} config @returns {string} */
+function defaultResourcesDir(config) {
+  return path.resolve(import.meta.dirname, "..", config.directories?.buildResources || "build")
+}
+
+/** @param {string} manifest @param {string} source @param {boolean} signing @param {string | undefined} target @returns {WindowsBundleTools} */
+function consumeWindowsBundleTools(manifest, source, signing, target) {
+  const result = readPackagingInputs(manifest, source, target).windows
+  if (!result || (signing && (!result.dlib || !result.dotnetRoot))) throw preparationRequired('Missing prepared Windows signing tools')
+  for (const file of [result.makeappx, result.signtool, ...(signing ? [result.dlib] : [])]) {
+    if (!file || !fs.statSync(file).isFile()) throw preparationRequired(`Missing prepared Windows tool: ${file}`)
+  }
+  return result
+}
+
+/**
+ * @param {{ signing?: boolean, config?: import('app-builder-lib').Configuration, resourcesDir?: string, load?: () => Promise<BuilderWindowsTools>, prepared?: string | null, source?: string, target?: string }} [options]
+ * @returns {Promise<WindowsBundleTools>}
+ */
 export async function ensureWindowsBundleTools({
   signing = false,
   config = require('../electron-builder.config.cjs'),
-  resourcesDir = path.resolve(import.meta.dirname, '..', config.directories?.buildResources || 'build'),
+  resourcesDir = defaultResourcesDir(config),
   load = loadBuilderTools,
+  prepared = process.env.HERMES_PREPARED_PACKAGING,
+  source = path.resolve(import.meta.dirname, '../../..'),
+  target = process.env.HERMES_PREPARED_TARGET,
 } = {}) {
+  if (prepared) return consumeWindowsBundleTools(prepared, source, signing, target)
   const builder = await load()
   const configured = config.toolsets?.winCodeSign
   const { kit } = await builder.getWindowsKitsBundle({ winCodeSign: configured, resourcesDir })
+  /** @type {WindowsBundleTools} */
   const result = {
     makeappx: path.join(kit, 'makeappx.exe'),
     signtool: path.join(kit, 'signtool.exe'),
@@ -42,7 +72,7 @@ export async function ensureWindowsBundleTools({
     }
   }
   const files = [result.makeappx, result.signtool]
-  if (signing) files.push(result.dlib)
+  if (result.dlib) files.push(result.dlib)
   if (result.dotnetRoot) files.push(path.join(result.dotnetRoot, 'dotnet.exe'))
   for (const file of files) {
     if (!fs.statSync(file).isFile()) throw new Error(`Windows bundle tool is not a file: ${file}`)

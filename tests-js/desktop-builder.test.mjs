@@ -8,6 +8,20 @@ import { stageGetWindows, stageNodePtyInto } from '../apps/desktop/scripts/stage
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const roots = []
+
+test('desktop development composition reuses prepared icon pixels instead of provisioning them again', async () => {
+  const { buildSourceDesktop } = await import('../apps/desktop/scripts/build.mjs')
+  const input = fixture()
+  put(join(input.icons, 'apps/desktop/assets/icon.ico'), 'prepared packaging icon')
+  const commands = []
+  buildSourceDesktop({ source: input.source, icons: input.icons,
+    generate: () => { throw new Error('prepared icons must not regenerate') },
+    run: (command, args) => commands.push([command, ...args]),
+  })
+  expect(readFileSync(join(input.source, 'apps/desktop/assets/icon.ico'), 'utf8')).toBe('prepared packaging icon')
+  const compile = commands.find(command => command.some(arg => arg.endsWith('/scripts/build/desktop.mjs')))
+  expect(compile[compile.indexOf('--icons') + 1]).toBe(input.icons)
+})
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
 function put(path, text) { mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, text) }
 function fixture() {
@@ -21,7 +35,14 @@ function fixture() {
   put(join(app, 'src/index.js'), 'document.getElementById("app").textContent = "built renderer"')
   put(join(app, 'electron/main.ts'), 'console.log(JSON.stringify({ stamp: __HERMES_INSTALL_STAMP__, identity: __HERMES_PRODUCT_IDENTITY__ }))')
   put(join(app, 'electron/preload.ts'), 'globalThis.fixturePreload = "compiled preload"')
+  put(join(app, 'electron/preview-guest-preload-entry.ts'), 'globalThis.fixtureGuestPreload = "compiled guest preload"')
   cpSync(join(repo, 'apps/desktop/product-identity.cjs'), join(app, 'product-identity.cjs'))
+  cpSync(join(repo, 'apps/desktop/electron/native'), join(app, 'electron/native'), { recursive: true })
+  // product-identity.cjs resolves the channel request through the in-tree
+  // packaging helper (and its content-types table) by relative path.
+  for (const helper of ['scripts/msix-shared.mjs', 'scripts/release-content-types.json']) {
+    cpSync(join(repo, helper), join(source, helper))
+  }
   symlinkSync(join(repo, 'node_modules'), join(app, 'node_modules'), 'junction')
   const icons = join(root, 'icons')
   put(join(icons, 'apps/desktop/public/apple-touch-icon.png'), 'fresh icon')
@@ -30,6 +51,7 @@ function fixture() {
   // The native input is the real host binding, not a fake compiler/dependency.
   stageNodePtyInto(join(repo, 'node_modules/node-pty'), join(nativeDeps, 'node-pty'))
   stageGetWindows({ source: repo, out: nativeDeps })
+  put(join(nativeDeps, 'native/helper-fixture'), 'prepared executable resource')
   const stamp = join(root, 'install-stamp.json')
   put(stamp, JSON.stringify({ schemaVersion: 1, payload: 'light', updateMechanism: 'external', commit: 'a'.repeat(40), tag: 'v1.2.3' }))
   return { source, out: join(root, 'result'), icons, nativeDeps, stamp }
@@ -47,10 +69,30 @@ test('desktop compiler consumes explicit immutable inputs, replaces variants, an
   const input = fixture()
   const before = files(input.source)
   await buildDesktop(input)
+  const { productCurrent } = await import('../scripts/build/freshness.mjs')
+  expect(productCurrent({ ...input, product: 'desktop' })).toBe(true)
+  for (const file of [join(input.icons, 'apps/desktop/public/apple-touch-icon.png'), input.stamp,
+    join(input.nativeDeps, 'node-pty/package.json'), join(input.nativeDeps, 'native/helper-fixture')]) {
+    const original = readFileSync(file)
+    put(file, 'changed prepared input')
+    expect(productCurrent({ ...input, product: 'desktop' }), file).toBe(false)
+    writeFileSync(file, original)
+    expect(productCurrent({ ...input, product: 'desktop' })).toBe(true)
+  }
+  put(join(input.source, 'apps/shared/src/client.ts'), 'export const shared = true')
+  expect(productCurrent({ ...input, product: 'desktop' })).toBe(false)
+  rmSync(join(input.source, 'apps/shared'), { recursive: true })
+  expect(productCurrent({ ...input, product: 'desktop' })).toBe(true)
   expect(files(input.source)).toEqual(before)
   expect(readFileSync(join(input.out, 'apple-touch-icon.png'), 'utf8')).toBe('fresh icon')
   expect(existsSync(join(input.out, 'assets'))).toBe(true)
   expect(existsSync(join(input.out, 'electron-preload.js'))).toBe(true)
+  expect(readFileSync(join(input.out, 'native/helper-fixture'), 'utf8')).toBe('prepared executable resource')
+  expect(existsSync(join(input.out, 'node_modules/native'))).toBe(false)
+  put(join(input.out, 'native/helper-fixture'), 'signed resource')
+  expect(productCurrent({ ...input, product: 'desktop' })).toBe(true)
+  rmSync(join(input.out, 'native/helper-fixture'))
+  expect(productCurrent({ ...input, product: 'desktop' })).toBe(false)
   expect(files(join(input.out, 'node_modules/node-pty')).some(([name]) => name.endsWith('.node'))).toBe(true)
   const run = () => JSON.parse(execFileSync(process.execPath, [join(input.out, 'electron-main.mjs')], { cwd: tmpdir(), encoding: 'utf8' }))
   expect(run().identity.light).toBe(true)
@@ -69,9 +111,72 @@ test('desktop compiler consumes explicit immutable inputs, replaces variants, an
   expect(files(input.source).some(([name]) => name.includes('.vite') || name.endsWith('tsbuildinfo'))).toBe(false)
 }, 60000)
 
+test('desktop output cannot overlap a source directory symlinked outside the checkout', async () => {
+  const { buildDesktop } = await import('../scripts/build/desktop.mjs')
+  const root = mkdtempSync(join(tmpdir(), 'desktop symlinked source-'))
+  roots.push(root)
+  const source = join(root, 'source')
+  const externalSource = join(root, 'external-source')
+  mkdirSync(join(source, 'apps/desktop'), { recursive: true })
+  put(join(externalSource, 'index.js'), 'source must not change')
+  symlinkSync(externalSource, join(source, 'apps/desktop/src'), 'junction')
+  const out = join(externalSource, 'product')
+  const before = files(root)
+
+  // Missing prepared inputs must not hide a failure to reject source overlap.
+  await expect(buildDesktop({ source, out,
+    icons: join(root, 'icons'), stamp: join(root, 'stamp.json'), nativeDeps: join(root, 'native'),
+  })).rejects.toThrow(/Output must not overlap build inputs/)
+  expect(files(root)).toEqual(before)
+  expect(readdirSync(externalSource)).toEqual(['index.js'])
+  expect(existsSync(out)).toBe(false)
+})
+
+test('in-tree desktop products rebuild after build exists without replacing prepared inputs', async () => {
+  const { buildDesktop } = await import('../scripts/build/desktop.mjs')
+  const { productCurrent } = await import('../scripts/build/freshness.mjs')
+  const input = fixture()
+  input.out = join(input.source, 'apps/desktop/build/products/desktop')
+  await buildDesktop(input)
+  put(join(input.source, 'apps/desktop/src/index.js'), 'document.getElementById("app").textContent = "warm rebuild"')
+  await buildDesktop(input)
+  expect(productCurrent({ ...input, product: 'desktop' })).toBe(true)
+  const assets = files(join(input.out, 'assets')).map(([, bytes]) => Buffer.from(bytes, 'base64').toString()).join('')
+  expect(assets).toContain('warm rebuild')
+
+  // The generated-path allowance never overrides an explicitly prepared input,
+  // even when that input itself is an earlier builder-owned product.
+  const built = files(input.out)
+  for (const prepared of [
+    { stamp: join(input.out, 'hermes-build.json') },
+    { nativeDeps: join(input.out, 'node_modules') },
+    { icons: input.out },
+  ]) {
+    await expect(buildDesktop({ ...input, ...prepared })).rejects.toThrow(/overlap/)
+    expect(files(input.out)).toEqual(built)
+  }
+}, 30000)
+
+test('a prepared input changing during desktop compilation cannot publish a current receipt', async () => {
+  const { buildDesktop } = await import('../scripts/build/desktop.mjs')
+  const input = fixture()
+  await buildDesktop(input)
+  const previous = files(input.out)
+  const changedStamp = { ...JSON.parse(readFileSync(input.stamp, 'utf8')), commit: 'c'.repeat(40) }
+  put(join(input.source, 'apps/desktop/vite.config.mjs'), `
+    import { writeFileSync } from 'node:fs';
+    export default { plugins: [{ name: 'change-prepared-input', buildStart() {
+      writeFileSync(${JSON.stringify(input.stamp)}, ${JSON.stringify(JSON.stringify(changedStamp))})
+    }}] }
+  `)
+  await expect(buildDesktop(input)).rejects.toThrow(/inputs changed/)
+  expect(files(input.out)).toEqual(previous)
+}, 30000)
+
 test('native preparation stages the selected source into an explicit tree before compilation', async () => {
   const { prepareDesktopNativeDependencies } = await import('../apps/desktop/scripts/stage-native-deps.mjs')
   const input = fixture()
+  cpSync(join(repo, 'package-lock.json'), join(input.source, 'package-lock.json'))
   const nativeOut = join(dirname(input.out), 'prepared-native')
   await prepareDesktopNativeDependencies({ source: input.source, out: nativeOut })
   expect(existsSync(join(nativeOut, 'node-pty/package.json'))).toBe(true)
@@ -93,7 +198,7 @@ test('typecheck uses scratch state and incomplete prepared inputs fail before pu
   rmSync(join(input.icons, 'apps/desktop/public/apple-touch-icon.png'))
   await expect(buildDesktop(input)).rejects.toThrow(/icon/i)
   expect(files(input.out)).toEqual(built)
-  await expect(buildDesktop({ ...input, out: join(input.source, 'apps/desktop/scripts') })).rejects.toThrow(/overlap/)
+  await expect(buildDesktop({ ...input, out: join(input.source, 'apps/desktop/scripts') })).rejects.toThrow(/Output/)
   put(join(input.icons, 'apps/desktop/public/apple-touch-icon.png'), 'fresh icon')
   rmSync(join(input.nativeDeps, 'node-pty/build'), { recursive: true, force: true })
   rmSync(join(input.nativeDeps, 'node-pty/prebuilds'), { recursive: true, force: true })

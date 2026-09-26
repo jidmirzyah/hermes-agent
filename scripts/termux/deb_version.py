@@ -2,15 +2,15 @@
 """Derive a Debian package version (or channel) from a hermes-agent release tag.
 
 Pure function; imported by scripts/termux/build_deb.sh and unit-tested by
-tests/test_termux_deb_version.py (Task 4 of .hermes/plans/2026-08-31_termux-deb.md).
+tests/scripts/test_termux_deb_version.py (Task 4 of .hermes/plans/2026-08-31_termux-deb.md).
 
 Mapping:
     v1.2.3                     -> 1.2.3-1
     v1.2.3-canary.2026083112  -> 1.2.3~canary.2026083112-1
 
 The ``~`` ranks the nightly below the corresponding stable in dpkg's version
-ordering. The major version is capped at 3 digits (CalVer-style cap): a tag
-with a 4+ digit major is rejected as malformed.
+ordering. No digit cap on any component: the repo's CalVer line (v2026.9.x)
+is a valid major.
 
 ``--channel`` derives the release channel from the SAME tag regex: a tag with
 a nightly timestamp is ``nightly``, everything else is ``stable``. This is the
@@ -26,9 +26,9 @@ import sys
 # The canary timestamp shape MUST match the canonical _CANARY_TAG_RE in
 # hermes_cli/update_channel.py (exactly 8 or 14 digits, 20-prefixed) and
 # channel_for_tag in scripts/releases/r2.py. Cross-referenced by
-# tests/test_termux_deb_version.py::test_canary_tag_shape_matches_canonical.
+# tests/scripts/test_termux_deb_version.py::test_canary_tag_shape_matches_canonical.
 _TAG_RE = re.compile(
-    r"^v(?P<major>0|[1-9]\d{0,2})\.(?P<minor>\d+)\.(?P<patch>\d+)"
+    r"^v(?P<major>0|[1-9]\d*)\.(?P<minor>\d+)\.(?P<patch>\d+)"
     r"(?:-canary\.(?P<ts>20\d{6}(?:\d{6})?))?$"
 )
 

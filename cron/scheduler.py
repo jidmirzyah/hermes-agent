@@ -1335,10 +1335,6 @@ _FIRE_CLAIM_HEARTBEAT_GRACE_SECONDS = _RUN_CLAIM_HEARTBEAT_SECONDS * 3
 _FIRE_CLAIM_MISS_CONFIRM_SECONDS = 1.0
 
 
-# MERGE-CHECK: our pm-aware cron-script helpers (_pm_runtime_venv_dir, _pm_store_python_exe, the
-# pm-aware _windows_cron_python_invocation/_windows_cron_bootstrap_argv) lived in this upstream-deleted
-# block. Upstream moved the script helpers to cron/scheduler_script.py WITHOUT pm awareness (pyvenv.cfg
-# probing instead); that file is outside this merge's file list, so porting the pm logic is left to the parent.
 def _cron_cleanup_timeout_seconds() -> float:
     """Return the wall-clock bound for cron post-run cleanup."""
     default = 10.0

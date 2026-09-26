@@ -952,7 +952,7 @@ class TestLifecycleGuardModule:
             contains_gateway_lifecycle_command_or_referenced_script,
         )
         script = tmp_path / "restart.sh"
-        script.write_text("#!/usr/bin/env bash\nhermes gateway restart\n")
+        script.write_text("#!/usr/bin/env bash\nhermes gateway restart\n", encoding="utf-8")
         assert (
             contains_gateway_lifecycle_command_or_referenced_script(f". {script}")
             is True
@@ -984,7 +984,7 @@ class TestLifecycleGuardModule:
             contains_gateway_lifecycle_command_or_referenced_script,
         )
         script = tmp_path / "restart.sh"
-        script.write_text("#!/usr/bin/env bash\nhermes gateway restart\n")
+        script.write_text("#!/usr/bin/env bash\nhermes gateway restart\n", encoding="utf-8")
         assert (
             contains_gateway_lifecycle_command_or_referenced_script(f"source {script}")
             is True
@@ -997,7 +997,7 @@ class TestLifecycleGuardModule:
             contains_gateway_lifecycle_command_or_referenced_script,
         )
         script = tmp_path / "activate.sh"
-        script.write_text("#!/usr/bin/env bash\nexport PATH=/usr/bin:$PATH\n")
+        script.write_text("#!/usr/bin/env bash\nexport PATH=/usr/bin:$PATH\n", encoding="utf-8")
         assert (
             contains_gateway_lifecycle_command_or_referenced_script(f". {script}")
             is False

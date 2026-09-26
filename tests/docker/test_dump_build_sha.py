@@ -21,6 +21,8 @@ This test asserts both cases:
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
 import re
 import subprocess
 
@@ -81,6 +83,17 @@ def test_dump_reports_stamp_commit_when_present(built_image: str) -> None:
     that breaks the stamp -> dump pipeline will fail CI here.
     """
     stamped = _read_stamp_commit_from_image(built_image)
+    # docker.yml writes this build input before building and testing the image.
+    # Read the independent input: the canonical runner scrubs CI/GITHUB_SHA.
+    source_stamp = Path(__file__).resolve().parents[2] / "install-stamp.json"
+    if os.environ.get("HERMES_TEST_IMAGE"):
+        assert source_stamp.is_file(), "prebuilt image requires its checkout build stamp"
+    if source_stamp.is_file():
+        expected = json.loads(source_stamp.read_text(encoding="utf-8-sig"))["commit"]
+        assert re.fullmatch(r"[0-9a-f]{40}", expected), "invalid expected build commit"
+        assert stamped == expected, "image lost or changed its build provenance"
+    if stamped is not None:
+        assert re.fullmatch(r"[0-9a-f]{40}", stamped), "malformed image stamp commit"
     stdout = _run_dump(built_image)
 
     match = _VERSION_LINE.search(stdout)

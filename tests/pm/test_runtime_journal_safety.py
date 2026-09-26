@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from hermes_cli.runtime_paths import install_state_dir
+from pm.environments import install_state_dir
 from hermes_cli.runtime_state import recover_publication, runtime_lock
 
 

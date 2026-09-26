@@ -6,7 +6,7 @@ description: "通过 MCP 将 Hermes Agent 连接到外部工具服务器，并�
 
 # MCP（模型上下文协议）
 
-本页的 Python 依赖命令使用 [PM 准备的源码环境](/reference/package-management#developer-workflow)。
+本页的 Python 依赖命令使用 [PM 准备的源码环境](../../reference/package-management.md#developer-workflow)。
 依赖变更后，请重新激活该 checkout 并重启 Hermes。
 
 MCP 让 Hermes Agent 连接到外部工具服务器，使 agent 能够使用 Hermes 本身之外的工具——GitHub、数据库、文件系统、浏览器栈、内部 API 等等。

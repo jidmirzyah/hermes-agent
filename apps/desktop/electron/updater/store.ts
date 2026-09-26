@@ -1,3 +1,4 @@
+import { applyPackagedHandoff } from './packaged-handoff'
 import type { RelaunchRegistration } from './relaunch'
 
 import type { UpdaterApplyResultWire, UpdaterStatusWire, UpdaterStrategy } from './index'
@@ -40,63 +41,50 @@ export class StoreStrategy implements UpdaterStrategy {
   }
 
   async apply(): Promise<UpdaterApplyResultWire> {
-    let registration: RelaunchRegistration | undefined
-    let stopped = false
-
-    try {
-      this.deps.emitProgress({ stage: 'fetch', message: 'Downloading the update from Microsoft Store.', percent: null })
-      const downloaded = await this.deps.run('download')
-
-      if (!downloaded.ok || downloaded.available === null) {
-        throw new Error(downloaded.error || 'Microsoft Store download did not complete')
-      }
-
-      if (!downloaded.available) {
-        return { ok: true, updateAvailable: false, mechanism: this.mechanism }
-      }
-
-      registration = await this.deps.registerPendingRelaunch(this.deps.appVersion)
-
-      if (!registration.automatic) {
-        throw new Error('Could not register automatic relaunch for the Store update')
-      }
-
-      stopped = true
-      await this.deps.teardown()
-      this.deps.emitProgress({
-        stage: 'restart',
-        message: 'Microsoft Store is installing the update. Hermes will reopen.',
-        percent: null
-      })
-      const installed = await this.deps.run('install')
-
-      if (!installed.ok || installed.available !== true) {
-        throw new Error(installed.error || 'Microsoft Store did not confirm installation')
-      }
-
-      this.deps.quit()
-
-      return { ok: true, bundled: true, handedOff: true, mechanism: this.mechanism }
-    } catch (error) {
-      const errors: unknown[] = [error]
-
-      try {
-        await registration?.cancel()
-      } catch (cancelError) {
-        errors.push(cancelError)
-      }
-
-      if (stopped) {
-        try {
-          await this.deps.restore()
-        } catch (restoreError) {
-          errors.push(restoreError)
+    return applyPackagedHandoff(
+      {
+        teardown: this.deps.teardown,
+        restore: this.deps.restore,
+        emitProgress: this.deps.emitProgress,
+        relaunch: {
+          register: (): Promise<RelaunchRegistration> => this.deps.registerPendingRelaunch(this.deps.appVersion),
+          onManual: (): never => {
+            throw new Error('Could not register automatic relaunch for the Store update')
+          }
         }
-      }
+      },
+      async (stop: () => Promise<void>): Promise<UpdaterApplyResultWire> => {
+        this.deps.emitProgress({
+          stage: 'fetch',
+          message: 'Downloading the update from Microsoft Store.',
+          percent: null
+        })
+        const downloaded = await this.deps.run('download')
 
-      const message = errors.map(item => (item instanceof Error ? item.message : String(item))).join('; ')
-      this.deps.emitProgress({ stage: 'error', message, percent: null })
-      throw errors.length > 1 ? new AggregateError(errors, message, { cause: error }) : error
-    }
+        if (!downloaded.ok || downloaded.available === null) {
+          throw new Error(downloaded.error || 'Microsoft Store download did not complete')
+        }
+
+        if (!downloaded.available) {
+          return { ok: true, updateAvailable: false, mechanism: this.mechanism }
+        }
+
+        await stop()
+        this.deps.emitProgress({
+          stage: 'restart',
+          message: 'Microsoft Store is installing the update. Hermes will reopen.',
+          percent: null
+        })
+        const installed = await this.deps.run('install')
+
+        if (!installed.ok || installed.available !== true) {
+          throw new Error(installed.error || 'Microsoft Store did not confirm installation')
+        }
+
+        this.deps.quit()
+
+        return { ok: true, bundled: true, handedOff: true, mechanism: this.mechanism }
+      }
+    )
   }
 }

@@ -1,4 +1,4 @@
-"""Mint the bundled payload's win32 CLI launchers with distlib.
+r"""Mint the bundled payload's win32 CLI launchers with distlib.
 
 Run by scripts/bundles/desktop.py (step 5b) with the payload's OWN
 store python as the minting interpreter — the store python is the same

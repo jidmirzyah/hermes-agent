@@ -1,121 +1,38 @@
 """Publish plugin code and its dependency selection through one recoverable handoff."""
 from __future__ import annotations
 
-import base64
-import json
-import os
 from pathlib import Path
 import shutil
-import uuid
 
 
 def recover_plugin_publication(project: Path, row: dict, journal: Path) -> None:
-    from hermes_cli.fs_utils import rmtree_force
-    from hermes_cli.runtime_paths import dependency_home_root, runtime_facts_path
-    from hermes_cli.runtime_state import _atomic_bytes, _bytes, _digest
+    """Recover a shipped caller's row through the stdlib boot-journal owner."""
+    from hermes_cli.runtime_state import _recover_plugin_publication
 
-    target, backup, metadata = (Path(row[key]) for key in ("target", "backup", "metadata"))
-    home = dependency_home_root().resolve()
-    if (not target.resolve().is_relative_to(home) or target.parent.name != "plugins"
-            or backup.parent != target.parent or not backup.name.startswith(".previous-")
-            or metadata != target.parent / ".install-metadata.json"):
-        raise ValueError("plugin publication paths escape their home")
-    committed = row.get("committed") or _digest(runtime_facts_path(project)) != row["facts_before"]
-    if committed:
-        if backup.exists():
-            rmtree_force(backup)
-    else:
-        old = base64.b64decode(row["metadata_before"], validate=True) if row["metadata_before"] is not None else None
-        current = _bytes(metadata)
-        new = base64.b64decode(row["metadata_after"], validate=True)
-        if current not in (old, new):
-            raise ValueError("plugin metadata changed after publication; preserve it for manual recovery")
-        if backup.exists():
-            if target.exists():
-                rmtree_force(target)
-            os.replace(backup, target)
-        elif not row["target_existed"] and target.exists():
-            rmtree_force(target)
-        if old is None:
-            metadata.unlink(missing_ok=True)
-        else:
-            _atomic_bytes(metadata, old)
-    journal.unlink()
+    _recover_plugin_publication(project, row, journal)
 
 
-class PluginPublication:
-    def __init__(self, project: Path, staged: Path, target: Path, metadata: dict):
-        from hermes_cli.runtime_paths import install_state_dir, runtime_facts_path
-        from hermes_cli.runtime_state import _atomic_bytes, _bytes, _digest
-
-        self.project = project
-        self.journal = install_state_dir(project) / "publication.json"
-        backup = target.parent / f".previous-{uuid.uuid4().hex}"
-        metadata_path = target.parent / ".install-metadata.json"
-        previous = _bytes(metadata_path)
-        proposed = (json.dumps(metadata, indent=2, sort_keys=True) + "\n").encode("utf-8")
-        self.row = {
-            "kind": "plugin", "target": str(target), "backup": str(backup), "metadata": str(metadata_path),
-            "target_existed": target.exists(), "facts_before": _digest(runtime_facts_path(project)),
-            "metadata_before": base64.b64encode(previous).decode() if previous is not None else None,
-            "metadata_after": base64.b64encode(proposed).decode(),
-        }
-        _atomic_bytes(self.journal, json.dumps(self.row).encode())
-        try:
-            if target.exists():
-                os.replace(target, backup)
-            os.replace(staged, target)
-            _atomic_bytes(metadata_path, proposed)
-        except BaseException:
-            self()
-            raise
-
-    def __call__(self) -> None:
-        recover_plugin_publication(self.project, self.row, self.journal)
-
-    def finish(self) -> None:
-        from hermes_cli.runtime_state import _atomic_bytes
-
-        # A code-only update has no new environment fact to mark its commit.
-        self.row["committed"] = True
-        _atomic_bytes(self.journal, json.dumps(self.row).encode())
-        recover_plugin_publication(self.project, self.row, self.journal)
-
-
-def publish_plugin(staged: Path, target: Path, old_metadata: dict, new_metadata: dict) -> None:
-    from hermes_cli import plugins_cmd
-    from hermes_cli.runtime_state import recover_publication, runtime_lock
-    from pm import paths
+def publish_plugin(staged: Path, target: Path, old_metadata: dict, new_metadata: dict,
+                   *, target_digest: str | None = None, require_consent: bool = False) -> None:
     from pm.client import sync_venv
-    from pm.workspace import _is_member_candidate, enabled_plugin_dirs, member_sources
+    from pm.store import tree_digest
 
-    project = paths.repo_root()
+    if require_consent:
+        from hermes_cli import plugins_cmd
+        from pm.workspace import enabled_plugin_dirs
 
-    def candidate_members():
-        if plugins_cmd._read_install_metadata() != old_metadata:
-            raise plugins_cmd.PluginOperationError("Plugin install metadata changed while preparing the update; retry.")
-        sources = member_sources(enabled_plugin_dirs())
-        active = target.resolve() in sources
-        if active:
-            sources[target.resolve()] = staged
-        for source in sources.values():
-            plugins_cmd._check_manifest_version(plugins_cmd._read_manifest_for_install(source), source.name)
-        return {identity: source for identity, source in sources.items() if _is_member_candidate(source)}
+        if target.resolve() in enabled_plugin_dirs(installing=target):
+            consented, reason = plugins_cmd._install_plugin_python_deps(
+                plugins_cmd._read_manifest_for_install(staged), staged, plugins_cmd._console())
+            if not consented:
+                raise plugins_cmd.PluginOperationError(
+                    f"Reinstall declined: {reason}. The installed plugin and active environment are unchanged.")
 
-    # Validate all active dependencies. The installed identity remains stable while
-    # PM snapshots the staged inputs into the candidate generation's workspace.
-    active = target.resolve() in member_sources(enabled_plugin_dirs())
-    if active:
-        sync_venv(explicit=True, plugin_dirs=candidate_members,
-                  before_publish=lambda: PluginPublication(project, staged, target, new_metadata))
-    else:
-        with runtime_lock(project):
-            recover_publication(project)
-            if target.resolve() in member_sources(enabled_plugin_dirs()):
-                raise plugins_cmd.PluginOperationError("Plugin enablement changed while preparing the install; retry.")
-            if plugins_cmd._read_install_metadata() != old_metadata:
-                raise plugins_cmd.PluginOperationError("Plugin install metadata changed while preparing the install; retry.")
-            PluginPublication(project, staged, target, new_metadata).finish()
+    sync_venv(explicit=True, staged_plugin={
+        "staged": str(staged.resolve()), "target": str(target.absolute()),
+        "old_metadata": old_metadata, "new_metadata": new_metadata,
+        "target_digest": target_digest if target_digest is not None else (tree_digest(target) if target.exists() else None),
+    })
 
 
 def update_plugin(target: Path, *, catalog_entry=None) -> str:
@@ -196,7 +113,7 @@ def update_plugin(target: Path, *, catalog_entry=None) -> str:
             record["revision"] = revision
             if tree_digest(staged) == before:
                 return output
-            publish_plugin(staged, target, metadata, {**metadata, target.name: record})
+            publish_plugin(staged, target, metadata, {**metadata, target.name: record}, target_digest=before)
             return output
         except pc.PluginOperationError:
             raise

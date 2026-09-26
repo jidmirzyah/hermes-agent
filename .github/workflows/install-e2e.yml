@@ -135,9 +135,6 @@ concurrency:
   cancel-in-progress: ${{ inputs.release != true }}
 
 jobs:
-  # Which released versions do we test updating FROM? Resolved once,
-  # annotated with what each tag's own tree supports, and shared by every
-  # OS's matrix so all combos cover the same set.
   pick-releases:
     name: Pick release tags
     runs-on: ubuntu-latest

@@ -68,6 +68,8 @@ attachment before sending, especially when the captured window is sensitive.
 Bundled packages provide Python 3.14 and their supported dependencies.
 Source/bootstrap builds have a separate preparation path. Platform-native
 requirements, including system Git on POSIX, are described in [BUILDING.md](BUILDING.md).
+macOS source builds also require Xcode Command Line Tools to compile the native
+shortcut helper. Prebuilt installers include it; no compiler is needed at runtime.
 
 ---
 

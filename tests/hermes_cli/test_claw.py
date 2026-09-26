@@ -351,7 +351,7 @@ class TestPrintMigrationReport:
 
 class TestDetectOpenclawProcesses:
     @pytest.mark.platforms("linux")
-    def test_returns_match_when_pgrep_finds_openclaw(self):
+    def test_reports_union_of_exact_and_node_matches(self):
         with patch.object(claw_mod, "subprocess") as mock_subprocess:
             mock_subprocess.run.side_effect = [
                 MagicMock(returncode=1, stdout=""),  # systemctl
@@ -364,14 +364,18 @@ class TestDetectOpenclawProcesses:
             result = claw_mod._detect_openclaw_processes()
         assert result == ["openclaw process(es) (PIDs: 1234, 5678)"]
 
-    @pytest.mark.linux_only
+    @pytest.mark.platforms("linux")
     def test_live_pgrep_ignores_argv_mentions_but_finds_node_openclaw(self, tmp_path):
         """A process that merely mentions "openclaw" in argv (the #12648 false positive) is not
         OpenClaw; a node interpreter running an openclaw script is."""
-        import sys
+        from pathlib import Path
         import time
 
-        idle = f'{sys.executable} -c "import time; time.sleep(30)"'
+        # Nix's sys.executable can be a launcher that re-execs Python,
+        # discarding both exec -a's argv[0] and the copied binary's comm.
+        # Exercise actual process names with the running interpreter binary.
+        executable = Path("/proc/self/exe").resolve()
+        idle = f'{executable} -c "import time; time.sleep(30)"'
         # argv mentions openclaw but the binary is not one.
         bystander = subprocess.Popen(["bash", "-c", f"exec {idle} {tmp_path}/openclaw-notes.txt"])
         # argv[0] renamed to ``node`` running an openclaw script: the real launch shape.
@@ -380,7 +384,7 @@ class TestDetectOpenclawProcesses:
         # copied interpreter with that file name yields the same comm.
         import shutil
         titled_bin = tmp_path / "openclaw-gateway"
-        shutil.copy2(sys.executable, titled_bin)
+        shutil.copy2(executable, titled_bin)
         titled = subprocess.Popen([str(titled_bin), "-c", "import time; time.sleep(30)"])
         try:
             time.sleep(0.3)

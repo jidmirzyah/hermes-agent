@@ -122,7 +122,7 @@ def register(ctx):
 | 用户 | `~/.hermes/plugins/` | 个人插件 |
 | 项目 | `.hermes/plugins/` | 项目专属插件（需要 `HERMES_ENABLE_PROJECT_PLUGINS=true`） |
 | pip | `hermes_agent.plugins` entry_points | 分发包 |
-| Nix | `services.hermes-agent.extraPlugins` / `extraPythonPackages` | NixOS 声明式安装 — 参见 [Nix Setup](/getting-started/nix-setup#插件) |
+| Nix | `services.hermes-agent.extraPlugins` / `extraPythonPackages` | NixOS 声明式安装 — 参见 [Nix Setup](../../getting-started/nix-setup.md#插件) |
 
 名称冲突时，后面的来源会覆盖前面的，因此与内置插件同名的用户插件会替换它。
 
@@ -217,23 +217,23 @@ Memory provider 和 context engine 是 **provider 插件** — 每种类型同�
 
 | 想要添加… | 方式 | 编写指南 |
 |---|---|---|
-| LLM 可调用的**工具** | Python 插件 — `ctx.register_tool()` | [Build a Hermes Plugin](/developer-guide/plugins) · [Adding Tools](/developer-guide/adding-tools) |
-| **生命周期 hook**（LLM 前后、会话开始/结束、工具过滤） | Python 插件 — `ctx.register_hook()` | [Hooks reference](/user-guide/features/hooks) · [Build a Hermes Plugin](/developer-guide/plugins) |
-| CLI / gateway 的**斜杠命令** | Python 插件 — `ctx.register_command()` | [Build a Hermes Plugin](/developer-guide/plugins) · [Extending the CLI](/developer-guide/extending-the-cli) |
-| `hermes <thing>` 的**子命令** | Python 插件 — `ctx.register_cli_command()` | [Extending the CLI](/developer-guide/extending-the-cli) |
-| 插件附带的**skill** | Python 插件 — `ctx.register_skill()` | [Creating Skills](/developer-guide/creating-skills) |
-| **推理后端**（LLM provider：OpenAI 兼容、Codex、Anthropic-Messages、Bedrock） | Provider 插件 — 在 `plugins/model-providers/<name>/` 中调用 `register_provider(ProviderProfile(...))` | **[Model Provider Plugins](/developer-guide/model-provider-plugin)** · [Adding Providers](/developer-guide/adding-providers) |
-| **Gateway 频道**（Discord / Telegram / IRC / Teams 等） | 平台插件 — 在 `plugins/platforms/<name>/` 中调用 `ctx.register_platform()` | [Adding Platform Adapters](/developer-guide/adding-platform-adapters) |
-| **Memory 后端**（Honcho、Mem0、Supermemory 等） | Memory 插件 — 在 `plugins/memory/<name>/` 中继承 `MemoryProvider` | [Memory Provider Plugins](/developer-guide/memory-provider-plugin) |
-| **上下文压缩策略** | Context-engine 插件 — `ctx.register_context_engine()` | [Context Engine Plugins](/developer-guide/context-engine-plugin) |
-| **图像生成后端**（DALL·E、SDXL 等） | 后端插件 — `ctx.register_image_gen_provider()` | [Image Generation Provider Plugins](/developer-guide/image-gen-provider-plugin) |
-| **视频生成后端**（Veo、Kling、Pixverse、Grok-Imagine、Runway 等） | 后端插件 — `ctx.register_video_gen_provider()` | [Video Generation Provider Plugins](/developer-guide/video-gen-provider-plugin) |
-| **TTS 后端**（任意 CLI — Piper、VoxCPM、Kokoro、xtts、语音克隆脚本等） | 配置驱动（推荐）— 在 `config.yaml` 的 `tts.providers.<name>` 下以 `type: command` 声明。或 Python 后端插件 — 对需要超出 shell 模板的 Python SDK / 流式引擎使用 `ctx.register_tts_provider()`。 | [TTS Setup](/user-guide/features/tts#自定义命令提供商) · [Python plugin guide](/user-guide/features/tts#python-插件提供商) |
-| **STT 后端**（自定义 whisper 二进制、本地 ASR CLI） | 配置驱动 — 将 `HERMES_LOCAL_STT_COMMAND` 环境变量设置为 shell 模板 | [Voice Message Transcription (STT)](/user-guide/features/tts#语音消息转录stt) |
-| **通过 MCP 使用外部工具**（文件系统、GitHub、Linear、Notion、任意 MCP 服务器） | 配置驱动 — 在 `config.yaml` 中以 `command:` / `url:` 声明 `mcp_servers.<name>`。Hermes 自动发现服务器的工具并与内置工具一同注册。 | [MCP](/user-guide/features/mcp) |
-| **额外 skill 来源**（自定义 GitHub 仓库、私有 skill 索引） | CLI — `hermes skills tap add <repo>` | [Skills Hub](/user-guide/features/skills#skills-hub) · [发布自定义 tap](/user-guide/features/skills#发布自定义-skill-tap) |
-| **Gateway 事件 hook**（在 `gateway:startup`、`session:start`、`agent:end`、`command:*` 时触发） | 将 `HOOK.yaml` + `handler.py` 放入 `~/.hermes/hooks/<name>/` | [Event Hooks](/user-guide/features/hooks#gateway-event-hooks) |
-| **Shell hook**（在事件时运行 shell 命令 — 通知、审计日志、桌面提醒） | 配置驱动 — 在 `config.yaml` 的 `hooks:` 下声明 | [Shell Hooks](/user-guide/features/hooks#shell-hooks) |
+| LLM 可调用的**工具** | Python 插件 — `ctx.register_tool()` | [Build a Hermes Plugin](../../developer-guide/plugins/index.md) · [Adding Tools](../../developer-guide/adding-tools.md) |
+| **生命周期 hook**（LLM 前后、会话开始/结束、工具过滤） | Python 插件 — `ctx.register_hook()` | [Hooks reference](./hooks.md) · [Build a Hermes Plugin](../../developer-guide/plugins/index.md) |
+| CLI / gateway 的**斜杠命令** | Python 插件 — `ctx.register_command()` | [Build a Hermes Plugin](../../developer-guide/plugins/index.md) · [Extending the CLI](../../developer-guide/extending-the-cli.md) |
+| `hermes <thing>` 的**子命令** | Python 插件 — `ctx.register_cli_command()` | [Extending the CLI](../../developer-guide/extending-the-cli.md) |
+| 插件附带的**skill** | Python 插件 — `ctx.register_skill()` | [Creating Skills](../../developer-guide/creating-skills.md) |
+| **推理后端**（LLM provider：OpenAI 兼容、Codex、Anthropic-Messages、Bedrock） | Provider 插件 — 在 `plugins/model-providers/<name>/` 中调用 `register_provider(ProviderProfile(...))` | **[Model Provider Plugins](../../developer-guide/model-provider-plugin.md)** · [Adding Providers](../../developer-guide/adding-providers.md) |
+| **Gateway 频道**（Discord / Telegram / IRC / Teams 等） | 平台插件 — 在 `plugins/platforms/<name>/` 中调用 `ctx.register_platform()` | [Adding Platform Adapters](../../developer-guide/adding-platform-adapters.md) |
+| **Memory 后端**（Honcho、Mem0、Supermemory 等） | Memory 插件 — 在 `plugins/memory/<name>/` 中继承 `MemoryProvider` | [Memory Provider Plugins](../../developer-guide/memory-provider-plugin.md) |
+| **上下文压缩策略** | Context-engine 插件 — `ctx.register_context_engine()` | [Context Engine Plugins](../../developer-guide/context-engine-plugin.md) |
+| **图像生成后端**（DALL·E、SDXL 等） | 后端插件 — `ctx.register_image_gen_provider()` | [Image Generation Provider Plugins](../../developer-guide/image-gen-provider-plugin.md) |
+| **视频生成后端**（Veo、Kling、Pixverse、Grok-Imagine、Runway 等） | 后端插件 — `ctx.register_video_gen_provider()` | [Video Generation Provider Plugins](../../developer-guide/video-gen-provider-plugin.md) |
+| **TTS 后端**（任意 CLI — Piper、VoxCPM、Kokoro、xtts、语音克隆脚本等） | 配置驱动（推荐）— 在 `config.yaml` 的 `tts.providers.<name>` 下以 `type: command` 声明。或 Python 后端插件 — 对需要超出 shell 模板的 Python SDK / 流式引擎使用 `ctx.register_tts_provider()`。 | [TTS Setup](./tts.md#自定义命令提供商) · [Python plugin guide](./tts.md#python-插件提供商) |
+| **STT 后端**（自定义 whisper 二进制、本地 ASR CLI） | 配置驱动 — 将 `HERMES_LOCAL_STT_COMMAND` 环境变量设置为 shell 模板 | [Voice Message Transcription (STT)](./tts.md#语音消息转录stt) |
+| **通过 MCP 使用外部工具**（文件系统、GitHub、Linear、Notion、任意 MCP 服务器） | 配置驱动 — 在 `config.yaml` 中以 `command:` / `url:` 声明 `mcp_servers.<name>`。Hermes 自动发现服务器的工具并与内置工具一同注册。 | [MCP](./mcp.md) |
+| **额外 skill 来源**（自定义 GitHub 仓库、私有 skill 索引） | CLI — `hermes skills tap add <repo>` | [Skills Hub](./skills.md#skills-hub) · [发布自定义 tap](./skills.md#发布自定义-skill-tap) |
+| **Gateway 事件 hook**（在 `gateway:startup`、`session:start`、`agent:end`、`command:*` 时触发） | 将 `HOOK.yaml` + `handler.py` 放入 `~/.hermes/hooks/<name>/` | [Event Hooks](./hooks.md#gateway-event-hooks) |
+| **Shell hook**（在事件时运行 shell 命令 — 通知、审计日志、桌面提醒） | 配置驱动 — 在 `config.yaml` 的 `hooks:` 下声明 | [Shell Hooks](./hooks.md#shell-hooks) |
 
 :::note
 并非所有扩展都是 Python 插件。某些扩展接口有意使用**配置驱动的 shell 命令**（TTS、STT、shell hook），这样你已有的任意 CLI 无需编写 Python 即可成为插件。其他的是 agent 连接并自动注册工具的**外部服务器**（MCP）。还有一些是拥有自己 manifest 格式的**即插即用目录**（gateway hook）。根据你的集成风格选择合适的接口；上表中的编写指南各自涵盖了占位符、发现机制和示例。
@@ -241,7 +241,7 @@ Memory provider 和 context engine 是 **provider 插件** — 每种类型同�
 
 ## NixOS 声明式插件
 
-在 NixOS 上，插件可通过模块选项声明式安装 — 无需 `hermes plugins install`。完整详情请参见 **[Nix Setup 指南](/getting-started/nix-setup#插件)**。
+在 NixOS 上，插件可通过模块选项声明式安装 — 无需 `hermes plugins install`。完整详情请参见 **[Nix Setup 指南](../../getting-started/nix-setup.md#插件)**。
 
 ```nix
 services.hermes-agent = {
@@ -296,7 +296,7 @@ Python 依赖安装有独立同意和准入步骤，`--enable` 不绕过它。
 拒绝或非交互式依赖安装可使插件保留为已安装但未启用状态。
 PM 统一准备核心和插件依赖，失败保留旧选择。新环境尚未进入当前进程时需重启。
 普通应用更新保留插件目录，显式插件更新或删除可以改动这些文件。
-详见[包管理](/reference/package-management)。
+详见[包管理](../../reference/package-management.md)。
 
 ### 交互式 UI
 

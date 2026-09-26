@@ -519,6 +519,7 @@ docker run -d \
 
 The image uses Debian 13.4 and includes:
 
+
 - A Python 3.14 environment synchronized from the committed `uv.lock`, followed
   by a no-dependency editable install of Hermes.
 - The curated extras `all`, `messaging`, `otlp`, `anthropic`, `bedrock`,

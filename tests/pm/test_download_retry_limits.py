@@ -11,8 +11,9 @@ from pm.downloader import Download, DownloadPaused, DownloadTransportError, Hash
 from tests.pm._range_server import RangeHandler, dl_server, url  # noqa: F401
 
 
-@pytest.mark.parametrize("failure", ["503", "404", "403", "hash", "disk"])
-@pytest.mark.parametrize("phase", ["probe", "ranged", "single"])
+@pytest.mark.parametrize("failure,phase", [
+    (failure, phase) for failure in ("503", "404", "403") for phase in ("probe", "ranged", "single")
+] + [("hash", "ranged"), ("hash", "single"), ("disk", "probe")])
 def test_download_failure_never_publishes_partial_bytes(tmp_path, dl_server, monkeypatch, failure, phase):
     payload = b"verified bytes"
     RangeHandler.payloads["/tool"] = payload

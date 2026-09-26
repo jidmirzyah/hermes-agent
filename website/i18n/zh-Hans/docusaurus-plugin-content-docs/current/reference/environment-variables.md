@@ -58,7 +58,7 @@ description: "Hermes Agent 使用的所有环境变量完整参考"
 | `AZURE_CLIENT_SECRET` | `EnvironmentCredential` 使用的服务主体密钥 |
 | `AZURE_CLIENT_CERTIFICATE_PATH` | 服务主体证书（`AZURE_CLIENT_SECRET` 的替代方案） |
 | `AZURE_FEDERATED_TOKEN_FILE` | AKS Workload Identity / OIDC 流程的联合 token 文件路径 |
-| `AZURE_AUTHORITY_HOST` | 主权云 authority 覆盖（例如 Azure Government 使用 `https://login.microsoftonline.us`）。参见 [Azure Foundry 指南](/guides/azure-foundry#主权云政府云中国云) |
+| `AZURE_AUTHORITY_HOST` | 主权云 authority 覆盖（例如 Azure Government 使用 `https://login.microsoftonline.us`）。参见 [Azure Foundry 指南](../guides/azure-foundry.md#主权云政府云中国云) |
 | `IDENTITY_ENDPOINT` / `MSI_ENDPOINT` | App Service、Functions 和 Container Apps 的托管标识端点；VM 通常使用 IMDS 而不设置这些变量 |
 | `HF_TOKEN` | Hugging Face Inference Providers token（[huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)） |
 | `HF_BASE_URL` | 覆盖 Hugging Face base URL（默认：`https://router.huggingface.co/v1`） |
@@ -95,7 +95,7 @@ description: "Hermes Agent 使用的所有环境变量完整参考"
 | `VOICE_TOOLS_OPENAI_KEY` | OpenAI 语音转文字和文字转语音提供商的首选 OpenAI 密钥 |
 | `HERMES_LOCAL_STT_COMMAND` | 可选的本地语音转文字命令模板。支持 `{input_path}`、`{output_dir}`、`{language}` 和 `{model}` 占位符 |
 | `HERMES_LOCAL_STT_LANGUAGE` | 传递给 `HERMES_LOCAL_STT_COMMAND` 或自动检测的本地 `whisper` CLI 回退的默认语言（默认：`en`） |
-| `HERMES_HOME` | 选择配置和用户数据目录。POSIX 默认为 `~/.hermes`，Windows 默认为 `%LOCALAPPDATA%\hermes`。源码位置和 PM 工具存储单独管理，详见[包管理](/reference/package-management)。 |
+| `HERMES_HOME` | 选择配置和用户数据目录。POSIX 默认为 `~/.hermes`，Windows 默认为 `%LOCALAPPDATA%\hermes`。源码位置和 PM 工具存储单独管理，详见[包管理](./package-management.md)。 |
 | `HERMES_DISABLE_WINDOWS_UTF8` | **仅 Windows。** 设为 `1` 可禁用 UTF-8 stdio shim（`configure_windows_stdio()`），回退到控制台的本地代码页。用于排查编码问题；正常操作中极少需要 |
 | `HERMES_KANBAN_HOME` | 覆盖锚定 kanban 看板（数据库 + 工作区 + 工作日志）的共享 Hermes 根目录。回退到 `get_default_hermes_root()`（任意活动 profile 的父目录）。适用于测试和非常规部署 |
 | `HERMES_KANBAN_BOARD` | 为当前进程固定活动 kanban 看板。优先于 `~/.hermes/kanban/current`；调度器将其注入工作进程子进程环境，使工作进程无法看到其他看板上的任务。默认为 `default`。slug 验证：小写字母数字 + 连字符 + 下划线，1-64 字符 |
@@ -414,7 +414,7 @@ description: "Hermes Agent 使用的所有环境变量完整参考"
 | `API_SERVER_PORT` | API 服务器端口（默认：`8642`） |
 | `API_SERVER_HOST` | API 服务器主机/绑定地址（默认：`127.0.0.1`）。使用 `0.0.0.0` 开放网络访问——需要 `API_SERVER_KEY` 和严格的 `API_SERVER_CORS_ORIGINS` 白名单。 |
 | `API_SERVER_MODEL_NAME` | `/v1/models` 上公告的模型名称。默认为 profile 名称（默认 profile 为 `hermes-agent`）。适用于 Open WebUI 等前端需要每个连接使用不同模型名称的多用户场景。 |
-| `GATEWAY_PROXY_URL` | 将消息转发到的远程 Hermes API 服务器 URL（[代理模式](/user-guide/messaging/matrix#代理模式macos-上的-e2ee)）。设置后，gateway 仅处理平台 I/O——所有 agent 工作委托给远程服务器。也可通过 `config.yaml` 中的 `gateway.proxy_url` 配置。 |
+| `GATEWAY_PROXY_URL` | 将消息转发到的远程 Hermes API 服务器 URL（[代理模式](../user-guide/messaging/matrix.md#代理模式macos-上的-e2ee)）。设置后，gateway 仅处理平台 I/O——所有 agent 工作委托给远程服务器。也可通过 `config.yaml` 中的 `gateway.proxy_url` 配置。 |
 | `GATEWAY_PROXY_KEY` | 代理模式下与远程 API 服务器认证的 Bearer token。必须与远程主机上的 `API_SERVER_KEY` 一致。 |
 | `MESSAGING_CWD` | 消息模式下终端命令的工作目录（默认：`~`） |
 | `GATEWAY_ALLOWED_USERS` | 跨所有平台允许的逗号分隔用户 ID |
@@ -446,7 +446,7 @@ Graph 事件（Teams 会议、日历、聊天等）的入站变更通知监听�
 
 ### Teams 会议摘要投递
 
-仅在启用 [`teams_pipeline` 插件](/user-guide/messaging/msgraph-webhook)时使用。设置也可在 `config.yaml` 的 `platforms.teams.extra` 下配置——两者都设置时环境变量优先。参见 [Microsoft Teams → 会议摘要投递](/user-guide/messaging/teams#会议摘要投递teams-会议-pipeline)。
+仅在启用 [`teams_pipeline` 插件](../user-guide/messaging/msgraph-webhook.md)时使用。设置也可在 `config.yaml` 的 `platforms.teams.extra` 下配置——两者都设置时环境变量优先。参见 [Microsoft Teams → 会议摘要投递](../user-guide/messaging/teams.md#会议摘要投递teams-会议-pipeline)。
 
 | 变量 | 描述 |
 |----------|-------------|

@@ -50,13 +50,13 @@ jobs:
       - name: Run the native linker and wheel contracts
         run: |
           bash scripts/run_tests.sh -j 2 \
-            tests/test_termux_python_linkage.py tests/test_termux_retag_wheel.py \
-            tests/test_termux_build_wheels.py \
-            tests/test_termux_wheelhouse_cache.py tests/test_termux_runtime_libs.py \
+            tests/scripts/test_termux_python_linkage.py tests/scripts/test_termux_retag_wheel.py \
+            tests/scripts/test_termux_build_wheels.py \
+            tests/scripts/test_termux_wheelhouse_cache.py tests/scripts/test_termux_runtime_libs.py \
             tests/scripts/test_archive_inputs.py \
-            tests/test_termux_launchers.py tests/test_pm_bionic.py \
-            tests/pm/test_stage_only.py tests/pm/test_deb_safety.py tests/test_stage_apt_repo.py \
-            tests/test_run_tests_shell.py
+            tests/scripts/test_termux_launchers.py tests/pm/test_pm_bionic.py \
+            tests/pm/test_stage_only.py tests/pm/test_deb_safety.py tests/scripts/test_stage_apt_repo.py \
+            tests/scripts/test_run_tests_shell.py
 
   tui:
     name: Prebuilt TUI checks

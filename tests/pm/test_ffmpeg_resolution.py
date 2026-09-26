@@ -10,12 +10,13 @@ from pm.packages import Ffmpeg
 
 @pytest.fixture
 def indexes(monkeypatch):
-    monkeypatch.setattr(update, "_btbn_cache", update._TTL())
-    monkeypatch.setattr(update, "_martin_cache", update._TTL())
     tag = "autobuild-2026-09-01-12-00"
     version = "9.1.2"
     assets = [
         f"ffmpeg-n{version}-1-gabcdef-linux64-gpl-9.1.tar.xz",
+        f"ffmpeg-n{version}-1-gabcdef-linuxarm64-gpl-9.1.tar.xz",
+        f"ffmpeg-n{version}-1-gabcdef-linux64-gpl-shared-9.1.tar.xz",
+        f"ffmpeg-n{version}-1-gabcdef-linux64-lgpl-9.1.tar.xz",
         f"ffmpeg-n{version}-1-gabcdef-win64-gpl-shared-9.1.zip",
         f"ffmpeg-n{version}-1-gabcdef-win64-lgpl-9.1.zip",
         f"ffmpeg-n{version}-1-gabcdef-win64-gpl-9.1.zip",
@@ -44,9 +45,12 @@ def test_resolved_version_fetches_its_exact_target_asset(indexes, target):
     # URL resolution and update discovery must agree about target identities.
     url = package.fetch_url(version, target)
     assert version in package.latest_versions(target)
-    if target.startswith("win32"):
+    if target.startswith(("win32", "linux")):
         arch = "64" if target.endswith("-x64") else "arm64"
-        expected = f"ffmpeg-n{version}-1-gabcdef-win{arch}-gpl-9.1.zip"
+        if target.startswith("win32"):
+            expected = f"ffmpeg-n{version}-1-gabcdef-win{arch}-gpl-9.1.zip"
+        else:
+            expected = f"ffmpeg-n{version}-1-gabcdef-linux{arch}-gpl-9.1.tar.xz"
         assert url == f"https://github.com/BtbN/FFmpeg-Builds/releases/download/{tag}/{expected}"
     else:
         assert url == f"https://ffmpeg.martin-riedl.de/download/{paths[target]}"

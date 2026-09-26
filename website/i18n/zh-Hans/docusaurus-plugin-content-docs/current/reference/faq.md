@@ -6,7 +6,7 @@ description: "Hermes Agent 常见问题解答及常见问题解决方案"
 
 # 常见问题与故障排查
 
-本页的 Python 依赖命令使用 [PM 准备的源码环境](/reference/package-management#developer-workflow)。
+本页的 Python 依赖命令使用 [PM 准备的源码环境](./package-management.md#developer-workflow)。
 依赖变更后，请重新激活该 checkout 并重启 Hermes。
 
 针对最常见问题的快速解答与修复方法。
@@ -160,7 +160,7 @@ ls ~/.local/bin/hermes
 
 Hermes 要求 Python 3.14（`>=3.14,<3.15`），不是任意更新版本。
 源码安装脚本和软件包会提供相应的运行时。
-手动开发环境请按照 [开发指南](/developer-guide/contributing)准备。
+手动开发环境请按照 [开发指南](../developer-guide/contributing.md)准备。
 不要在签名应用或容器内部替换 Python 来修复版本错误。
 
 #### 终端命令提示 `node: command not found`（或 `nvm`、`pyenv`、`asdf` 等）

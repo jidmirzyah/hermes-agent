@@ -5073,7 +5073,7 @@ class TestNoProgressTimeoutTaskConfigGating:
         CodexAuxiliaryClient path (both the first-output and between-output deadlines derive from
         ``guard.no_progress_timeout``); other tasks keep the 60s default; a non-positive value
         is rejected with a warning and falls back to the default."""
-        import yaml
+        import hermes_yaml as yaml
         from agent import auxiliary_client as aux
 
         home = tmp_path / ".hermes"

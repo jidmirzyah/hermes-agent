@@ -5,7 +5,7 @@
  */
 
 import { useStore } from '@nanostores/react'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 
 import { useSessionView } from '@/app/chat/session-view'
 import { $chatLayoutPicked, assembleChatOnboarding } from '@/components/onboarding-chat/assembly'
@@ -23,10 +23,9 @@ import type { LayoutNode } from '@/components/pane-shell/tree/model'
 import { ConnectorLogo } from '@/components/ui/connector-logo'
 import { SearchField } from '@/components/ui/search-field'
 import { registry } from '@/contrib/registry'
-import { connectorTitle } from '@/lib/connector-tools'
+import { connectorIconUrl, connectorTitle } from '@/lib/connector-tools'
 import { useConnectorCatalog } from '@/store/connector-catalog'
 import { $onboardingAnswers, setOnboardingAnswers } from '@/store/onboarding-answers'
-import { type OnboardingPlugin, pluginNeedsApp, useOnboardingPlugins } from '@/store/onboarding-plugins'
 import { useTheme } from '@/themes'
 import { setAccentOverride } from '@/themes/accent-override'
 import { normalizeHex } from '@/themes/color'
@@ -40,11 +39,16 @@ export function ConnectorsCard({ locked }: CardProps) {
   const catalog = useConnectorCatalog(storedId, runtimeId)
   const [query, setQuery] = useState('')
 
-  // Only what the gateway actually carries. A pick is a slug the build chat
-  // can hand straight to manage_connections; a name with nothing behind it
-  // is a promise it has to walk back.
+  // Only what the gateway carries. A pick is a slug the build chat can hand
+  // straight to manage_connections; a name the gateway does not carry would be
+  // a pick the build chat cannot honour.
   const rows = useMemo(() => (catalog.status === 'ready' ? orderConnectorPicks(catalog.rows) : []), [catalog])
-  const shown = rows.filter(row => connectorTitle(row.connector).toLowerCase().includes(query.toLowerCase()))
+  const search = query.trim().toLowerCase()
+
+  const shown = search
+    ? rows.filter(row => connectorTitle(row.connector).toLowerCase().includes(search))
+    : rows.slice(0, 12)
+
   const picked = rows.filter(row => answers.connectors.includes(row.connector))
 
   const toggle = (id: string) =>
@@ -55,11 +59,18 @@ export function ConnectorsCard({ locked }: CardProps) {
     })
 
   // Nothing to pick from: the toolset is off or the gateway is unreachable.
-  // The step still has to end, so it ends honestly.
+  // The step still has to end, so the card offers Skip.
   if (catalog.status === 'unavailable' || (catalog.status === 'ready' && rows.length === 0)) {
     return (
-      <CardFrame continueLabel="Skip this" done={done} locked={locked} onContinue={() => commit('apps I use: none for now')}>
-        <p className="text-sm text-muted-foreground">Connections aren’t available right now — this can be set up later.</p>
+      <CardFrame
+        continueLabel="Skip this"
+        done={done}
+        locked={locked}
+        onContinue={() => commit('apps I use: none for now')}
+      >
+        <p className="text-sm text-muted-foreground">
+          Connections aren’t available right now — this can be set up later.
+        </p>
       </CardFrame>
     )
   }
@@ -91,11 +102,15 @@ export function ConnectorsCard({ locked }: CardProps) {
                 icon={
                   <ConnectorLogo
                     className="size-7 rounded-full text-sm"
-                    connector={{ name: row.connector, title: row.name || connectorTitle(row.connector) }}
+                    connector={{
+                      iconUrl: connectorIconUrl(row.connector),
+                      name: row.connector,
+                      title: connectorTitle(row.connector)
+                    }}
                   />
                 }
                 key={row.connector}
-                label={row.name || connectorTitle(row.connector)}
+                label={connectorTitle(row.connector)}
                 on={answers.connectors.includes(row.connector)}
                 onToggle={() => toggle(row.connector)}
               />
@@ -103,7 +118,7 @@ export function ConnectorsCard({ locked }: CardProps) {
           </div>
         </>
       )}
-      {/* Picking is a preference, not an authorization: nothing *** signed into
+      {/* Picking is a preference, not an authorization: nothing is signed into
           here. Saying so is what keeps the Connect cards later from reading as
           a second ask for the same thing. */}
       <p className="text-xs text-muted-foreground">
@@ -180,19 +195,14 @@ export function LookCard({ attrs, locked, messageId }: CardProps) {
 export function LayoutCard({ locked }: CardProps) {
   const answers = useStore($onboardingAnswers)
   const { commit, done } = useCardCommit('layout')
-  // The stored answer defaults to 'basic', but the CHOICE is the point of this
-  // step — nothing renders selected (and Continue stays off) until they click.
-  // Store-backed: the pick's own layout apply remounts this card (the pane
-  // tree is replaced), so local state would drop the highlight instantly.
+  // The stored answer defaults to 'basic', so nothing renders selected and Continue stays disabled until the user
+  // clicks. The flag lives in a store because applying the picked layout replaces the pane tree and remounts this
+  // card, which would clear local state.
   const picked = useStore($chatLayoutPicked)
 
   const pickLayout = (id: string) => {
     $chatLayoutPicked.set(true)
     setOnboardingAnswers({ layout: id })
-
-    // The pick answers "how much of the machinery do you want to see" too;
-    // Skip leaves the mode alone, so only an actual choice sets it.
-    const layout = LAYOUTS.find(candidate => candidate.id === id)
 
     const preset = registry.getArea('layouts').find(contribution => contribution.id === id)
 
@@ -205,7 +215,7 @@ export function LayoutCard({ locked }: CardProps) {
     // Swapping only the preset tree on a re-pick kept the previous layout's dismissals and dock records, and the two
     // layouts came up mixed together.
     // SAFETY: Layout presets declare data: LayoutNode (pane-shell/tree/presets.ts).
-    assembleChatOnboarding(preset.id, preset.data as LayoutNode, layout?.mode)
+    assembleChatOnboarding(preset.id, preset.data as LayoutNode)
   }
 
   return (
@@ -223,7 +233,6 @@ export function LayoutCard({ locked }: CardProps) {
         {LAYOUTS.map(layout => (
           <LayoutPreviewCard
             active={picked && answers.layout === layout.id}
-            description={layout.description}
             key={layout.id}
             name={layout.name}
             onSelect={() => pickLayout(layout.id)}

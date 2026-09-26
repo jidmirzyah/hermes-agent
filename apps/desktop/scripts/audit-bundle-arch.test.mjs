@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { spawnSync } from 'node:child_process'
 import { test } from 'vitest'
 
-import { archMatches, classifyHeader, findUnpackedDirs, isExemptPath, peArch } from '../scripts/audit-bundle-arch.mjs'
+import { auditTree, archMatches, classifyHeader, findUnpackedDirs, isExemptPath, peArch } from '../scripts/audit-bundle-arch.mjs'
 
 // ─── header builders: the smallest buffers each format needs ───────────────
 
@@ -96,103 +100,68 @@ test('findUnpackedDirs matches electron-builder output shapes only', () => {
   ])
 })
 
-// ─── the git exemption is PortableGit-shaped, not git-shaped ───────────────
-
-test('PortableGit internals stay exempt under the payload store', () => {
-  // .NET assemblies report ia32 because they are format-neutral.
-  for (const relPath of [
-    'resources/agent-payload/tools/git-2.53.0-win32-x64/mingw64/bin/Avalonia.dll',
-    'resources\\agent-payload\\tools\\git-2.53.0-win32-x64\\mingw64\\libexec\\git-core\\GitHub.dll',
-    'resources\\agent-payload\\tools\\git-2.53.0-win32-x64\\usr\\libexec\\getprocaddr32.exe',
-    'resources/agent-payload/tools/git-2.54.0-win32-arm64/clangarm64/libexec/git-core/msalruntime.dll'
-  ]) {
-    assert.equal(isExemptPath(relPath), true, relPath)
-  }
+test.each([
+  ['resources/agent-payload/tools/git-2.53.0-win32-x64/mingw64/bin/Avalonia.dll', true],
+  ['resources\\agent-payload\\tools\\git-2.53.0-win32-x64\\mingw64\\libexec\\git-core\\GitHub.dll', true],
+  ['resources\\agent-payload\\tools\\git-2.53.0-win32-x64\\usr\\libexec\\getprocaddr32.exe', true],
+  ['resources/agent-payload/tools/git-2.54.0-win32-arm64/clangarm64/libexec/git-core/msalruntime.dll', true],
+  ['resources/agent-payload/tools/git-2.53.0-linux-x64/bin/git', false],
+  ['resources/agent-payload/tools/git-2.53.0-darwin-arm64/libexec/git-core/git-remote-https', false],
+  ['resources/agent-payload/tools/python-3.11.16+20260814-linux-x64/lib/python3.11/site-packages/pip/_vendor/distlib/t32.exe', true],
+  ['resources/agent-payload/tools/python-3.11.16+20260814-linux-x64/lib/python3.11/site-packages/setuptools/cli.exe', true],
+  ['resources/agent-payload/venv/lib/python3.11/site-packages/setuptools/cli-32.exe', true],
+  ['resources/agent-payload/venv/Lib/site-packages/setuptools/cli.exe', true],
+  ['resources/agent-payload/venv/lib/python3.11/site-packages/discord/bin/libopus-0.x86.dll', true],
+  ['resources/agent-payload/venv/lib/python3.11/site-packages/discord/bin/libopus-0.x64.dll', true],
+  ['resources/agent-payload/venv/lib/python3.11/site-packages/pvporcupine/lib/mac/arm64/libpv_porcupine.dylib', true],
+  ['resources/agent-payload/venv/lib/python3.11/site-packages/pvporcupine/lib/raspberry-pi/arm11/libpv_porcupine.so', true],
+  ['resources/agent-payload/venv/lib/python3.11/site-packages/debugpy/_vendored/pydevd/pydevd_attach_to_process/attach_linux_amd64.so', true],
+  ['resources/agent-payload/venv/lib/python3.11/site-packages/debugpy/_vendored/pydevd/pydevd_attach_to_process/inject_dll_x86.exe', true],
+  ['resources/agent-payload/tools/agent-browser-0.35.1-win32-arm64/bin/agent-browser-win32-x64.exe', true],
+  ['resources\\agent-payload\\tools\\agent-browser-0.26.0-win32-arm64\\bin\\agent-browser-win32-x64.exe', true],
+  ['resources/agent-payload/tools/chromium-1208/chrome-win64/chrome.exe', true],
+  ['resources\\agent-payload\\tools\\chromium-1208\\chrome-win64\\chrome.dll', true],
+  ['resources/agent-payload/tools/chromium-1208/chrome-linux/chrome', false],
+  ['resources/agent-payload/tools/chromium-1208/chrome-mac-arm64/chrome', false],
+  ['resources/agent-payload/tools/chromium_headless_shell-1208/chrome-headless-shell-win64/chrome-headless-shell.exe', false],
+  ['resources/agent-payload/tools/chromium-1208/chrome-headless-shell-win64/chrome-headless-shell.exe', false],
+  ['resources/agent-payload/uv-cache/archive-v0/abc/setuptools/cli.exe', true],
+  ['resources\\agent-payload\\uv-cache\\archive-v0\\abc\\discord\\bin\\libopus-0.x64.dll', true],
+  ['resources/agent-payload/uv-cache/builds-v0/whatever/build.exe', true],
+  ['resources/agent-payload/tools/something-1.0-win32-arm64/bin/thing.exe', false],
+  ['resources/agent-payload/tools/uv-cache-1.0/tool.exe', false],
+  ['resources/agent-payload/hermes-agent/something.exe', false],
+])('foreign architecture exemption %s → %s', (file, exempt) => {
+  assert.equal(isExemptPath(file), exempt)
 })
 
-test('a POSIX git store entry is audited', () => {
-  // posix uses system git; a linux/darwin git store has no mingw64/usr/cmd
-  // segment, so a wrong-arch binary there must fail the audit.
-  for (const relPath of [
-    'resources/agent-payload/tools/git-2.53.0-linux-x64/bin/git',
-    'resources/agent-payload/tools/git-2.53.0-darwin-arm64/libexec/git-core/git-remote-https'
-  ]) {
-    assert.equal(isExemptPath(relPath), false, relPath)
-  }
-})
-
-test('pip and setuptools launcher stubs are exempt in the store and the venv', () => {
-  for (const relPath of [
-    'resources/agent-payload/tools/python-3.11.16+20260814-linux-x64/lib/python3.11/site-packages/pip/_vendor/distlib/t32.exe',
-    'resources/agent-payload/tools/python-3.11.16+20260814-linux-x64/lib/python3.11/site-packages/setuptools/cli.exe',
-    'resources/agent-payload/venv/lib/python3.11/site-packages/setuptools/cli-32.exe',
-    'resources/agent-payload/venv/Lib/site-packages/setuptools/cli.exe'
-  ]) {
-    assert.equal(isExemptPath(relPath), true, relPath)
-  }
-})
-
-test('discord opus and pvporcupine multi-arch siblings are exempt', () => {
-  for (const relPath of [
-    'resources/agent-payload/venv/lib/python3.11/site-packages/discord/bin/libopus-0.x86.dll',
-    'resources/agent-payload/venv/lib/python3.11/site-packages/discord/bin/libopus-0.x64.dll',
-    'resources/agent-payload/venv/lib/python3.11/site-packages/pvporcupine/lib/mac/arm64/libpv_porcupine.dylib',
-    'resources/agent-payload/venv/lib/python3.11/site-packages/pvporcupine/lib/raspberry-pi/arm11/libpv_porcupine.so',
-    'resources/agent-payload/venv/lib/python3.11/site-packages/debugpy/_vendored/pydevd/pydevd_attach_to_process/attach_linux_amd64.so',
-    'resources/agent-payload/venv/lib/python3.11/site-packages/debugpy/_vendored/pydevd/pydevd_attach_to_process/inject_dll_x86.exe'
-  ]) {
-    assert.equal(isExemptPath(relPath), true, relPath)
-  }
-})
-
-test('the emulated x64 agent-browser exe is exempt in a win32-arm64 payload', () => {
-  for (const relPath of [
-    'resources/agent-payload/tools/agent-browser-0.35.1-win32-arm64/bin/agent-browser-win32-x64.exe',
-    'resources\\agent-payload\\tools\\agent-browser-0.26.0-win32-arm64\\bin\\agent-browser-win32-x64.exe'
-  ]) {
-    assert.equal(isExemptPath(relPath), true, relPath)
-  }
-  // A non-chromium x64 binary in the payload store still fails: the
-  // chromium exemption is scoped to the store entries' -win64 trees, not
-  // to "any x64 exe under tools/".
-  assert.equal(isExemptPath('resources/agent-payload/tools/something-1.0-win32-arm64/bin/thing.exe'), false)
-})
-
-test('only the emulated full Chromium win64 tree is exempt', () => {
-  // CfT has no native win-arm64 build. The x64 zip extracts into
-  // chrome-win64 inside the revision-named Chromium store entry.
-  for (const relPath of [
-    'resources/agent-payload/tools/chromium-1208/chrome-win64/chrome.exe',
-    'resources\\agent-payload\\tools\\chromium-1208\\chrome-win64\\chrome.dll'
-  ]) {
-    assert.equal(isExemptPath(relPath), true, relPath)
-  }
-  // Other platforms and obsolete shell payloads have no exemption.
-  for (const relPath of [
-    'resources/agent-payload/tools/chromium-1208/chrome-linux/chrome',
-    'resources/agent-payload/tools/chromium-1208/chrome-mac-arm64/chrome',
-    'resources/agent-payload/tools/chromium_headless_shell-1208/chrome-headless-shell-win64/chrome-headless-shell.exe',
-    'resources/agent-payload/tools/chromium-1208/chrome-headless-shell-win64/chrome-headless-shell.exe'
-  ]) {
-    assert.equal(isExemptPath(relPath), false, relPath)
-  }
-})
-
-test('the uv wheel/build cache is exempt in the payload', () => {
-  // pm bundle deliberately ships uv-cache/ for warm venv rebuilds; it
-  // holds cached sdists/archives uv may have built for ANY arch (x64/ia32
-  // PEs on an arm64 payload) — inert cache bytes, never loaded at runtime.
-  for (const relPath of [
-    'resources/agent-payload/uv-cache/archive-v0/abc/setuptools/cli.exe',
-    'resources\\agent-payload\\uv-cache\\archive-v0\\abc\\discord\\bin\\libopus-0.x64.dll',
-    'resources/agent-payload/uv-cache/builds-v0/whatever/build.exe'
-  ]) {
-    assert.equal(isExemptPath(relPath), true, relPath)
-  }
-  // Anything outside the cache stays audited.
-  assert.equal(isExemptPath('resources/agent-payload/tools/uv-cache-1.0/tool.exe'), false)
-})
-
-test('a random payload binary is not exempt', () => {
-  assert.equal(isExemptPath('resources/agent-payload/hermes-agent/something.exe'), false)
+test('tree and CLI audit real second-read PE bytes and fail closed on absent artifacts', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'arch-tree-'))
+  const cli = () => spawnSync(process.execPath, [path.resolve(import.meta.dirname, 'audit-bundle-arch.mjs'), '--arch=arm64', `--root=${root}`], { encoding: 'utf8' })
+  try {
+    assert.match(cli().stderr, /no unpacked app directory/)
+    const app = path.join(root, 'win-arm64-unpacked')
+    fs.mkdirSync(app)
+    assert.match(cli().stderr, /no native binaries/)
+    fs.writeFileSync(path.join(app, 'elf'), elfHeader(0xb7))
+    fs.writeFileSync(path.join(app, 'macho'), machoThin(0x0100000c))
+    const pe = Buffer.alloc(8198)
+    mzStub(8192).copy(pe)
+    pe.writeUInt32LE(0x4550, 8192)
+    pe.writeUInt16LE(0xa641, 8196)
+    fs.writeFileSync(path.join(app, 'arm64ec.exe'), pe)
+    assert.deepEqual(auditTree(app, 'arm64'), { binaries: 3, exempted: 0, mismatches: [] })
+    assert.equal(cli().status, 0)
+    pe.writeUInt16LE(0x8664, 8196)
+    const cache = path.join(app, 'resources/agent-payload/uv-cache/builds-v0')
+    fs.mkdirSync(cache, { recursive: true })
+    fs.writeFileSync(path.join(cache, 'cached.exe'), pe)
+    fs.writeFileSync(path.join(app, 'wrong-arch.dat'), pe)
+    assert.deepEqual(auditTree(app, 'arm64'), {
+      binaries: 5, exempted: 1, mismatches: [{ file: 'wrong-arch.dat', format: 'pe', arches: ['x64'] }]
+    })
+    const failed = cli()
+    assert.equal(failed.status, 1)
+    assert.match(failed.stderr, /wrong-arch.dat/)
+  } finally { fs.rmSync(root, { recursive: true, force: true }) }
 })

@@ -16,18 +16,28 @@ function fixture() {
 
         return { isUpdateAvailable: true, updateInfo: info, versionInfo: info }
       }),
-      downloadUpdate: vi.fn(async () => { events.push('download');
+      downloadUpdate: vi.fn(async () => {
+        events.push('download')
 
- return [] }),
-      quitAndInstall: vi.fn(() => { events.push('install') }),
+        return []
+      }),
+      quitAndInstall: vi.fn(() => {
+        events.push('install')
+      }),
       on: emitter.on.bind(emitter) as MacStrategyDeps['updater']['on'],
       removeListener: emitter.removeListener.bind(emitter) as MacStrategyDeps['updater']['removeListener']
     },
     channel: 'canary',
     appVersion: '0.28.0',
-    prepareInstall: vi.fn(async () => { events.push('verify') }),
-    beforeInstall: vi.fn(async () => { events.push('stop') }),
-    onInstallFailure: vi.fn(async () => { events.push('restore') }),
+    prepareInstall: vi.fn(async () => {
+      events.push('verify')
+    }),
+    beforeInstall: vi.fn(async () => {
+      events.push('stop')
+    }),
+    onInstallFailure: vi.fn(async () => {
+      events.push('restore')
+    }),
     emitProgress: vi.fn()
   }
 
@@ -48,8 +58,9 @@ describe('macOS strategy', () => {
 
   it.each(['downloadUpdate', 'prepareInstall'] as const)('keeps backends alive on %s failure', async failure => {
     const { deps, strategy, events, emitter } = fixture()
-    vi.mocked(failure === 'downloadUpdate' ? deps.updater.downloadUpdate : deps.prepareInstall)
-      .mockRejectedValueOnce(new Error('invalid update'))
+    vi.mocked(failure === 'downloadUpdate' ? deps.updater.downloadUpdate : deps.prepareInstall).mockRejectedValueOnce(
+      new Error('invalid update')
+    )
     await expect(strategy.apply()).rejects.toThrow('invalid update')
     expect(events).not.toContain('stop')
     expect(events).not.toContain('install')
@@ -60,24 +71,66 @@ describe('macOS strategy', () => {
     const { deps, strategy, events } = fixture()
     const info = { version: '0.27.0', files: [], releaseDate: '', path: '', sha512: '' }
     vi.mocked(deps.updater.checkForUpdates).mockResolvedValue({
-      isUpdateAvailable: false, updateInfo: info, versionInfo: info
+      isUpdateAvailable: false,
+      updateInfo: info,
+      versionInfo: info
     })
     await strategy.apply()
     expect(events).toEqual([])
     expect(deps.updater.downloadUpdate).not.toHaveBeenCalled()
   })
 
+  it('refuses a substituted pinned version or artifact before native signature preparation', async (): Promise<void> => {
+    const { deps, events } = fixture()
+    deps.expectedVersion = '0.30.0'
+    await expect(new MacStrategy(deps).apply()).rejects.toThrow('pinned channel version')
+    expect(events).toEqual(['check'])
+    deps.expectedVersion = '0.29.0'
+
+    deps.verifyDownload = async (): Promise<void> => {
+      throw new Error('artifact digest mismatch')
+    }
+
+    await expect(new MacStrategy(deps).apply()).rejects.toThrow('artifact digest')
+    expect(events).not.toContain('verify')
+    expect(events).not.toContain('stop')
+  })
+
   it('restores the backend if install handoff throws', async () => {
     const { deps, strategy, events } = fixture()
-    vi.mocked(deps.updater.quitAndInstall).mockImplementation(() => { throw new Error('handoff failed') })
+    vi.mocked(deps.updater.quitAndInstall).mockImplementation(() => {
+      throw new Error('handoff failed')
+    })
     await expect(strategy.apply()).rejects.toThrow('handoff failed')
     expect(events.slice(-2)).toEqual(['stop', 'restore'])
+  })
+
+  it('preserves the handoff error when backend recovery also fails', async (): Promise<void> => {
+    const { deps, strategy, emitter } = fixture()
+    const handoff = new Error('native handoff failed')
+    const recovery = new Error('backend recovery failed')
+    vi.mocked(deps.updater.quitAndInstall).mockImplementation((): never => {
+      throw handoff
+    })
+    vi.mocked(deps.onInstallFailure).mockRejectedValue(recovery)
+    await expect(strategy.apply()).rejects.toMatchObject({ cause: handoff, errors: [handoff, recovery] })
+    expect(deps.emitProgress).toHaveBeenLastCalledWith({
+      stage: 'error',
+      message: 'native handoff failed; backend recovery failed',
+      percent: null
+    })
+    expect(emitter.listenerCount('download-progress')).toBe(0)
   })
 
   it('rejects simultaneous apply calls', async () => {
     const { deps, strategy } = fixture()
     let release!: () => void
-    vi.mocked(deps.prepareInstall).mockImplementation(() => new Promise(resolve => { release = resolve }))
+    vi.mocked(deps.prepareInstall).mockImplementation(
+      () =>
+        new Promise(resolve => {
+          release = resolve
+        })
+    )
     const applying = strategy.apply()
     await vi.waitFor(() => expect(deps.prepareInstall).toHaveBeenCalledOnce())
     await expect(strategy.apply()).rejects.toThrow('already in progress')
@@ -91,7 +144,11 @@ describe('native signature verification', () => {
   it('waits for native readiness and removes both listeners', async () => {
     const native = Object.assign(new EventEmitter(), { checkForUpdates: vi.fn() })
     let ready = false
-    const pending = prepareMacInstall(native).then(() => { ready = true })
+
+    const pending = prepareMacInstall(native).then(() => {
+      ready = true
+    })
+
     await Promise.resolve()
     expect(ready).toBe(false)
     native.emit('update-downloaded')

@@ -22,7 +22,7 @@ source ./activate
 
 Run your application with `python your_app.py` from that activated checkout.
 For PowerShell preparation or an independent interpreter, see the
-[PM developer workflow](/reference/package-management#developer-workflow).
+[PM developer workflow](../reference/package-management.md#developer-workflow).
 Hermes does not publish a supported wheel or source distribution for `requirements.txt` installs.
 
 :::tip

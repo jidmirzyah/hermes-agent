@@ -1,125 +1,55 @@
-"""Regression tests: supermemory + mem0 memory providers must lazy-install
-their SDKs like honcho/hindsight.
-
-Both providers ship a third-party SDK (``supermemory`` / ``mem0ai``) that is
-NOT a core dependency. Before this fix they imported the SDK directly with no
-``pm.ensure_import()`` preflight and had no extras mapping, so on hosted
-instances the SDK was never installed and the provider silently reported
-itself unavailable.
-
-These tests pin the contract:
-
-1. Both features are pyproject extras with an anchor in ``pm.extras.ANCHORS``
-   (without a mapping, ``ensure_import()`` can't resolve the anchor import
-   that proves the extra is installed — the original silent-dark bug).
-2. Each provider's SDK-import chokepoint actually calls
-   ``ensure_import(<extra>)``.
-3. supermemory's ``is_available()`` no longer gates on the SDK being
-   importable (the chicken-and-egg trap that stopped the provider loading at
-   all on a sealed venv, so ``initialize()``/``ensure_import()`` never ran).
-"""
-
-from __future__ import annotations
+"""Memory callers cross real PM admission before importing their optional SDK."""
+import importlib.machinery
+import importlib.abc
+import sys
+from types import ModuleType
 
 import pytest
 
-import pm
-from pm.extras import ANCHORS
 
+@pytest.mark.parametrize("extra", ["supermemory", "mem0"])
+@pytest.mark.parametrize("state", ["present", "absent", "failed"])
+def test_provider_sdk_admission(monkeypatch, tmp_path, extra, state):
+    import pm.client
+    from pm import paths
+    from plugins.memory.supermemory import _SupermemoryClient
+    from plugins.memory.mem0 import Mem0MemoryProvider
 
-MEMORY_EXTRAS = {"supermemory": "supermemory", "mem0": "mem0"}
-
-
-# ---------------------------------------------------------------------------
-# 1. Extras contract — the core regression.
-# ---------------------------------------------------------------------------
-
-
-class TestExtrasAnchors:
-    @pytest.mark.parametrize("extra,anchor", sorted(MEMORY_EXTRAS.items()))
-    def test_extra_has_anchor(self, extra, anchor):
-        # Without an anchor mapping, pm can't tell whether the extra is
-        # installed, and ensure_import() can't prove a successful install.
-        assert ANCHORS.get(extra) == anchor, (
-            f"{extra!r} missing/wrong in pm.extras.ANCHORS — its SDK can "
-            f"never lazy-install on a hosted instance."
-        )
-
-
-# ---------------------------------------------------------------------------
-# 2. Import sites call ensure_import().
-# ---------------------------------------------------------------------------
-
-
-class TestSupermemoryEnsureCalled:
-    def test_client_construction_calls_ensure(self, monkeypatch):
-        """_SupermemoryClient.__init__ must call ensure_import('supermemory')
-        before importing the SDK."""
-        from plugins.memory.supermemory import _SupermemoryClient
-
-        calls = []
-        monkeypatch.setattr(
-            pm, "ensure_import",
-            lambda extra: calls.append(extra),
-        )
-
-        # Stub the SDK so construction doesn't need the real package. The
-        # client does ``from supermemory import Supermemory`` right after
-        # ensure_import(); inject a fake module.
-        import sys
-        import types
-
-        fake = types.ModuleType("supermemory")
-        fake.Supermemory = lambda **kw: object()
-        monkeypatch.setitem(sys.modules, "supermemory", fake)
-
-        _SupermemoryClient(api_key="k", timeout=5.0, container_tag="hermes")
-
-        assert "supermemory" in calls, (
-            "supermemory client did not call ensure_import('supermemory'); "
-            f"calls={calls}"
-        )
-
-
-class TestMem0EnsureCalled:
-    def test_create_backend_calls_ensure(self, monkeypatch):
-        """The mem0 provider must call ensure_import('mem0') in
-        _create_backend before importing the SDK."""
-        from plugins.memory.mem0 import Mem0MemoryProvider
-
-        calls = []
-        monkeypatch.setattr(
-            pm, "ensure_import",
-            lambda extra: calls.append(extra),
-        )
-
-        prov = Mem0MemoryProvider()
-        # Platform mode is the default; force a known mode and stub the backend
-        # import so we isolate the ensure_import() call.
-        prov._mode = "platform"
-        prov._api_key = "k"
-
-        import sys
-        import types
-
-        fake = types.ModuleType("mem0")
-        fake.MemoryClient = lambda **kw: object()
-        fake.Memory = object
-        monkeypatch.setitem(sys.modules, "mem0", fake)
-        # _backend imports ``from mem0 import MemoryClient`` lazily inside
-        # PlatformBackend.__init__, so the fake module satisfies it.
-
-        prov._create_backend()
-
-        assert "mem0" in calls, (
-            f"mem0 _create_backend did not call ensure_import('mem0'); "
-            f"calls={calls}"
-        )
-
-
-# ---------------------------------------------------------------------------
-# 3. supermemory is_available() chicken-and-egg fix.
-# ---------------------------------------------------------------------------
+    sdk = ModuleType(extra)
+    sdk.__spec__ = importlib.machinery.ModuleSpec(extra, loader=None)
+    sdk.Supermemory = sdk.MemoryClient = lambda **kwargs: object()
+    sdk.Memory = object
+    monkeypatch.delitem(sys.modules, extra, raising=False)
+    if state == "present":
+        monkeypatch.setitem(sys.modules, extra, sdk)
+    class MissingSDK(importlib.abc.MetaPathFinder):
+        def find_spec(self, fullname, path=None, target=None):
+            if fullname == extra:
+                raise ModuleNotFoundError("SDK unavailable")
+    monkeypatch.setattr(sys, "meta_path", [MissingSDK(), *sys.meta_path])
+    monkeypatch.setattr(paths, "runtime_facts_path", lambda: tmp_path / "unselected-facts")
+    calls = []
+    def sync(extras):
+        calls.append(extras)
+        if state == "failed":
+            raise RuntimeError("SDK install refused")
+        monkeypatch.setitem(sys.modules, extra, sdk)
+    monkeypatch.setattr(pm.client, "sync_venv", sync)
+    def construct():
+        if extra == "supermemory":
+            return _SupermemoryClient(api_key="k", timeout=5, container_tag="hermes")
+        provider = Mem0MemoryProvider()
+        provider._mode, provider._api_key = "platform", "k"
+        return provider._create_backend()
+    if state == "failed":
+        if extra == "mem0":
+            assert construct() is None
+        else:
+            with pytest.raises(ModuleNotFoundError, match="SDK unavailable"):
+                construct()
+    else:
+        assert construct() is not None
+    assert calls == ([] if state == "present" else [[extra]])
 
 
 class TestSupermemoryIsAvailable:

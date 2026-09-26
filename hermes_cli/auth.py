@@ -522,7 +522,7 @@ def _load_global_auth_store() -> Dict[str, Any]:
     if os.environ.get("PYTEST_CURRENT_TEST") and os.environ.get("HOME"):
         real_root = Path(os.environ["HOME"]) / ".hermes" / "auth.json"
         try:
-            if global_path.resolve(strict=False) == real_root.resolve(strict=False):
+            if os.path.normcase(os.path.abspath(global_path)) == os.path.normcase(os.path.abspath(real_root)):
                 _global_auth_store_cache = None
                 return {}
         except Exception:

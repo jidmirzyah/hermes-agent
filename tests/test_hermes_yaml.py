@@ -6,19 +6,22 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 import hermes_yaml as yaml
+from utils import fast_safe_load
 
 
-def test_safe_load_accepts_existing_config_boolean_spellings():
+@pytest.mark.parametrize("load", [yaml.safe_load, fast_safe_load])
+def test_safe_load_accepts_existing_config_boolean_spellings(load):
     document = "flags: [on, off, yes, no, true, false]\nquoted: ['off', 'yes']\n"
     expected = {"flags": [True, False, True, False, True, False], "quoted": ["off", "yes"]}
     for stream in (document, document.encode(), io.StringIO(document), io.BytesIO(document.encode())):
-        assert yaml.safe_load(stream) == expected
-    assert yaml.safe_load("") is None
+        assert load(stream) == expected
+    assert load("") is None
 
 
-def test_safe_load_rejects_python_object_construction():
+@pytest.mark.parametrize("load", [yaml.safe_load, fast_safe_load])
+def test_safe_load_rejects_python_object_construction(load):
     with pytest.raises(yaml.YAMLError):
-        yaml.safe_load("!!python/object/apply:builtins.str ['must not construct']")
+        load("!!python/object/apply:builtins.str ['must not construct']")
 
 
 def test_safe_dump_preserves_data_and_readable_block_layout():
@@ -62,7 +65,7 @@ def test_roundtrip_preserves_comments_quotes_and_scalar_types():
 
 
 def test_native_yaml11_scalars_and_duplicate_key_policy():
-    for load in (yaml.safe_load, yaml.roundtrip_yaml().load):
+    for load in (yaml.safe_load, fast_safe_load, yaml.roundtrip_yaml().load):
         assert load("[y, n, Y, N, 'y', 'n']") == [True, False, True, False, "y", "n"]
         with pytest.raises(yaml.YAMLError):
             load("model: first\nmodel: second\n")

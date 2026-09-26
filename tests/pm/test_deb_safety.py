@@ -18,24 +18,12 @@ from pathlib import Path
 import pytest
 
 from pm.package import DebPackage, InstallError
+from tests.pm._fixtures import _ar_member
 
 
 class _P(DebPackage):
     name = "evil-deb"
 
-
-def _ar_member(name: str, data: bytes) -> bytes:
-    hdr = (
-        name.ljust(16).encode()
-        + b"0".ljust(12)
-        + b"0".ljust(6)
-        + b"0".ljust(6)
-        + b"100644".ljust(8)
-        + str(len(data)).encode().ljust(10)
-        + b"`\n"
-    )
-    pad = b"\n" if len(data) % 2 else b""
-    return hdr + data + pad
 
 
 def _build_deb(path: Path, members: list[tarfile.TarInfo | tuple[str, bytes]]) -> None:
@@ -84,6 +72,17 @@ def test_chained_aliases_survive_without_symlink_support(tmp_path, monkeypatch):
         assert (staged / lib / name).read_bytes() == b"library payload"
 
 
+def test_relative_member_escape_preserves_outside(tmp_path):
+    deb, staged = tmp_path / "escape.deb", tmp_path / "staged"
+    sentinel = tmp_path / "sentinel"
+    sentinel.write_bytes(b"outside")
+    _build_deb(deb, [("../sentinel", b"escaped")])
+    staged.mkdir()
+    with pytest.raises(InstallError, match="escape|unsafe|outside"):
+        _P().unpack(deb, staged, "linux-arm64-bionic")
+    assert sentinel.read_bytes() == b"outside"
+
+
 def test_absolute_symlink_target_rejected(tmp_path: Path):
     """A member whose symlink target is ABSOLUTE must be refused outright:
     the link points outside the staged tree the moment it is created."""
@@ -104,38 +103,33 @@ def test_absolute_symlink_target_rejected(tmp_path: Path):
 @pytest.mark.platforms("posix")
 @pytest.mark.parametrize(
     "shape",
-    ["write-through", "chmod-follow"],
+    ["relative-link", "planted-ancestor"],
 )
 def test_symlink_escape_forbidden(tmp_path: Path, shape: str):
-    """A symlink planted in the staged tree must never become a path OUT:
-    not for a later data member written through it (write-through), and not
-    for the final mode-normalization walk following it (chmod-follow)."""
+    """Relative link and pre-existing ancestor escapes leave outside bytes/mode intact.
+
+    These exercise containment, not an independent late chmod-walk guard.
+    """
     outside = tmp_path / "outside"
     outside.mkdir()
     sentinel = outside / "sentinel.txt"
     sentinel.write_text("do not touch")
     os.chmod(sentinel, 0o600)
 
-    linkname = str(sentinel if shape == "chmod-follow" else outside)
-    members: list = [_symlink_member("link", linkname)]
-    if shape == "write-through":
-        members.append(("link/evil.txt", b"escaped"))
-    else:
-        members.append(("regular.txt", b"payload"))
-    deb = tmp_path / f"escape-{shape}.deb"
-    _build_deb(deb, members)
-
     staged = tmp_path / "staged"
     staged.mkdir()
-    with pytest.raises(InstallError):
+    if shape == "relative-link":
+        members = [_symlink_member("link", "../outside"), ("link/evil.txt", b"escaped")]
+    else:
+        (staged / "link").symlink_to(outside, target_is_directory=True)
+        members = [("link/evil.txt", b"escaped")]
+    deb = tmp_path / f"escape-{shape}.deb"
+    _build_deb(deb, members)
+    with pytest.raises(InstallError, match="escape|unsafe|outside"):
         _P().unpack(deb, staged, "linux-arm64-bionic")
 
     assert sentinel.read_text() == "do not touch", (
         f"{shape}: a staged symlink was followed outside the tree"
     )
-    if shape == "chmod-follow":
-        assert os.stat(sentinel).st_mode & 0o777 == 0o600, (
-            "the mode walk chmod'd a file outside the staged tree"
-        )
-    if shape == "write-through":
-        assert not (outside / "evil.txt").exists()
+    assert os.stat(sentinel).st_mode & 0o777 == 0o600
+    assert not (outside / "evil.txt").exists()

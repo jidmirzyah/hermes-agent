@@ -108,16 +108,24 @@ def cmd_build_commit(args) -> None:
             raise ValueError("could not resolve the repository default branch")
         command = dispatch_command(commit, repository, branch, bundle_env)
         page = r2.public_url_for(r2.public_base_url(), r2.commit_page_key_for(commit))
-        print(f"Commit: {commit}\nR2: {r2.commit_prefix_for(commit)}\nPage: {page}\nWorkflow: {repository}@{branch}")
-        print(shlex.join(command))
+        print(f"Building one-off bundle for commit {commit}")
+        print(f"Builds will be available at: {page}.")
+        print(f"Workflow command, running from {repository}@{branch}")
+        print(f"    {shlex.join(command)}")
         if not args.publish:
-            print("Dry run. Add --publish to dispatch. No tag, release or channel is changed.")
+            print("Dry run. Add --publish to dispatch.")
             return
-        result = subprocess.run(command, cwd=release.REPO_ROOT, capture_output=True, text=True,
+        print("Starting workflow!")
+        result = subprocess.run(command, cwd=release.REPO_ROOT, capture_output=True, text=True,  # windows-footgun: ok — encoding and replacement policy are on the next line.
                                 encoding="utf-8", errors="replace", check=True, timeout=60)
         print((result.stdout or "").strip() or f"Dispatched commit build {commit}. No release was created.")
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
-        raise SystemExit(f"release: commit build refused: {exc}") from exc
+        stderr = ""
+        if isinstance(exc, subprocess.CalledProcessError):
+            # check_output failures carry no captured stderr; don't mask the
+            # original error with a TypeError while reporting it.
+            stderr = "\n" + (exc.stderr or "")
+        raise SystemExit(f"release: commit build refused: {exc}{stderr}") from exc
 
 
 def main() -> None:

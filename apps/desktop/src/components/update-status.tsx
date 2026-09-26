@@ -37,23 +37,51 @@ export interface UpdateStatusView {
   supported: boolean
 }
 
+function retirementStatus(
+  retirement: NonNullable<DesktopUpdateStatus['retirement']>,
+  applying: boolean,
+  supported: boolean,
+  u: Translations['updates']
+): UpdateStatusView {
+  // Suffixed-identity build: nothing to download or migrate — just the notice.
+  return {
+    applying,
+    supported,
+    updateAvailable: false,
+    tone: 'error',
+    line: u.discontinuedTitle,
+    error: u.discontinuedBody
+  }
+}
+
 /**
  * One status derivation for every "am I up to date?" surface (About page,
  * updates overlay). Pure so the tone/copy contract is unit-testable.
  */
-export function deriveUpdateStatus({
-  apply,
-  checking,
-  status,
-  target,
-  u
-}: {
+interface UpdateStatusInput {
   apply: UpdateApplyState
   checking: boolean
   status: DesktopUpdateStatus | null
   target: UpdateTarget
   u: Translations['updates']
-}): UpdateStatusView {
+}
+
+export function deriveUpdateStatus(input: UpdateStatusInput): UpdateStatusView {
+  const { apply, status, target, u } = input
+
+  if (target === 'client' && status?.retirement) {
+    return retirementStatus(
+      status.retirement,
+      apply.applying || apply.stage === 'restart',
+      status.supported !== false,
+      u
+    )
+  }
+
+  return ordinaryUpdateStatus(input)
+}
+
+function ordinaryUpdateStatus({ apply, checking, status, target, u }: UpdateStatusInput): UpdateStatusView {
   const behind = status?.behind ?? 0
   // behind is null when the exact count is unknowable (shallow clone): the
   // backend flags that case via updateAvailable instead of a number.
@@ -66,10 +94,14 @@ export function deriveUpdateStatus({
   }
 
   if (status?.error) {
+    // A git that never ran is a local problem; leading with "couldn't reach
+    // the update server" would misdiagnose it as a network failure.
+    const prefix = status.error === 'git-unusable' ? '' : u.cantReach
+
     return {
       applying,
       error: [status.message, status.error].filter(l => !!l).join('\n'),
-      line: u.cantReach,
+      line: [prefix, status.message].filter(Boolean).join(' '),
       supported,
       tone: 'error',
       updateAvailable
@@ -152,7 +184,9 @@ export function VersionHero({
         )}
         <p className="mt-1 text-xs text-muted-foreground">
           {version?.appVersion ? u.version(version.appVersion) : u.versionUnavailable}
-          {version?.channel ? ` · ${u.channels[version.channel]}` : ''}
+          {version?.channel
+            ? ` · ${Object.entries(u.channels).find(([name]: [string, string]): boolean => name === version.channel)?.[1] ?? version.channel}`
+            : ''}
         </p>
       </div>
       {(version?.bundleSwapPending || version?.bundleOutOfSync) && (
@@ -195,6 +229,33 @@ export function VersionHero({
         </div>
       )}
     </div>
+  )
+}
+
+interface UpdateActionsProps {
+  target: UpdateTarget
+  u: Translations['updates']
+  view: UpdateStatusView
+}
+
+function UpdateActions({ target, u, view }: UpdateActionsProps): ReactElement | null {
+  if (view.applying) {
+    return null
+  }
+
+  if (!view.updateAvailable || !view.supported) {
+    return null
+  }
+
+  return (
+    <>
+      <Button onClick={() => startActiveUpdate(target)} size="sm">
+        {u.updateNow}
+      </Button>
+      <Button onClick={() => openUpdateOverlayFor(target)} size="sm" variant="textStrong">
+        {u.seeWhatsNew}
+      </Button>
+    </>
   )
 }
 
@@ -267,16 +328,7 @@ export function UpdateStatusCard({
             {checking ? u.checkingShort : u.checkNow}
           </Button>
 
-          {view.updateAvailable && view.supported && !view.applying && (
-            <>
-              <Button onClick={() => startActiveUpdate(target)} size="sm">
-                {u.updateNow}
-              </Button>
-              <Button onClick={() => openUpdateOverlayFor(target)} size="sm" variant="textStrong">
-                {u.seeWhatsNew}
-              </Button>
-            </>
-          )}
+          <UpdateActions target={target} u={u} view={view} />
 
           {showReleaseNotes && (
             <Button asChild className="ml-auto" size="sm" variant="text">

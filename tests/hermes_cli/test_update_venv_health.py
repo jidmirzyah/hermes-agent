@@ -1,52 +1,16 @@
-"""Tests for the Windows half-updated-venv hardening (July 2026 incident).
+"""Live lifecycle discovery still identifies Windows venv processes.
 
-Covers three additions to ``hermes update``:
-
-1. ``_venv_core_imports_healthy`` — the venv health probe that lets an
-   "Already up to date" checkout still repair a broken dependency install.
-2. ``_detect_venv_python_processes`` — the venv-interpreter process guard
-   that refuses to mutate the venv while a desktop backend / stray python
-   holds .pyd files mapped.
-3. The commit_count == 0 repair branch wiring in ``_cmd_update_impl``.
-
-All Windows-specific paths are exercised via ``_is_windows`` patching so
-they run on any host (same approach as test_update_concurrent_quarantine).
+These tests exercise the retained scan, not the retired update admission gate.
 """
 
-from __future__ import annotations
-
-import subprocess
 import sys
 import types
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from hermes_cli import main as cli_main
-from hermes_cli import update_cmd, update_cmd_windows
-
-
-# ---------------------------------------------------------------------------
-# _venv_core_imports_healthy
-# ---------------------------------------------------------------------------
-
-
-
-
-def _fake_venv_python(tmp_path, *, windows: bool = False):
-    bin_dir = tmp_path / "venv" / ("Scripts" if windows else "bin")
-    bin_dir.mkdir(parents=True)
-    py = bin_dir / ("python.exe" if windows else "python")
-    py.write_bytes(b"")
-    return py
-
-
-
-
-# ---------------------------------------------------------------------------
-# _detect_venv_python_processes
-# ---------------------------------------------------------------------------
+from hermes_cli import update_cmd_windows
 
 
 def _proc(pid: int, exe: str, name: str, cmdline: list[str] | None = None, cwd: str = ""):
@@ -61,10 +25,8 @@ def _proc(pid: int, exe: str, name: str, cmdline: list[str] | None = None, cwd: 
     return proc
 
 
-
-
-@patch.object(cli_main, "_is_windows", return_value=True)
-def test_detect_venv_python_excludes_self_and_ancestors(_winp, tmp_path):
+@pytest.mark.platforms("windows")
+def test_detect_venv_python_excludes_self_and_ancestors(tmp_path):
     import os as _os
 
     venv_py = str(tmp_path / "venv" / "Scripts" / "python.exe")
@@ -87,8 +49,8 @@ def test_detect_venv_python_excludes_self_and_ancestors(_winp, tmp_path):
         assert update_cmd_windows._detect_venv_python_processes() == []
 
 
-@patch.object(cli_main, "_is_windows", return_value=True)
-def test_detect_venv_python_prefetches_only_cheap_process_fields(_winp, tmp_path):
+@pytest.mark.platforms("windows")
+def test_detect_venv_python_prefetches_only_cheap_process_fields(tmp_path):
     venv_py = str(tmp_path / "venv" / "Scripts" / "python.exe")
     holder = _proc(101, venv_py, "python.exe", [venv_py, "-m", "hermes_cli.main", "serve"])
     unrelated = _proc(102, r"C:\Program Files\Browser\browser.exe", "browser.exe")
@@ -134,13 +96,13 @@ def test_detect_venv_python_matches_uv_default_dotvenv(_winp, tmp_path):
     (tmp_path / ".venv").mkdir()
 
     with patch.object(cli_main, "PROJECT_ROOT", tmp_path), patch.dict(sys.modules, {"psutil": fake_psutil}):
-        matches = cli_main._detect_venv_python_processes()
+        matches = update_cmd_windows._detect_venv_python_processes()
 
     assert [match[0] for match in matches] == [104]
 
 
-@patch.object(cli_main, "_is_windows", return_value=True)
-def test_detect_venv_python_keeps_external_interpreter_fallback(_winp, tmp_path):
+@pytest.mark.platforms("windows")
+def test_detect_venv_python_keeps_external_interpreter_fallback(tmp_path):
     external = _proc(
         103,
         r"C:\Python311\python.exe",

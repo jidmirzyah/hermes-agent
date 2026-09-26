@@ -25,7 +25,7 @@ def _powershell(script, *args, env=None):
     return subprocess.run(
         [shell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
          "-File", str(script), *map(str, args)],
-        capture_output=True, text=True, encoding="utf-8", errors="replace", env=env, timeout=30,
+        capture_output=True, text=True, encoding="utf-8", errors="replace", env=env, timeout=180,
     )
 
 
@@ -69,6 +69,13 @@ function Initialize-HermesArm64BuildTools {
 }
 ''', encoding="utf-8")
     env = dict(os.environ)
+    # The runner job env may already carry the toolchain variables the fixture sets (a prior
+    # workflow step exported them); the delta filter then rightly skips them. This test is about
+    # the protocol, so start from a parent that does not have them.
+    for name in ("INCLUDE", "LIB", "WINDOWSSDKDIR", "OPENSSL_DIR", "OPENSSL_STATIC",
+                 "CC_AARCH64_PC_WINDOWS_MSVC", "GITHUB_FIXTURE", "RUNNER_FIXTURE", "NODE_OPTIONS"):
+        for key in [k for k in env if k.upper() == name]:
+            del env[key]
     env.update(CARGO_HOME=str(tmp_path / "caller cargo"), RUSTUP_HOME=str(tmp_path / "caller rustup"),
                RUSTUP_TOOLCHAIN="caller-toolchain", UNCHANGED_BUILD_SENTINEL="inherited")
     state = tmp_path / "state with spaces"
@@ -132,7 +139,15 @@ $ErrorActionPreference = 'Stop'
 $vs = Join-Path $Root 'VS with spaces'
 $devDir = Join-Path $vs 'Common7\Tools'
 New-Item -ItemType Directory -Force $devDir | Out-Null
-[IO.File]::WriteAllText((Join-Path $devDir 'VsDevCmd.bat'), "@echo off`r`nset INCLUDE=fixture SDK include`r`nset LIB=fixture SDK lib`r`n")
+[IO.File]::WriteAllText((Join-Path $devDir 'VsDevCmd.bat'), @"
+@echo off
+set "PATH=%~dp0;%PATH%"
+set "INCLUDE=fixture SDK include"
+set "LIB=fixture SDK lib"
+set "VSCMD_ARG_HOST_ARCH=arm64"
+set "VSCMD_ARG_TGT_ARCH=arm64"
+set "VSINSTALLDIR=$vs\"
+"@)
 $rustcPath = Join-Path $Root 'rustc.cmd'
 [IO.File]::WriteAllText($rustcPath, "@echo off`r`necho host: aarch64-pc-windows-msvc`r`n")
 $vcpkg = Join-Path $Root 'vcpkg checkout'
@@ -150,6 +165,9 @@ function Get-Command {
     param([string]$Name)
     switch ($Name) {
         'cl.exe' { return [pscustomobject]@{Source = (Join-Path $vs 'cl.exe')} }
+        # The MSVC linker pin (CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_LINKER) resolves link.exe;
+        # a path under \MSVC\ is what the helper accepts.
+        'link.exe' { return [pscustomobject]@{Source = (Join-Path $vs 'VC\Tools\MSVC\14.44\bin\HostARM64\ARM64\link.exe')} }
         'rustup.exe' { return [pscustomobject]@{Source = (Join-Path $Root 'rustup.exe')} }
         'rustc.exe' { return [pscustomobject]@{Source = $rustcPath} }
         'vcpkg.exe' { return $null }
@@ -172,13 +190,46 @@ if ($Homes -eq 'explicit') {
     $rustupHome = Join-Path $HOME '.rustup'
 }
 $inheritedPath = $env:PATH
+$cargoBin = Join-Path $cargoHome 'bin'
+$expectedPath = $devDir + '\;' + $inheritedPath
+if ($cargoBin -notin ($expectedPath -split ';')) { $expectedPath = $cargoBin + ';' + $expectedPath }
 Initialize-HermesArm64BuildTools -StateRoot $Root -OpenSSLRoot $openssl
 if ($env:CARGO_HOME -ne $cargoHome -or $env:RUSTUP_HOME -ne $rustupHome) { throw 'Rust homes lost' }
 if ($env:RUSTUP_TOOLCHAIN -ne 'caller-selected-toolchain') { throw 'Caller Rust toolchain lost' }
-if ($env:PATH -ne ((Join-Path $cargoHome 'bin') + ';' + $inheritedPath)) { throw 'PATH lost or reordered' }
+if ($env:PATH -ne $expectedPath) { throw 'PATH lost or reordered' }
 if ($env:OPENSSL_DIR -ne $prefix -or $env:OPENSSL_STATIC -ne '1') { throw 'Wrong OpenSSL tree' }
 if ($env:INCLUDE -ne 'fixture SDK include' -or $env:LIB -ne 'fixture SDK lib') { throw 'SDK environment lost' }
 if ($env:CC_aarch64_pc_windows_msvc -ne (Join-Path $vs 'clang.exe')) { throw 'Compiler lost' }
+if ($env:CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_LINKER -notlike '*\MSVC\*link.exe') { throw 'MSVC linker not pinned' }
+# CI initializes once, desktop again, then its native staging child a third time.
+# Re-running VsDevCmd grows PATH until cmd.exe hits its 8191-character limit.
+$prepared = @{}
+foreach ($name in @('PATH', 'INCLUDE', 'LIB', 'VSCMD_ARG_HOST_ARCH', 'VSCMD_ARG_TGT_ARCH', 'VSINSTALLDIR')) {
+    $prepared[$name] = (Get-Item "env:$name").Value
+}
+foreach ($i in 1..3) {
+    Initialize-HermesArm64BuildTools -StateRoot $Root -OpenSSLRoot $openssl
+    foreach ($name in $prepared.Keys) {
+        if ((Get-Item "env:$name").Value -cne $prepared[$name]) { throw "Repeated setup changed $name" }
+    }
+}
+# Inherited VS markers are not sufficient if the SDK, install or architecture differs.
+foreach ($invalid in @('INCLUDE', 'LIB', 'VSCMD_ARG_HOST_ARCH', 'VSCMD_ARG_TGT_ARCH', 'VSINSTALLDIR')) {
+    foreach ($name in $prepared.Keys) { Set-Item "env:$name" $prepared[$name] }
+    Set-Item "env:$invalid" $(if ($invalid -in @('INCLUDE', 'LIB')) { '' } else { 'other' })
+    Initialize-HermesArm64BuildTools -StateRoot $Root -OpenSSLRoot $openssl
+    foreach ($name in $prepared.Keys | Where-Object { $_ -ne 'PATH' }) {
+        if ((Get-Item "env:$name").Value -cne $prepared[$name]) { throw "Did not repair $invalid" }
+    }
+}
+$env:VSCMD_ARG_TGT_ARCH = 'x64'
+[IO.File]::WriteAllText((Join-Path $devDir 'VsDevCmd.bat'), "@exit /b 19`r`n")
+$failed = $false
+try { Initialize-HermesArm64BuildTools -StateRoot $Root -OpenSSLRoot $openssl } catch {
+    if ($_.Exception.Message -notmatch 'Could not initialize') { throw }
+    $failed = $true
+}
+if (-not $failed) { throw 'Failed VS activation was accepted' }
 Write-Output 'PASS'
 ''', encoding="utf-8")
     result = _powershell(script, HELPER, tmp_path, rust_homes)

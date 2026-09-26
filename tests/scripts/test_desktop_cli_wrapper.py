@@ -27,14 +27,9 @@ _WRAPPER = _REPO / "scripts" / "build" / "launcher_wrapper.py"
 def _load(env=None):
     """Import the wrapper with its placeholders substituted, like the build
     script does, and return its module namespace."""
-    text = _WRAPPER.read_text(encoding="utf-8")
-    for placeholder, value in {
-        "__HERMES_ENTRY_MODULE__": "stubmod.entry",
-        "__HERMES_ENTRY_FUNC__": "main",
-        "__HERMES_REPO_REL__": "../repo",
-        "__HERMES_SITE_REL__": "../venv/Lib/site-packages",
-    }.items():
-        text = text.replace(placeholder, value)
+    from scripts.build.launchers import render_wrapper
+
+    text = render_wrapper("stubmod.entry:main", "../repo", "../venv/Lib/site-packages")
     namespace: dict = {"__name__": "launcher_wrapper_under_test"}
     exec(compile(text, str(_WRAPPER), "exec"), namespace)  # noqa: S102 - test fixture
     return namespace

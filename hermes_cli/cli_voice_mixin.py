@@ -78,11 +78,9 @@ class CLIVoiceMixin:
                     "Run pkg install termux-api and install the Termux:API Android app, "
                     "then retry /voice on."
                 )
-            raise RuntimeError(
-                "Voice mode requires sounddevice and numpy.\n"
-                "From the Hermes environment, run: "
-                "python -c \"from pm import sync_venv; sync_venv(['audio-io'], explicit=True)\". "
-                "Then restart Hermes.")
+            # check_voice_requirements already asked PM to enable audio-io; its detail line
+            # says why that did not happen (lazy installs off, needs restart, platform gate).
+            raise RuntimeError("Voice mode requires audio capture.\n" + reqs.get("details", ""))
         if not reqs.get("stt_available", reqs.get("stt_key_set")):
             raise RuntimeError(
                 "Voice mode requires an STT provider for transcription.\n"
@@ -504,11 +502,6 @@ class CLIVoiceMixin:
                 if _is_termux_environment():
                     _cprint(f"\n  {_BOLD}Run: pkg install termux-api{_RST}")
                     _cprint(f"  {_DIM}Then install/update the Termux:API Android app for microphone capture{_RST}")
-                else:
-                    _cprint(f"\n  {_BOLD}From the Hermes environment, run: "
-                            "python -c \"from pm import sync_venv; sync_venv(['audio-io'], explicit=True)\""
-                            f"{_RST}")
-                    _cprint(f"  {_DIM}Then restart Hermes.{_RST}")
             return
 
         with self._voice_lock:

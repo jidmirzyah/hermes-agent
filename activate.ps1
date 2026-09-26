@@ -1,5 +1,9 @@
 # Source this file to sync and apply the PM environment; deactivate restores it.
 $ErrorActionPreference = 'Stop'
+
+$OutputEncoding = [System.Console]::OutputEncoding = [System.Console]::InputEncoding = [System.Text.Encoding]::UTF8
+$PSDefaultParameterValues['*:Encoding'] = 'utf8'
+
 $repo = $PSScriptRoot
 $bootstrapSaved = @{}
 foreach ($key in @('PYTHONPATH', 'PYTHONHOME', 'VIRTUAL_ENV')) {
@@ -41,13 +45,15 @@ $priorHome = $env:PYTHONHOME
 try {
     $env:PYTHONPATH = $repo
     Remove-Item env:PYTHONHOME -ErrorAction SilentlyContinue
-    $json = (& $py -m hermes_cli.runtime_paths) -join "`n"
+    $json = (& $py -m pm.environments) -join "`n"
     if ($LASTEXITCODE -ne 0) { throw 'activate: could not read the installed environment' }
     $composed = $json | ConvertFrom-Json
 } finally {
     if ($null -eq $priorPath) { Remove-Item env:PYTHONPATH -ErrorAction SilentlyContinue } else { $env:PYTHONPATH = $priorPath }
     if ($null -eq $priorHome) { Remove-Item env:PYTHONHOME -ErrorAction SilentlyContinue } else { $env:PYTHONHOME = $priorHome }
 }
+# __HERMES_ACTIVATED (the sentinel repo scripts and the shebang prologue read)
+# is part of the composed env, so it is saved and restored with the rest.
 $global:_hermesKeys = @($composed.PSObject.Properties.Name)
 $global:_hermesSaved = @{}
 foreach ($key in $global:_hermesKeys) {

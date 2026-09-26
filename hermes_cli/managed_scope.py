@@ -85,8 +85,7 @@ def _cached_read(path: Path, cache: Dict[str, tuple], parse):
         if hit is not None and hit[:len(key)] == key:
             return copy.deepcopy(hit[len(key)])
     try:
-        with open(path, encoding="utf-8-sig") as f:
-            parsed = parse(f)
+        parsed = parse(path)
     except Exception as exc:  # noqa: BLE001 — fail-open, but LOUD
         logger.warning(
             "managed scope: failed to parse %s: %s — IGNORING this managed file. "
@@ -108,7 +107,7 @@ def _load_managed_file(name: str, cache: Dict[str, tuple], parse) -> dict:
 
 def load_managed_config() -> dict:
     """Parsed managed config.yaml, or {} when absent/malformed (fail-open)."""
-    return _load_managed_file("config.yaml", _CONFIG_CACHE, lambda p: yaml.safe_load(p.read_text(encoding="utf-8")) or {})
+    return _load_managed_file("config.yaml", _CONFIG_CACHE, lambda p: yaml.safe_load(p.read_text(encoding="utf-8-sig")) or {})
 
 
 def load_managed_env() -> Dict[str, str]:

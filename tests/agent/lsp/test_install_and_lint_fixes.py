@@ -2,11 +2,9 @@
 
 Covers:
 
-1. ``typescript-language-server`` install recipe pulls in ``typescript``
-   alongside the server, so the npm install command targets both.
-2. ``hermes lsp status`` surfaces a ``Backend warnings`` section when
+1. ``hermes lsp status`` surfaces a ``Backend warnings`` section when
    bash-language-server is installed but ``shellcheck`` is missing.
-3. ``_check_lint`` returns ``skipped`` (not ``error``) when the linter
+2. ``_check_lint`` returns ``skipped`` (not ``error``) when the linter
    command exists on PATH but couldn't actually run — e.g. ``npx tsc``
    without the typescript SDK installed.  This is what unblocks the
    LSP semantic tier on TypeScript files when the user doesn't also
@@ -19,53 +17,6 @@ from contextlib import redirect_stdout
 from unittest.mock import MagicMock, patch
 
 import pytest
-
-from agent.lsp.install import INSTALL_RECIPES
-
-
-# ---------------------------------------------------------------------------
-# Fix 1: typescript install recipe carries the typescript SDK
-# ---------------------------------------------------------------------------
-
-
-
-
-
-
-def test_install_npm_works_without_extras(tmp_path, monkeypatch):
-    """Backwards compat: pyright-style recipes (no extras) still install."""
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-
-    captured = {}
-
-    def fake_run(cmd, **kwargs):
-        captured["cmd"] = cmd
-        return MagicMock(returncode=0, stderr="")
-
-    from agent.lsp import install as install_mod
-
-    monkeypatch.setattr(install_mod.subprocess, "run", fake_run)
-    # _install_npm resolves npm via hermes_constants.find_node_executable
-    # (managed Node first, PATH second) — not install_mod.shutil.which, so
-    # mock the actual seam or the early "no usable npm" return skips the
-    # subprocess entirely.
-    monkeypatch.setattr(
-        install_mod, "find_node_executable",
-        lambda c: "/usr/bin/npm" if c == "npm" else None,
-    )
-
-    install_mod._install_npm("pyright", "pyright-langserver")
-
-    cmd = captured["cmd"]
-    assert "pyright" in cmd
-    # Should not blow up when extra_pkgs is omitted/None
-    install_targets = [c for c in cmd if not c.startswith("-") and c not in {
-        "install", "--prefix", str(install_mod.hermes_lsp_bin_dir().parent),
-        "/usr/bin/npm",
-    }]
-    assert install_targets == ["pyright"]
-
-
 
 
 def test_install_python_server_uses_pm_tool_environment(tmp_path, monkeypatch):
@@ -94,32 +45,6 @@ def test_install_python_server_uses_pm_tool_environment(tmp_path, monkeypatch):
     assert install_mod.detect_status("fake-lsp") == "installed"
 
 
-# ---------------------------------------------------------------------------
-# Fix 2: ``hermes lsp status`` surfaces shellcheck-missing for bash
-# ---------------------------------------------------------------------------
-
-
-
-
-
-
-def test_backend_warnings_fires_when_bash_installed_but_shellcheck_missing(tmp_path, monkeypatch):
-    """The exact scenario from the bug report."""
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    from agent.lsp import cli as lsp_cli
-
-    def which(name):
-        if name == "bash-language-server":
-            return "/fake/bin/bash-language-server"
-        return None  # shellcheck missing
-
-    with patch("shutil.which", side_effect=which):
-        notes = lsp_cli._backend_warnings()
-    assert len(notes) == 1
-    assert "shellcheck" in notes[0].lower()
-    assert "bash-language-server" in notes[0].lower()
-
-
 def test_status_output_includes_backend_warnings_section(tmp_path, monkeypatch):
     """End-to-end: status command output includes the warning section."""
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
@@ -139,19 +64,7 @@ def test_status_output_includes_backend_warnings_section(tmp_path, monkeypatch):
     output = buf.getvalue()
     assert "Backend warnings" in output
     assert "shellcheck" in output
-
-
-# ---------------------------------------------------------------------------
-# Fix 3: tier-1 lint treats unusable linters as ``skipped``, not ``error``
-# ---------------------------------------------------------------------------
-
-
-
-
-
-
-
-
+    assert "bash-language-server" in output
 
 
 def test_check_lint_returns_error_for_real_ts_type_errors(tmp_path, monkeypatch):
@@ -164,7 +77,7 @@ def test_check_lint_returns_error_for_real_ts_type_errors(tmp_path, monkeypatch)
     from tools.file_operations import ShellFileOperations
 
     ts_file = tmp_path / "bad.ts"
-    ts_file.write_text("const x: string = 42;\n", encoding="utf-8")
+    ts_file.write_text("const x: string = 42;\n")
 
     env = LocalEnvironment()
     fops = ShellFileOperations(env)

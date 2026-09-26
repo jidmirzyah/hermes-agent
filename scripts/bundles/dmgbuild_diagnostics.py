@@ -5,6 +5,7 @@ import functools
 import json
 import subprocess
 import sys
+import time
 
 
 def report_detach_failure(target, attachment, output, *, run=subprocess.run, stream=None):
@@ -56,11 +57,18 @@ def report_detach_failure(target, attachment, output, *, run=subprocess.run, str
 
 def wrap_hdiutil(native, *, report=report_detach_failure, stream=None):
     attachments = {}
+    stream = sys.stderr if stream is None else stream
 
     @functools.wraps(native)
     def observed(command, *args, **kwargs):
+        started = time.monotonic()
+        print(f"[dmg-hdiutil] start {command} {json.dumps(args)}", file=stream, flush=True)
         result = native(command, *args, **kwargs)
         code, output = result
+        print(f"[dmg-hdiutil] end {command} status={code} elapsed={time.monotonic() - started:.2f}s",
+              file=stream, flush=True)
+        if code != 0:
+            print(f"[dmg-hdiutil] output: {output!r}", file=stream, flush=True)
         if command == "attach" and code == 0 and isinstance(output, dict):
             attachment = {"image": args[-1], "entities": output.get("system-entities", [])}
             for entity in attachment["entities"]:

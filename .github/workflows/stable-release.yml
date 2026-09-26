@@ -256,11 +256,12 @@ jobs:
   complete:
     name: Stable release is green
     if: always()
-    needs: [admit, ci, docker, acceptance, candidates, publication, promote-docker, promote-bundles]
+    needs: [admit, ci, docker, acceptance, candidates, publication, promote-docker, promote-bundles, windows-packaged, macos-packaged]
     runs-on: ubuntu-24.04
     environment: release-signing
     permissions:
       contents: write
+      actions: read
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -269,12 +270,22 @@ jobs:
       - uses: ./.github/actions/setup-pm
         with:
           cache-python: false
+      - name: Set up the native identity reader
+        uses: ./.github/actions/setup-pm
+        with:
+          toolchain: node
+          cache-python: false
       - run: python -m scripts.releases.stable gate admit ci docker acceptance candidates publication promote-docker promote-bundles
         env:
           RELEASE_NEEDS: ${{ toJSON(needs) }}
-      - name: Record accepted stable packages and publish release
-        run: python -m scripts.releases.stable complete
+      - name: Record accepted stable packages and publish release, then advance the R2 head
+        # Keep the source/native head last: a failed manifest or GitHub transaction
+        # must leave protocol-aware readers on the previous accepted release.
+        run: |
+          python -m scripts.releases.stable complete
+          python -m scripts.releases.channel_releases stable --root "$RUNNER_TEMP/stable-channel"
         env:
+          RELEASE_NEEDS: ${{ toJSON(needs) }}
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag }}
           CANDIDATE_MANIFEST_URL: ${{ needs.candidates.outputs.manifest-url }}

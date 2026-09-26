@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 import pytest
 
-pytestmark = pytest.mark.platforms("linux")
+pytestmark = pytest.mark.platforms("posix")
 
 
 class TestCronFilePermissions(unittest.TestCase):

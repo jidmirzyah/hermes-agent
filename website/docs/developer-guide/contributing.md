@@ -39,7 +39,7 @@ We value contributions in this order:
 
 ### PM developer environment
 
-Use the [PM developer workflow](/reference/package-management#developer-workflow) for preparation, activation, everyday commands,
+Use the [PM developer workflow](../reference/package-management.md#developer-workflow) for preparation, activation, everyday commands,
 dependency changes, and test environments. Select your development
 home before setup so experimental code does not migrate production data.
 
@@ -66,7 +66,7 @@ not install JS workspaces or rewrite launchers and shell configuration. `deactiv
 
 ### Manual development and test environment {#manual-development-and-test-environment}
 
-Use the [PM developer workflow](/reference/package-management#developer-workflow) to prepare Python 3.14 (`>=3.14,<3.15`) first.
+Use the [PM developer workflow](../reference/package-management.md#developer-workflow) to prepare Python 3.14 (`>=3.14,<3.15`) first.
 Run these commands from that checkout with its prepared Python. Keep the same
 development `HERMES_HOME`. PM must be able to start before it can build another
 environment. On Windows, initialize the native C++ build environment for your

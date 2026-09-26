@@ -13,14 +13,13 @@ from pm.downloader import HashError
 from scripts.ci import archive_inputs as inputs
 from scripts.releases import r2
 from tests.scripts.test_release_r2 import r2_server  # noqa: F401
-from tests.test_termux_runtime_libs import _Server, _build_deb
+from tests.scripts.test_termux_runtime_libs import _Server, _build_deb
 
 
 def write_pins(repo, packages, libs=None):
     (repo / "pm").mkdir(parents=True, exist_ok=True)
     (repo / "pm/lock.json").write_text(json.dumps({"schema": 1, "packages": packages}), encoding="utf-8")
-    (repo / "scripts/termux").mkdir(parents=True, exist_ok=True)
-    (repo / "scripts/termux/runtime_libs.json").write_text(json.dumps(libs or {"libs": {}}), encoding="utf-8")
+    (repo / "pm/termux_runtime_libs.json").write_text(json.dumps(libs or {"libs": {}}), encoding="utf-8")
 
 
 @pytest.fixture
@@ -93,7 +92,7 @@ def test_real_cli_miss_hit_and_staging_use_the_same_archived_bytes(tmp_path, ups
     assert inputs.main(["--target", "linux-arm64-bionic", "--store", str(store.root), "--payload", str(payload)]) == 0
     assert not any(r[0] == "PUT" for r in r2_server.requests)
     assert (stage(payload, {"lib": row}) / "libarchive-proof.so").read_bytes().endswith(b"pinned library")
-    engine = importlib.import_module("pm.ensure")
+    engine = importlib.import_module("pm.install")
     monkeypatch.setattr(engine, "_store", lambda: store)
     monkeypatch.setattr(engine, "get_package", lambda _: _FakePackage())
     entry = engine.stage_only("stage-test", "linux-arm64-bionic")
@@ -155,6 +154,77 @@ def test_racing_misses_verify_the_immutable_winner(tmp_path, upstream, r2_server
     assert all(p.read_bytes() == body for p in paths)
 
 
+def test_all_digests_start_together_and_seed_every_reference(tmp_path, upstream, r2_server, monkeypatch):
+    from collections import Counter
+    from pm.store import Store
+    from scripts.termux.stage_runtime_libs import download_path
+
+    server, root = upstream
+    bodies = {f"input-{i}": f"distinct pinned bytes {i}".encode() for i in range(9)}
+    pins = []
+    for name, body in bodies.items():
+        (root / f"{name}.deb").write_bytes(body)
+        digest = hashlib.sha256(body).hexdigest()
+        for kind, label in (("tool", name), ("library", name), ("library", f"{name}-alias")):
+            pins.append(inputs.InputPin(label, f"{server.url}/{name}.deb", digest, kind))
+
+    # Every unique input must reach the real HTTP path before any can finish.
+    barrier = threading.Barrier(len(bodies))
+    original = r2.signed_request
+    def together(method, url, **kwargs):
+        if method == "HEAD":
+            barrier.wait(timeout=10)
+        return original(method, url, **kwargs)
+    monkeypatch.setattr(r2, "signed_request", together)
+    store = Store(tmp_path / "tools")
+    payload = tmp_path / "payload"
+    assert inputs.stage_inputs(pins, archive=inputs.Archive(*r2.credentials()),
+                               store=store, payload=payload) == len(bodies)
+    puts = Counter(path for method, path, _ in r2_server.requests if method == "PUT")
+    assert len(puts) == len(bodies) and set(puts.values()) == {1}
+    for name, body in bodies.items():
+        digest = hashlib.sha256(body).hexdigest()
+        assert r2_server.store[object_key(digest)][0] == body
+        assert (store.entry(f"fetch-{digest}") / f"{name}.deb").read_bytes() == body
+        for label in (name, f"{name}-alias"):
+            assert download_path(payload, label).read_bytes() == body
+
+
+def test_parallel_readback_failure_reaches_cli_and_preserves_destination(tmp_path, upstream, r2_server, monkeypatch, capsys):
+    from pm import paths
+    from scripts.termux.stage_runtime_libs import download_path
+
+    server, root = upstream
+    packages, libs = {}, {}
+    for name in ("good", "bad"):
+        body = name.encode()
+        (root / f"{name}.deb").write_bytes(body)
+        row = {"url": f"{server.url}/{name}.deb", "sha256": hashlib.sha256(body).hexdigest()}
+        libs[name] = row
+        packages[name] = {"version": "1", "artifacts": {"any": row}}
+        r2_server.store[object_key(row["sha256"])] = (body if name == "good" else b"xxx", '"etag"')
+    repo = tmp_path / "repo"
+    write_pins(repo, packages, {"libs": libs})
+    monkeypatch.setattr(paths, "repo_root", lambda: repo)
+    payload = tmp_path / "payload"
+    preserved = download_path(payload, "bad")
+    preserved.parent.mkdir(parents=True)
+    preserved.write_bytes(b"existing destination")
+    barrier = threading.Barrier(len(libs))
+    original = r2.signed_request
+    def together(method, url, **kwargs):
+        if method == "HEAD":
+            barrier.wait(timeout=10)
+        return original(method, url, **kwargs)
+    monkeypatch.setattr(r2, "signed_request", together)
+    with pytest.raises(ValueError, match="checksum mismatch"):
+        inputs.main(["--payload", str(payload), "--store", str(tmp_path / "tools")])
+    assert preserved.read_bytes() == b"existing destination"
+    assert not (tmp_path / "tools" / f"fetch-{libs['bad']['sha256']}").exists()
+    assert download_path(payload, "good").read_bytes() == b"good"
+    assert "Verified " not in capsys.readouterr().out
+
+
 def test_historical_recovery_keeps_the_original_digest(tmp_path, upstream, r2_server, monkeypatch):
     server, root = upstream
     body = (root / "lib.deb").read_bytes()
@@ -174,7 +244,7 @@ def test_committed_inventory_matches_every_http_pin():
             for row in artifact if isinstance(artifact, list) else [artifact]:
                 if row["url"].startswith("https://"):
                     expected.add(row["sha256"])
-    table = json.loads((repo / "scripts/termux/runtime_libs.json").read_text(encoding="utf-8"))
+    table = json.loads((repo / "pm/termux_runtime_libs.json").read_text(encoding="utf-8"))
     expected.update(row["sha256"] for row in table["libs"].values())
     expected.add(table["licenses"]["sha256"])
     assert {p.sha256 for p in inputs.pinned_inputs(repo)} == expected
@@ -196,7 +266,7 @@ def test_ci_toolchain_seed_runs_before_the_tool_installer(tmp_path, upstream, r2
     write_pins(repo, packages)
     monkeypatch.setattr(paths, "repo_root", lambda: repo)
     home = tmp_path / "ci-home"
-    setup_toolchain.archive_inputs(SimpleNamespace(home=home, toolchain="python"))
+    setup_toolchain.archive_inputs(SimpleNamespace(home=home, toolchain="python", packages=[]))
     (root / "lib.deb").unlink()
     store = Store(home / "tools")
     with store.scratch() as scratch:

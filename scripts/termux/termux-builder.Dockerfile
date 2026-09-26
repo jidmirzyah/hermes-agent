@@ -32,6 +32,7 @@ RUN printf '%s\n' "deb https://packages.termux.dev/apt/termux-main stable main" 
       autoconf automake libtool \
       libandroid-posix-semaphore libandroid-support libbz2 libffi \
       libjpeg-turbo libpng freetype libtiff libwebp openjpeg littlecms \
+      libheif \
       libyaml openssl readline zlib liblzma libsqlite ncurses
 
 # No /bin/sh link here: uid 1000 cannot write /, and the runtime wheelhouse

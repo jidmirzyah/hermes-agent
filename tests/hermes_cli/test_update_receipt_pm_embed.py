@@ -45,14 +45,14 @@ def _isolated_receipt_state():
 
 def _sync_under_update(**sections):
     """A pm sync that runs WHILE the update receipt is open — the real
-    in-process update flow (sync_venv / bisect rebuilds)."""
+    in-process update flow (sync_venv)."""
     import pm.receipt as pm_receipt_mod
 
     pm_receipt_mod.begin("sync")
     if "venv_rebuild" in sections:
         pm_receipt_mod.record_venv_rebuild(**sections.pop("venv_rebuild"))
-    if "bisect" in sections:
-        pm_receipt_mod.record_bisect(sections.pop("bisect"))
+    if "features" in sections:
+        pm_receipt_mod.record_feature_list(sections.pop("features"))
     if "warnings" in sections:
         for message in sections.pop("warnings"):
             pm_receipt_mod.record_warning(message)
@@ -65,25 +65,32 @@ def test_update_receipt_embeds_pm_sections(homed):
     ur.begin_update_receipt()
     _sync_under_update(
         venv_rebuild={"ok": True, "reason": ""},
-        bisect=[{"plugin": "bad", "action": "disabled", "reason": "conflict"}],
+        features=["web", "acp"],
     )
     ur.record_step("git-pull", True)
     path = ur.finalize_update_receipt("success")
 
     data = json.loads((homed / "logs" / "update_receipts" / "latest.json").read_text(encoding="utf-8"))
+    assert json.loads(path.read_text(encoding="utf-8")) == data
     assert data["outcome"] == "success"
     assert data["pm_venv_rebuild"] == {"ok": True, "reason": ""}
-    assert data["pm_plugin_bisect"][0]["plugin"] == "bad"
+    assert data["pm_feature_list"] == ["web", "acp"]
     assert data["pm_sync_outcome"] == "ok"
     assert data["update_id"]
 
 
-def test_update_receipt_without_sync_embeds_nothing(homed):
+def test_legacy_worker_receipt_fields_still_embed(homed):
+    from pm.receipt import accept_worker_receipt
+
     ur.begin_update_receipt()
-    ur.finalize_update_receipt("success")
-    data = json.loads((homed / "logs" / "update_receipts" / "latest.json").read_text(encoding="utf-8"))
-    assert "pm_venv_rebuild" not in data
-    assert data["outcome"] == "success"
+    update_id = ur.current_correlation_id()
+    legacy = {"update_id": update_id, "outcome": "ok",
+              "plugin_bisect": [{"plugin": "old-plugin", "action": "disabled"}]}
+    accept_worker_receipt(legacy, update_id)
+    path = ur.finalize_update_receipt("success")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["pm_plugin_bisect"] == legacy["plugin_bisect"]
+
 
 
 def test_stale_sync_from_before_the_update_is_never_embedded(homed):
@@ -139,6 +146,7 @@ def test_nested_update_ids_do_not_cross_embed(homed):
     outer_id = ur.current_correlation_id()
     pm_receipt_mod.begin("sync")
     pm_receipt_mod.record_venv_rebuild(True, "outer rebuild")
+    pm_receipt_mod.record_step("outer-sync", True)
     pm_receipt_mod.finalize("ok")
 
     ur.begin_update_receipt()  # nested update — new id, outer preserved behind the token
@@ -146,11 +154,15 @@ def test_nested_update_ids_do_not_cross_embed(homed):
     assert inner_id != outer_id
     pm_receipt_mod.begin("sync")
     pm_receipt_mod.record_venv_rebuild(True, "inner rebuild")
+    pm_receipt_mod.record_step("inner-sync", True)
     pm_receipt_mod.finalize("ok")
 
     inner_path = ur.finalize_update_receipt("success")
     assert inner_path is not None
     assert json.loads(inner_path.read_text(encoding="utf-8"))["pm_venv_rebuild"]["reason"] == "inner rebuild"
+    assert pm_receipt_mod.last_for_update(inner_id) is None
+    assert ur.current_correlation_id() == outer_id
+    assert pm_receipt_mod.last_for_update(outer_id)["steps"][0]["name"] == "outer-sync"
 
     # outer finalize: the outer sync is STILL its own completion — the
     # nested update's finalize restored the outer receipt and must not
@@ -161,41 +173,19 @@ def test_nested_update_ids_do_not_cross_embed(homed):
     assert outer_data["update_id"] == outer_id
     assert outer_data["pm_venv_rebuild"]["reason"] == "outer rebuild"
     assert "inner rebuild" not in json.dumps(outer_data)
+    assert outer_data["pm_steps"][0]["name"] == "outer-sync"
+    assert pm_receipt_mod.last_for_update(outer_id) is None
+    assert inner_path != outer_path
+    inner_data = json.loads(inner_path.read_text(encoding="utf-8"))
+    assert inner_data["update_id"] == inner_id
+    assert inner_data["pm_steps"][0]["name"] == "inner-sync"
+    assert inner_data["pm_venv_rebuild"]["reason"] == "inner rebuild"
+    latest = json.loads((homed / "logs/update_receipts/latest.json").read_text(encoding="utf-8"))
+    assert latest == outer_data
 
     # outermost finalize popped the last receipt: no correlation remains
     assert ur.current_correlation_id() is None
 
-
-def test_both_nested_receipts_still_read_correctly_after_all_finalizations(homed):
-    """Invariant: inner and outer receipts have UNIQUE file names (same
-    process, possibly the same second) and each exact path still reads its
-    own story AFTER every finalize — no overwrite, no cross-contamination,
-    including the latest.json pointer (outer finished last)."""
-    import pm.receipt as pm_receipt_mod
-
-    ur.begin_update_receipt()
-    pm_receipt_mod.begin("sync")
-    pm_receipt_mod.record_venv_rebuild(True, "outer rebuild")
-    pm_receipt_mod.finalize("ok")
-
-    ur.begin_update_receipt()
-    pm_receipt_mod.begin("sync")
-    pm_receipt_mod.record_venv_rebuild(True, "inner rebuild")
-    pm_receipt_mod.finalize("ok")
-
-    inner_path = ur.finalize_update_receipt("success")
-    outer_path = ur.finalize_update_receipt("success")
-
-    assert inner_path != outer_path
-    assert inner_path.is_file() and outer_path.is_file()
-    inner_data = json.loads(inner_path.read_text(encoding="utf-8"))
-    outer_data = json.loads(outer_path.read_text(encoding="utf-8"))
-    assert inner_data["pm_venv_rebuild"]["reason"] == "inner rebuild"
-    assert outer_data["pm_venv_rebuild"]["reason"] == "outer rebuild"
-    # latest.json points at the LAST finalization (the outer run)
-    latest = json.loads((homed / "logs" / "update_receipts" / "latest.json").read_text(encoding="utf-8"))
-    assert latest["update_id"] == outer_data["update_id"]
-    assert latest["pm_venv_rebuild"]["reason"] == "outer rebuild"
 
 
 def test_sync_after_nested_update_finalizes_embeds_into_outer(homed):

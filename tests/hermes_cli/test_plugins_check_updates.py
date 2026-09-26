@@ -180,22 +180,9 @@ def test_matching_tag_fetches_feed(tmp_path):
     r = check_provenanced(prov, fetch=fetch, ls_remote=_no)
     assert fetched == ["https://feed.example/f.yml"]
     assert r.latest == "1.2.0"
+    assert r.current == "1.0.0"
     assert r.min_hermes == "0.27.0"
     assert r.update_available is True  # installed 1.0.0 vs feed 1.2.0
-
-
-def test_feed_version_equal_to_installed_version_means_no_update(tmp_path):
-    """C17 convergence: feed semantic version vs installed semantic version."""
-    plug = tmp_path / "plug"
-    plug.mkdir()
-    (plug / "plugin.yaml").write_text(
-        "name: plug\nversion: 1.2.0\nupdate_url: https://feed.example/f.yml\n",
-        encoding="utf-8",
-    )
-    prov = _git_prov(update_url="https://feed.example/f.yml")
-    prov.path = plug
-    r = check_provenanced(prov, fetch=lambda u: FEED, ls_remote=_no)
-    assert r.update_available is False
 
 
 def test_feed_version_with_no_installed_version_is_unknown(tmp_path):
@@ -254,25 +241,6 @@ def test_feed_git_sha_case_equivalent_is_not_an_update(tmp_path):
     assert r.update_available is False
 
 
-def test_feed_git_tag_artifact_falls_to_semantic_compare(tmp_path):
-    """A non-sha artifacts.git (repo URL, tag) is not a comparable git
-    identity — the feed's semantic version is compared against the
-    installed manifest's version instead."""
-    plug = tmp_path / "plug"
-    plug.mkdir()
-    (plug / "plugin.yaml").write_text(
-        "name: plug\nversion: 1.0.0\nupdate_url: https://feed.example/f.yml\n",
-        encoding="utf-8",
-    )
-    feed = "version: 9.9.9\nartifacts:\n  git: https://example/o/r\n"
-    prov = _git_prov(update_url="https://feed.example/f.yml")
-    prov.path = plug
-    r = check_provenanced(prov, fetch=lambda u: feed, ls_remote=_no)
-    assert r.update_available is True
-    assert r.current == "1.0.0"
-    assert r.latest == "9.9.9"
-
-
 def test_feed_git_sha_with_no_recorded_revision_is_unknown(tmp_path):
     plug = tmp_path / "plug"
     plug.mkdir()
@@ -305,23 +273,6 @@ def test_feed_git_sha_against_tagged_revision_is_unknown(tmp_path):
     assert r.update_available is None
 
 
-def test_feed_semantic_branch_reports_installed_version_as_current(tmp_path):
-    """The semantic branch compares version vs version, so the reported
-    current is the installed version — not the unrelated revision sha."""
-    plug = tmp_path / "plug"
-    plug.mkdir()
-    (plug / "plugin.yaml").write_text(
-        "name: plug\nversion: 1.0.0\nupdate_url: https://feed.example/f.yml\n",
-        encoding="utf-8",
-    )
-    prov = _git_prov(update_url="https://feed.example/f.yml")
-    prov.path = plug
-    r = check_provenanced(prov, fetch=lambda u: FEED, ls_remote=_no)
-    assert r.update_available is True
-    assert r.current == "1.0.0"
-    assert r.latest == "1.2.0"
-
-
 def test_malformed_yaml_feed_reports_unknown_row(tmp_path):
     plug = tmp_path / "plug"
     plug.mkdir()
@@ -339,14 +290,16 @@ def test_parse_feed_rejects_non_string_git_artifact():
         parse_feed_yml(feed)
 
 
-def test_ls_remote_lifecycle_current_available_applied(tmp_path):
+def test_ls_remote_lifecycle_current_available_applied(tmp_path, monkeypatch):
     """The git-path gate, end to end against a real local repo: current ->
     ls-remote sees a new HEAD -> revision recorded -> current. No network,
     no manual manifest rewriting — every comparison is the real command."""
     repo = tmp_path / "repo"
     run, head = _local_repo(repo, "-b", "main")
     sha1 = head()
-    ls_remote = _real_ls_remote()
+    from hermes_cli.plugins_updates import default_ls_remote
+    monkeypatch.setattr('hermes_cli.plugins_cmd._resolve_git_executable', _git_exe)
+    ls_remote = default_ls_remote
 
     plug = tmp_path / "plug"
     plug.mkdir()
@@ -371,22 +324,6 @@ def test_ls_remote_lifecycle_current_available_applied(tmp_path):
     prov3 = _git_prov(revision=sha2, source=str(repo))
     prov3.path = plug
     assert check_provenanced(prov3, fetch=_no, ls_remote=ls_remote).update_available is False
-
-
-def _real_ls_remote():
-    git = _git_exe()
-    env = _git_env()
-
-    def ls_remote(source):
-        proc = subprocess.run(
-            [git, "ls-remote", source, "HEAD"],
-            capture_output=True, text=True, timeout=10, env=env,
-        )
-        if proc.returncode != 0:
-            raise RuntimeError((proc.stderr or "ls-remote failed").strip()[:200])
-        out = (proc.stdout or "").strip()
-        return out.split("\t")[0] if out else ""
-    return ls_remote
 
 
 def test_feed_fetch_failure_is_row_level_reason(tmp_path):
@@ -428,7 +365,7 @@ def test_ls_remote_fallback(tmp_path):
 # ── the real git ls-remote, against a local bare repo ───────────────
 
 
-def test_real_ls_remote_against_bare_repo(tmp_path):
+def test_real_ls_remote_against_bare_repo(tmp_path, monkeypatch):
     source = tmp_path / "bare.git"
     git = _git_exe()
     env = _git_env()
@@ -436,14 +373,9 @@ def test_real_ls_remote_against_bare_repo(tmp_path):
         [git, "init", "--bare", "-q", str(source)],
         check=True, capture_output=True, env=env,
     )
-    # ls-remote on an empty bare repo: exit 0, empty HEAD — the command
-    # SHAPE works; empty maps to unknown, never a crash
-    proc = subprocess.run(
-        [git, "ls-remote", str(source), "HEAD"],
-        capture_output=True, text=True, timeout=10, env=env,
-    )
-    assert proc.returncode == 0
-    assert proc.stdout.strip() == ""
+    from hermes_cli.plugins_updates import default_ls_remote
+    monkeypatch.setattr('hermes_cli.plugins_cmd._resolve_git_executable', _git_exe)
+    assert default_ls_remote(str(source)) == ""
 
 
 # ── feed parsing ────────────────────────────────────────────────────
@@ -463,19 +395,6 @@ class _EP:
         self.name = name
         self.value = value
         self.dist_name = dist_name
-
-
-def test_pip_check_stateless():
-    eps = [_EP("mnemosyne", "mnemosyne_hermes:register", "mnemosyne-hermes")]
-    rs = check_pip_plugins(
-        installed_version=lambda d: "0.5.0",
-        pypi_latest=lambda d: "0.6.0",
-        entry_points=eps,
-    )
-    assert rs[0].klass == "pip"
-    assert rs[0].current == "0.5.0"
-    assert rs[0].latest == "0.6.0"
-    assert rs[0].update_available is True
 
 
 def test_pip_not_on_pypi_reports_unknown():

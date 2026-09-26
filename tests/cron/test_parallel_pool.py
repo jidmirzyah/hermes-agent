@@ -46,7 +46,8 @@ class TestPersistentPool:
 class TestRunningJobGuard:
     """_running_job_ids prevents double-dispatch of active jobs."""
 
-    def test_running_set_prevents_double_dispatch(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("with_workdir", [False, True])
+    def test_running_set_prevents_double_dispatch(self, tmp_path, monkeypatch, with_workdir):
         """A job already in _running_job_ids is skipped on the next tick."""
         import cron.scheduler as sched
 
@@ -64,6 +65,9 @@ class TestRunningJobGuard:
             "next_run_at": "2020-01-01T00:00:00",
             "deliver": "local",
         }
+
+        if with_workdir:
+            job["workdir"] = str(tmp_path)
 
         # Simulate the job already running.
         sched._running_job_ids.add(sched._inflight_key("guard-job"))
@@ -229,7 +233,8 @@ class TestSyncMode:
 
         sched._shutdown_parallel_pool()
 
-    def test_sync_false_returns_immediately(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("with_workdir", [False, True])
+    def test_sync_false_returns_immediately(self, tmp_path, monkeypatch, with_workdir):
         """The ticker returns while its dispatched worker is still blocked."""
         import cron.scheduler as sched
 
@@ -247,55 +252,8 @@ class TestSyncMode:
             "deliver": "local",
         }
 
-        worker_started = threading.Event()
-        release = threading.Event()
-        worker_finished = threading.Event()
-
-        def slow_run(j, *, defer_agent_teardown=None, **_kw):
-            worker_started.set()
-            try:
-                assert release.wait(timeout=10), "test never released the worker"
-            finally:
-                worker_finished.set()
-            return True, "out", "resp", None
-
-        monkeypatch.setattr(sched, "get_due_jobs", lambda: [job])
-        monkeypatch.setattr(sched, "claim_job_for_fire", lambda *_a, **_kw: True)
-        monkeypatch.setattr(sched, "run_job", slow_run)
-        monkeypatch.setattr(sched, "save_job_output", lambda *_a, **_kw: "/tmp/out")
-        monkeypatch.setattr(sched, "mark_job_run", lambda *_a, **_kw: None)
-        monkeypatch.setattr(sched, "_deliver_result", lambda *_a, **_kw: None)
-
-        try:
-            assert sched.tick(verbose=False, sync=False) == 1
-            assert worker_started.wait(timeout=10)
-            assert not worker_finished.is_set()
-        finally:
-            release.set()
-            sched._shutdown_parallel_pool()
-
-
-class TestWorkdirParallelPool:
-    """Task-scoped workdir jobs use the normal persistent parallel pool."""
-
-    def test_workdir_job_does_not_block_ticker(self, tmp_path, monkeypatch):
-        """The ticker returns while its dispatched worker is still blocked."""
-        import cron.scheduler as sched
-
-        sched._parallel_pools.clear()
-        sched._parallel_pool_max_workers.clear()
-        sched._running_job_ids.clear()
-
-        job = {
-            "id": "slow-workdir",
-            "name": "slow-workdir",
-            "prompt": "test",
-            "schedule": "every 5m",
-            "enabled": True,
-            "next_run_at": "2020-01-01T00:00:00",
-            "deliver": "local",
-            "workdir": str(tmp_path),
-        }
+        if with_workdir:
+            job["workdir"] = str(tmp_path)
 
         worker_started = threading.Event()
         release = threading.Event()
@@ -324,42 +282,6 @@ class TestWorkdirParallelPool:
             release.set()
             sched._shutdown_parallel_pool()
 
-    def test_workdir_running_guard_prevents_double_dispatch(self, tmp_path, monkeypatch):
-        """A workdir job already in _running_job_ids is skipped on next tick."""
-        import cron.scheduler as sched
-
-        sched._parallel_pools.clear()
-        sched._parallel_pool_max_workers.clear()
-        sched._running_job_ids.clear()
-
-        job = {
-            "id": "guard-seq",
-            "name": "guard-seq",
-            "prompt": "test",
-            "schedule": "every 5m",
-            "enabled": True,
-            "next_run_at": "2020-01-01T00:00:00",
-            "deliver": "local",
-            "workdir": str(tmp_path),
-        }
-
-        # Simulate the job already running.
-        sched._running_job_ids.add(sched._inflight_key("guard-seq"))
-
-        dispatched = []
-        monkeypatch.setattr(sched, "get_due_jobs", lambda: [job])
-        monkeypatch.setattr(sched, "claim_job_for_fire", lambda *_a, **_kw: True)
-        monkeypatch.setattr(sched, "run_job", lambda j, **_kw: dispatched.append(j["id"]) or (True, "out", "resp", None))
-        monkeypatch.setattr(sched, "save_job_output", lambda *_a, **_kw: None)
-        monkeypatch.setattr(sched, "mark_job_run", lambda *_a, **_kw: None)
-        monkeypatch.setattr(sched, "_deliver_result", lambda *_a, **_kw: None)
-
-        n = sched.tick(verbose=False)
-        assert n == 0  # skipped, not dispatched
-        assert dispatched == []
-
-        sched._running_job_ids.discard(sched._inflight_key("guard-seq"))
-        sched._shutdown_parallel_pool()
 
 class TestTickBatchAdvance:
     """The tick's pre-dispatch advance must go through advance_next_runs

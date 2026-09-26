@@ -6,10 +6,10 @@ description: "在 CLI、Telegram、Discord 及 Discord 语音频道中设置和�
 
 # 在 Hermes 中使用语音模式
 
-本页的 Python 依赖命令使用 [PM 准备的源码环境](/reference/package-management#developer-workflow)。
+本页的 Python 依赖命令使用 [PM 准备的源码环境](../reference/package-management.md#developer-workflow)。
 依赖变更后，请重新激活该 checkout 并重启 Hermes。
 
-本指南是[语音模式功能参考](/user-guide/features/voice-mode)的实用配套文档。
+本指南是[语音模式功能参考](../user-guide/features/voice-mode.md)的实用配套文档。
 
 功能页面介绍语音模式能做什么，本指南则说明如何真正用好它。
 

@@ -1,17 +1,15 @@
 """A bundle reuses shipped bytes and adds missing pinned tools outside its seal."""
-import json
-from pathlib import Path
 
 import pytest
 
 import pm.paths as paths
-from pm.lock import Facts, Lockfile
-from tests.pm.test_pm_authority import pm_env, served  # noqa: F401 — fixtures
+from pm.lock import Facts
+from tests.pm.test_pm_authority import core_env, pm_env, served  # noqa: F401 — fixtures
 
 
 @pytest.mark.parametrize("sealed_install", [True, False])
 def test_missing_bundle_tool_is_installed_in_writable_store(pm_env, tmp_path, monkeypatch, sealed_install):
-    from pm.ensure import ensure, env_for, is_installed
+    from pm.install import ensure, env_for, is_installed
     import importlib
 
     fixture = pm_env
@@ -21,7 +19,7 @@ def test_missing_bundle_tool_is_installed_in_writable_store(pm_env, tmp_path, mo
     monkeypatch.setattr(paths, "store_root", lambda: shipped)
     monkeypatch.setattr(paths, "facts_path", lambda: shipped / "facts.json")
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
-    ensure_module = importlib.import_module("pm.ensure")
+    ensure_module = importlib.import_module("pm.install")
     monkeypatch.setattr(ensure_module, "lazy_installs_allowed", lambda: True)
     monkeypatch.setattr(ensure_module, "sealed", lambda: sealed_install)
     before = sorted(p.relative_to(shipped).as_posix() for p in shipped.rglob("*"))
@@ -33,21 +31,6 @@ def test_missing_bundle_tool_is_installed_in_writable_store(pm_env, tmp_path, mo
     assert fact is not None and (writable / fact["entry"] / "bin" / "faketool").is_file()
     assert str(writable) in runner.env["PATH"]
     assert env_for("faketool", base_env={}) == runner.env
-
-
-def test_adoption_records_verification_outside_shipped_payload(pm_env, monkeypatch):
-    from pm.ensure import adopt
-    from tests.pm.test_pm_authority import _bundle_payload
-
-    _bundle_payload(pm_env)
-    shipped_roots = (paths.store_root(), paths.repo_root())
-    def snapshot():
-        return {p: p.read_bytes() for root in shipped_roots for p in root.rglob("*") if p.is_file()}
-    before = snapshot()
-    assert adopt() is True
-    assert snapshot() == before
-    assert not (paths.store_root().parent / ".adopted").exists()
-    assert adopt() is False
 
 
 def test_corrupt_shipped_facts_are_only_read(tmp_path, monkeypatch):

@@ -56,20 +56,25 @@ def _normalize_local_model(model_name: Optional[str]) -> str:
 
 
 def _try_lazy_install_stt() -> bool:
-    """Lazy-install faster-whisper and re-check dynamically so it's usable without a restart."""
+    """Install faster-whisper and re-check dynamically so it's usable without a restart.
+
+    ACTION paths only (``_transcribe_local``). Nothing that merely *resolves* or *reports* a
+    provider may call this: the install takes the per-install lock for as long as a full extra-set
+    rebuild, and a status probe must never start one."""
     try:
         # pm installs are gated by security.allow_lazy_installs; never a blocking
         # prompt mid-session. See #40490.
         import pm
-        pm.ensure_import("voice")
+        pm.ensure_import("stt-whisper")
         if _ilu.find_spec("faster_whisper"):
             return True
         logger.warning("faster-whisper was installed but importlib still cannot find it (may require Python restart)")
     except Exception as exc:
         logger.warning(
             "Lazy install of faster-whisper failed: %s. "
-            "This is often a permission issue: the Hermes process user cannot "
-            "write to the dependency environment. Run `hermes tools` as the "
+            "When the message names a restart, this process selected its dependency generation at "
+            "boot and a new one cannot take effect in-flight; otherwise the Hermes process user "
+            "may not be able to write to the dependency environment. Run `hermes tools` as the "
             "Hermes installation owner and select Local Whisper under Speech-to-Text.",
             exc)
     return False

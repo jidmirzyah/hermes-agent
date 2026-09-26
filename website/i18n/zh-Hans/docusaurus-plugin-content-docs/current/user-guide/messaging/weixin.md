@@ -6,7 +6,7 @@ description: "通过 iLink Bot API 将 Hermes Agent 连接到个人微信账号"
 
 # 微信（Weixin / WeChat）
 
-本页的 Python 依赖命令使用 [PM 准备的源码环境](/reference/package-management#developer-workflow)。
+本页的 Python 依赖命令使用 [PM 准备的源码环境](../../reference/package-management.md#developer-workflow)。
 依赖变更后，请重新激活该 checkout 并重启 Hermes。
 
 将 Hermes 连接到 [微信](https://weixin.qq.com/)（WeChat），腾讯的个人即时通讯平台。该适配器使用腾讯的 **iLink Bot API** 对接个人微信账号——与企业微信（WeCom）不同。消息通过长轮询（long-polling）方式传递，无需公网端点或 webhook。

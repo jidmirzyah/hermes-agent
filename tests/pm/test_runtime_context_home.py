@@ -1,7 +1,7 @@
 """Context-only homes use the same dependency state as their own process."""
 
-from hermes_cli import runtime_paths
-from hermes_cli.plugins_admission import _config_commit
+from pm import environments as runtime_paths
+from pm.publication import PluginSelection
 from hermes_cli.runtime_state import recover_publication, runtime_lock
 from hermes_constants import reset_hermes_home_override, set_hermes_home_override
 from pm import paths, plugins_state
@@ -27,7 +27,7 @@ def test_context_home_publication_recovers_from_its_own_process(tmp_path, monkey
             context_home / "plugins": ["old"],
         }
         with runtime_lock(project):
-            _config_commit({"new"}, set())
+            PluginSelection({"home": str(config.parent), "enabled": ["new"], "disabled": []}).publish(project)
         assert config.read_bytes() != original
     finally:
         reset_hermes_home_override(token)

@@ -29,9 +29,6 @@ SCOPE_AI_AZURE_DEFAULT = "https://ai.azure.com/.default"
 # Lazy SDK import — only loaded when the Entra path is actually used.
 # ---------------------------------------------------------------------------
 
-# MERGE-CHECK: kept our pm feature name ("azure-identity" pip package) because
-# _require_azure_identity routes through pm.ensure_import; upstream's
-# "provider.azure_identity" was a key for their ensure() registry.
 _AZURE_IDENTITY_FEATURE = "azure-identity"
 _INSTALL_MSG = "The 'azure-identity' package is required for Azure AI Foundry Entra ID authentication. "
 _LAZY_INSTALL_HINT = (

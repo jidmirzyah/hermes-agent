@@ -143,7 +143,26 @@ local_runtime:
   enabled: false     # true = start the managed server with Hermes.
                      # The desktop "Use" button sets this automatically.
   backend: auto      # auto | cuda | metal | vulkan | hip | cpu
+  detect_ports: [8081]  # extra ports to probe for a llama-server you run
+                        # yourself (the default probe is :8080 only)
 ```
+
+Running `llama-server` yourself on a fixed port works with the same
+`model.provider: llamacpp` selection — either list the port in
+`local_runtime.detect_ports`, or define the endpoint explicitly under
+`providers:` (an explicit entry wins over server detection):
+
+```yaml
+providers:
+  llamacpp:
+    base_url: http://127.0.0.1:8081/v1
+    model: my-model
+```
+
+The `/model` → **Local** picker row and `provider: llamacpp` resolve to that
+server; with no server reachable the error names the local runtime ("the local
+model server isn't running") instead of an unknown-provider or missing-API-key
+message.
 
 Engine versions come only from PM's lockfile, not a `local_runtime.tag`
 override. Boot uses an installed PM engine without downloading. When a new

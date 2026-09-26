@@ -39,7 +39,7 @@ iex (irm https://hermes-agent.nousresearch.com/install.ps1)
 `Hermes-Setup.exe` 则是下载并配置源码的引导安装程序。
 
 macOS 的 DMG 包含应用；将它复制到 Applications 后启动。
-其自动更新使用包含已签名应用的 ZIP。详情见 [桌面指南](/user-guide/desktop)。
+其自动更新使用包含已签名应用的 ZIP。详情见 [桌面指南](../user-guide/desktop.md)。
 
 ### Android / Termux
 
@@ -61,7 +61,7 @@ Dashboard 终端使用 `pywinpty`/ConPTY，不再是尚未实现的 POSIX-only �
 
 `HERMES_HOME` 选择数据目录。POSIX 的 `--dir` 单独选择源码目录。
 以 root 身份运行不再自动选择 `/usr/local/lib` 的 FHS 布局。
-PM 的工具和 Python 环境代际位于独立目录，详见 [包管理](/reference/package-management)。
+PM 的工具和 Python 环境代际位于独立目录，详见 [包管理](../reference/package-management.md)。
 不要为了修复应用而删除整个数据目录。
 
 ### 安装后
@@ -109,7 +109,7 @@ Hermes 要求 Python 3.14（`>=3.14,<3.15`），工具版本由 `pm/lock.json` �
 
 ## 手动 / 开发者安装
 
-如果你想克隆仓库并从源码安装——用于贡献代码、从特定分支运行或完全控制虚拟环境——请参阅贡献指南中的[开发环境配置](/developer-guide/contributing)章节。
+如果你想克隆仓库并从源码安装——用于贡献代码、从特定分支运行或完全控制虚拟环境——请参阅贡献指南中的[开发环境配置](../developer-guide/contributing.md)章节。
 
 ---
 

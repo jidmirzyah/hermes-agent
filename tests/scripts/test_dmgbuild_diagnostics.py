@@ -76,6 +76,24 @@ def test_detach_diagnostics_run_before_cleanup_and_preserve_results():
     assert "timed out" in errors.getvalue()
 
 
+def test_resize_timings_preserve_native_arguments_and_failure():
+    output = io.StringIO()
+    failure = (6, "")
+    calls = []
+
+    def native(command, *args, **kwargs):
+        assert '[dmg-hdiutil] start resize' in output.getvalue()
+        calls.append((command, args, kwargs))
+        return failure
+
+    observed = diagnostics.wrap_hdiutil(native, stream=output)
+    assert observed("resize", "-quiet", "-sectors", "min", "image.dmg", plist=False) is failure
+    assert calls == [("resize", ("-quiet", "-sectors", "min", "image.dmg"), {"plist": False})]
+    assert "[dmg-hdiutil] end resize" in output.getvalue()
+    assert "status=6" in output.getvalue()
+    assert "elapsed=" in output.getvalue()
+
+
 def test_diagnostic_entrypoint_preserves_cli_arguments_and_failure(tmp_path):
     # This package replays the supplier call contract, not a native DMG build.
     package = tmp_path / "dmgbuild"

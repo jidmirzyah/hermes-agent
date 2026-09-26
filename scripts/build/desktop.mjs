@@ -6,7 +6,9 @@ import { pathToFileURL } from 'node:url'
 import { bundleElectronMain } from '../../apps/desktop/scripts/bundle-electron-main.mjs'
 import { checkDistBuilt } from '../../apps/desktop/scripts/assert-dist-built.mjs'
 import { classifyNativeBinary } from '../../apps/desktop/scripts/stage-native-deps.mjs'
+import { copyNativeTree } from '../../apps/desktop/scripts/prepared-native-deps.mjs'
 import { frontendArgs, isMain, productOutput, withProduct, workspaceTool } from './frontend-common.mjs'
+import { recordProduct, buildInputs } from './freshness.mjs'
 
 function validateNativeTree(nativeDeps, platform) {
   const pty = join(nativeDeps, 'node-pty')
@@ -28,13 +30,17 @@ export async function buildDesktop({ source, out, icons, stamp, nativeDeps, type
   if (!icons || !stamp || !nativeDeps) throw new Error('icons, stamp and nativeDeps are required prepared inputs')
   const app = 'apps/desktop'
   ;({ source, out } = productOutput(source, out, [
-    ...readdirSync(join(resolve(source), app)).filter(name => name !== 'dist').map(name => `${app}/${name}`),
+    // Source children can be symlinks outside the checkout. Protect their
+    // canonical paths, but leave generated dist/build trees to productOutput.
+    ...readdirSync(join(resolve(source), app)).filter(name => !['dist', 'build'].includes(name)).map(name => `${app}/${name}`),
     `${app}/scripts`, 'scripts/build', 'package.json', 'package-lock.json',
-    'apps/shared', 'node_modules', ...[join(resolve(icons), app, 'public'), stamp, nativeDeps].map(input => relative(resolve(source), resolve(input))),
+    'apps/shared', 'node_modules',
+    ...[join(resolve(icons), app, 'public'), stamp, nativeDeps].map(input => relative(resolve(source), resolve(input))),
   ]))
   const publicIcons = join(resolve(icons), app, 'public')
   if (!existsSync(join(publicIcons, 'apple-touch-icon.png'))) throw new Error(`Missing desktop icon: ${join(publicIcons, 'apple-touch-icon.png')}`)
   validateNativeTree(resolve(nativeDeps), platform)
+  const inputs = buildInputs(source, 'desktop', { icons: publicIcons, stamp, nativeDeps })
   await withProduct(out, async (product, scratch) => {
     const publicDir = join(scratch, 'public')
     const sourcePublic = join(source, app, 'public')
@@ -54,9 +60,10 @@ export async function buildDesktop({ source, out, icons, stamp, nativeDeps, type
       build: { outDir: product, emptyOutDir: true },
     })
     await bundleElectronMain({ source, out: product, stamp })
-    cpSync(resolve(nativeDeps), join(product, 'node_modules'), { recursive: true, dereference: true })
+    copyNativeTree({ nativeDeps, out: join(product, 'node_modules') })
     const result = checkDistBuilt(product)
     if (!result.ok) throw new Error(result.error)
+    recordProduct({ source, product: 'desktop', out: product, inputs })
   }, { source })
   return { out }
 }

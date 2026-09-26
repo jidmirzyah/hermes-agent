@@ -7,7 +7,7 @@ description: "PM tool pins, Python environments, optional dependencies, and inst
 
 `hermes pm` manages Hermes tool binaries and Python dependency environments.
 It is not the application updater. Use the installation's
-[update method](/getting-started/updating) to update Hermes itself.
+[update method](../getting-started/updating.md) to update Hermes itself.
 
 ## Pins, installed state, and runtime selection
 
@@ -33,33 +33,72 @@ loading application dependencies. Failed syncs keep the previous selection and
 retry on the next launch; no pending-update marker is required. Developer checkouts
 and packaged installations retain their existing owner.
 
-Historical updaters can still be executing old Python code after swapping in this
-source tree. Their retired helper names are inert compatibility shims; dependency
-entry shims stop the old updater cleanly and ask for a relaunch instead of invoking
-PM or falling back to pip. Completion belongs to the new launcher, not that mixed
-old-code/new-files process.
+Historical updaters can still execute old Python code after replacing the source
+tree. Compatibility entry points start a fresh child, wait for completion, and
+return its exit status. The child bootstrap asks PM to provision required tools
+and select the Python generation before application imports. Completion runs in
+that interpreter with the update context and receipt. The parent does not clear
+`sys.modules`, import the new application graph, or resume a pip fallback.
+
+Current source updates hand the selected checkout to a fresh completion owner.
+Its bootstrap Python disables site-package initialization before asking PM to
+sync the recorded extras and enabled plugins. The selected Python then owns
+frontend builds, profile/configuration maintenance, gateway restarts and runtime
+verification. Git, already-current retries and ZIP fallback use this same path.
+The original command keeps the update lock while waiting; a missing or failed
+completion result cannot report success. Correlated PM failures remain in the
+update receipt, and interrupted restarts retain their fleet obligation.
+Dependency or build failures never retry through pip or a source re-download.
+Use `hermes pm repair` for damaged dependency files. See the developer
+[source completion ownership note](https://github.com/NousResearch/hermes-agent/blob/main/docs/source-update-completion.md).
 
 ## Source installs and packaged builds
 
 Source installers provision the required tools plus Python. They select the
 `all` Python extra. Named optional tools install when requested.
 
+For a canonical source installation, Desktop checks and runs the published
+installation launcher. PM owns its interpreter and dependency selection. Desktop
+does not replace that command with a guessed `venv` path. Developer overrides
+retain their selected interpreter.
+
 Native desktop bundles stage the supported tool set and all target-compatible
 Python extras before packaging. `--extra all` and `--all-extras` are not
 synonyms. Platform markers still exclude dependencies that cannot run on a target.
+
+The complete desktop builder composes PM with the Node/native packaging providers.
+From a clean checkout at a release tag, `python scripts/bundles/desktop.py --tag vX.Y.Z`
+prepares dependencies and builds the installer. Add `--prepare-only` to stop after
+preparation; consume its job-local result with
+`python scripts/bundles/desktop.py --prepared .build/desktop-job/prepared.json`.
+`--work` and `--cache` select separate build-owned roots. Preparation, not the
+caller, creates the work directory. A full commit SHA can replace the tag through
+`--commit`; the checkout must match.
+
+Preparation uses isolated PM state, pinned tools, fresh path-bound Python
+environments, the complete JS workspace union, native bindings and packaging
+utilities. Reusable dependency caches are not live installations or portable
+virtual environments. The prepared result binds the source, target and paths;
+missing or changed inputs fail consumption rather than trigger a download.
+Reprepare after a move or input change. Signing and notarization can still use
+the network. See the
+[desktop build guide](https://github.com/NousResearch/hermes-agent/blob/main/apps/desktop/BUILDING.md)
+for native compiler requirements and release verification limits.
 
 A packaged application's base payload is immutable. Hermes runs its backend
 from that payload, rather than copying a source checkout on first launch.
 The bundle builder checks its files and writes the launch paths into the desktop
 build stamp. Electron uses those paths without probing or repairing the payload.
 Additional pinned tools can use the writable tool store. Python additions use
-a complete writable environment outside the signed package.
+a complete writable environment outside the signed package. Its first generation
+retains the shipped extras along with the new requirements. Later generations
+use the recorded extra selection as their baseline.
 
 Termux uses a separate bionic build and a sealed APT package. Docker bakes its
 runtime into the image and disables on-demand dependency installation. Nix
 provides its runtime through derivations. See the
-[Termux](/getting-started/termux), [Docker](/user-guide/docker), and
-[Nix](/getting-started/nix-setup) guides for their limits.
+[Termux](../getting-started/termux.md), [Docker](../user-guide/docker.md), and
+[Nix](../getting-started/nix-setup.md) guides for their limits.
 
 ## Writable state
 
@@ -96,23 +135,38 @@ the same lock.
 ## Optional Python dependencies and plugins
 
 A built-in feature requests a project extra through `pm.ensure_import`.
-Directory plugins declare Python requirements in `pyproject.toml`, or through
-legacy `pip_dependencies` or `python_dependencies` lists in `plugin.yaml`.
+Directory plugins declare Python requirements in `pyproject.toml`. Without an
+authored project file, PM combines the legacy `pip_dependencies` and
+`python_dependencies` lists from `plugin.yaml` or `plugin.yml`. An old
+PM-generated project file does not override those lists. Consent, dependency
+membership, and currency checks use the same declaration reader.
 
 PM prepares core requirements, enabled extras, and enabled plugin requirements
 together. It seeds resolution from the existing lock. Compatible transitive
 versions can change, but declared constraints and exact pins remain binding.
-The generated workspace and extended lock remain outside shipped source.
+Each candidate gets a fresh workspace with explicit source, lock seed, and
+prepared environment inputs. The generated workspace and extended lock remain
+outside shipped source. Repair copies the recorded workspace and lock, including
+plugin build inputs, rather than resolving against edited live manifests.
 
-A failed candidate does not replace the selected environment or silently
-disable other plugins. If preparation succeeds, a restart can still be required
-to activate the new environment in a running Hermes process.
+Plugin enablement and staged code updates are submitted as data to the isolated
+PM worker. Under the installation lock, it discovers the proposed dependency
+union, validates the candidate, and publishes configuration or plugin files and
+metadata with the environment selection. It rejects inputs changed during
+preparation. A durable journal permits recovery before application imports,
+including code-only updates that do not require a new environment.
+
+Plugin selection changes, including pack enables, use the same admission
+transaction. PM reads the latest selection under its shared lock before applying
+each change. A failed candidate does not replace the selected environment or
+silently disable other plugins. If preparation succeeds, a running Hermes process
+can still require a restart to activate the new environment.
 
 Ordinary Hermes application updates preserve user plugin directories. Explicit
 plugin updates can change the selected plugin's files. A wrapper with no Python
 dependency declaration does not join the shared environment. Its external
 sidecar remains separately owned. See the
-[plugin guide](/developer-guide/plugins).
+[plugin guide](../developer-guide/plugins/index.md).
 
 ### Lazy-install policy
 
@@ -132,6 +186,26 @@ Docker additionally sets the internal lazy-install disable flag in the image.
 
 PM is a dependency manager, not a sandbox for plugin code. Installing a plugin
 requires trust in that plugin and its dependencies.
+
+## Optional security tools
+
+PM owns the pinned `bws`, `tirith`, and `iron-proxy` packages in
+`pm/security_packages.py`. Their versions, artifact URLs, and SHA-256 hashes
+come from `pm/lock.json`. Downloads and publication use the shared tool store,
+not private installers under `$HERMES_HOME/bin`.
+
+For Tirith and iron-proxy, PM also acquires pinned signature files and checks
+that the release checksums cover the pinned archive. Package staging calls the
+integration's signature checker. Cosign and GPG checks remain conditional on
+available executables. Locked provenance files must still be available and
+match their hashes. An explicit signature rejection aborts installation.
+External executables remain outside PM's hash and signature guarantees.
+
+`bws` and iron-proxy honor an executable on `PATH` before checking PM selection.
+Tirith honors `security.tirith_path`, then uses `PATH` before its PM selection
+for the default name. An explicit Tirith path never triggers a replacement
+download. Lazy installation obeys PM policy. Explicit install commands check
+and repair managed entries, including requests with `--force`.
 
 ## Developer workflow {#developer-workflow}
 
@@ -153,6 +227,12 @@ process when you enter through `activate.ps1`.
 
 Other platforms still require the native compiler tools and libraries needed
 by dependencies without compatible wheels.
+
+For the pinned macOS Python, PM defaults `AR` to `/usr/bin/ar`: the distributed
+interpreter's sysconfig still points at its supplier's temporary LLVM directory.
+This applies to source and bundle builds alike. Explicit `AR` and `CC` values
+remain authoritative; PM does not change the toolchain of a caller-supplied
+interpreter such as Nix Python. No `CC` default is needed for the current pin.
 
 Clone the repository and select your branch before preparing dependencies:
 
@@ -184,8 +264,10 @@ $env:HERMES_RUNTIME_DIR = Join-Path $env:HERMES_HOME 'tools'
 It makes the bootstrap and PM use the same writable store. Do not persist a
 path into an installed MSIX or macOS bundle. Activation runs the setup script's
 runtime-only path to provision tools and sync the `all` Python extra. It does
-not select `dev` or install JS workspaces. It also skips setup's user-facing
-installation work: shell configuration, launchers, `.env`, and bundled skills.
+not select `dev` or install JS workspaces. It maintains installation-local
+commands and repairs existing owned PATH wrappers, but does not create new PATH
+conveniences or load application configuration. It also skips setup's user-facing
+installation work: shell configuration, `.env`, and bundled skills.
 Run the setup script separately if you want that full installation workflow.
 
 Before Python exists, the shell bootstrap acquires the pinned interpreter.
@@ -336,7 +418,7 @@ workspaces, and do not install packages directly into a selected generation.
 PM's `dev` extra does not make a bare store Python suitable for the canonical
 test runner. The runner clears `PYTHONPATH` and needs an interpreter with pytest
 installed in its own environment. Use the contributor guide's
-[independent test environment](/developer-guide/contributing#manual-development-and-test-environment)
+[independent test environment](../developer-guide/contributing.md#manual-development-and-test-environment)
 with this command from the prepared checkout:
 
 ```bash
@@ -425,6 +507,7 @@ not substitutes for an installed application's update mechanism.
 | `pm update --check` | Query without writing. Exit 1 can mean updates exist; inspect output to distinguish an error. |
 | `pm update --target TARGET` | Resolve versions for the specified target. |
 | `pm update --uv` / `--npm` | Also refresh the Python or npm dependency resolution. |
+| `pm update --termux [--check]` | Repin the termux pool archives the rolling pool has retired (the runtime-lib pin table and the bionic lock rows). `--check` reports without writing and exits 1 when a pin is retired. |
 | `pm install --target TARGET NAME...` | Stage explicit cross-target packages without recording them as the host's installed runtime. |
 | `pm bundle --out DIR [--ref REF]` | Stage a source snapshot, native tools, facts, and Python dependencies. It does not produce a signed desktop installer. |
 
@@ -452,6 +535,7 @@ remain under uv and npm's own retry policies.
 
 ## Diagnostics
 
+- **Slow Python dependency builds:** PM's streamed uv commands enable verbose output. Bundle and build logs show package activity and build-backend stdout/stderr while the build runs, not only after failure.
 - **Missing or outdated tool:** read `hermes pm doctor`, then use an explicit PM install on a writable installation.
 - **New environment requires restart:** restart the affected Hermes process. Do not add a second site-packages tree to its live imports.
 - **Dependency conflict:** read `hermes pm status`. Correct the plugin requirements before retrying admission.
