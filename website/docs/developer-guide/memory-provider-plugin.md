@@ -473,3 +473,13 @@ plugins/memory/my-provider/
 ## Single Provider Rule
 
 Only **one** external memory provider can be active at a time. If a user tries to register a second, the MemoryManager rejects it with a warning. This prevents tool schema bloat and conflicting backends.
+
+## `HERMES_HOME` survival contract (what wrappers can rely on)
+
+For wrapper-style providers that keep their runtime in a sidecar venv outside Hermes-managed Python (no dependency surface — no `pyproject.toml`, `pip_dependencies`, or `python_dependencies` — at the scanned plugin root; a `pyproject.toml` belonging solely to an external or nested sidecar is not scanned):
+
+- **Location.** `$HERMES_HOME/plugins/<name>/` is the profile-scoped plugin location, and `HERMES_HOME` follows the active context override, then `$HERMES_HOME`, then the platform default. Propagate `HERMES_HOME` when launching the wrapper or sidecar so profile isolation holds; `MemoryManager.initialize_all` injects the active `hermes_home` into every provider.
+- **Survival.** Ordinary Hermes updates — including managed-venv rebuild/replacement by pm — do not delete or rewrite `$HERMES_HOME/plugins/**`. An installed wrapper directory and its marker file (e.g. `mnemosyne-wrapper.json`) survive. Explicit plugin updates and deletion flows (`hermes uninstall`, `hermes plugins remove`, profile deletion, user deletion) are excluded from this guarantee.
+- **Sidecar isolation.** A plugin root with no dependency surface never joins the pm workspace dependency union; a resync or venv rebuild neither provisions deps for it nor touches its tree.
+- **Conflicts.** For native shared-venv plugins, an unsatisfiable dependency union fails loudly: the candidate plugin stays unenabled and unimported (the admission authority refuses before publishing config, reporting the plugin identity plus the resolver's reason, with a re-enable/retry path and a machine-readable pm receipt). Dependency resolution does not automatically disable other plugins or run a bisect. Explicit plugin updates, removal, and independent security gates are separate operations.
+

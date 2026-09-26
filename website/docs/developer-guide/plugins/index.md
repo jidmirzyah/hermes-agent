@@ -746,12 +746,13 @@ Put any files in your plugin directory and read them at import time:
 ```python
 # In tools.py or __init__.py
 from pathlib import Path
+from ruamel.yaml import YAML
 
 _PLUGIN_DIR = Path(__file__).parent
 _DATA_FILE = _PLUGIN_DIR / "data" / "languages.yaml"
 
 with open(_DATA_FILE) as f:
-    _DATA = yaml.safe_load(f)
+    _DATA = YAML(typ="safe").load(f)
 ```
 
 That's for files you *ship*. State you *write* is different — see the next
@@ -858,32 +859,48 @@ Both formats can be mixed in the same list. Already-set variables are skipped si
 
 ### Lazy-install optional Python dependencies
 
-If your plugin wraps an SDK that not every user will have installed (a vendor SDK, a heavy ML lib, a platform-specific package), don't `import` it at the top of the module. Use the `tools.lazy_deps.ensure(...)` helper inside the tool handler — Hermes will install the package on first use, gated by the user's `security.allow_lazy_installs` config.
+For an SDK covered by a Hermes project extra, use `pm.ensure_import` at the
+operation that needs it. Use `pm.available` for a read-only availability check.
+Do not install dependencies from a frequently polled `check_fn`.
+
+This example requests the existing `bedrock` extra:
 
 ```python
-# tools.py
-from tools.lazy_deps import ensure, FeatureUnavailable
+from pm import InstallError, ensure_import
 
 def my_tool_handler(args, **kwargs):
     try:
-        ensure("my-plugin.my-backend")   # key must be in LAZY_DEPS
-    except FeatureUnavailable as exc:
+        ensure_import("bedrock")
+    except InstallError as exc:
         return {"error": str(exc)}
 
-    import my_backend_sdk   # safe now
-    ...
+    import boto3
+    # Use the SDK here.
 ```
 
-Two rules from the security model in `tools/lazy_deps.py`:
+The argument is a `pyproject.toml` extra name. It is not an arbitrary package
+specification or a plugin-qualified key. The old `LAZY_DEPS` registry and
+`FeatureUnavailable` exception no longer exist.
 
-| Rule | Why |
-|---|---|
-| Your feature key must appear in the in-tree `LAZY_DEPS` allowlist | Prevents a malicious config from coaxing Hermes into installing arbitrary packages — only specs Hermes itself ships are eligible |
-| Specs are PyPI-by-name only | No `--index-url`, `git+https://`, or file: paths. Pin versions with PEP 440 (`"my-sdk>=1.2,<2"`) inside the allowlist entry |
+If a new environment is selected, the helper can report a required restart.
+Return that error instead of importing from a second environment inside the
+running process. Already available dependencies need no installation, even
+when `security.allow_lazy_installs` is false.
 
-For third-party plugins distributed via pip, declare the optional deps as `[project.optional-dependencies]` extras in your own `pyproject.toml` and tell users to `pip install your-plugin[backend]` — that path doesn't go through `lazy_deps`. The lazy-install dance is most useful for **bundled** plugins where shipping a hard dependency on every install would bloat the base Hermes footprint.
+For a directory plugin's own Python dependencies, declare `dependencies` under
+`[project]` in its `pyproject.toml`. Legacy `pip_dependencies` and
+`python_dependencies` lists in `plugin.yaml` also join the PM workspace.
+PM prepares their dependencies together with core requirements before enabling
+the plugin. The generated workspace does not rewrite the plugin directory or
+the shipped lockfile. Dependency conflicts refuse admission and preserve the
+previous selection; PM does not automatically disable other plugins.
 
-When `security.allow_lazy_installs: false` is set globally, `ensure()` raises `FeatureUnavailable` immediately with a remediation hint — your plugin should catch it and degrade gracefully (return an error result, not crash the tool loop).
+Dependencies installed manually with pip are not durable PM declarations.
+A later environment replacement need not retain them. Wrapper plugins whose
+Python runtimes remain outside PM can use the
+[memory-provider survival contract](../memory-provider-plugin.md#hermes_home-survival-contract-what-wrappers-can-rely-on).
+See [Package management](../../reference/package-management.md) for the
+runtime layout and lazy-install policy.
 
 
 
@@ -1811,7 +1828,7 @@ NixOS users can install your plugin declaratively if you provide a `pyproject.to
 ```nix
 # User's configuration.nix
 services.hermes-agent.extraPythonPackages = [
-  (pkgs.python312Packages.buildPythonPackage {
+  (config.services.hermes-agent.package.python.pkgs.buildPythonPackage {
     pname = "my-plugin";
     version = "1.0.0";
     src = pkgs.fetchFromGitHub {
@@ -1821,7 +1838,7 @@ services.hermes-agent.extraPythonPackages = [
       hash = "sha256-...";  # nix-prefetch-url --unpack
     };
     format = "pyproject";
-    build-system = [ pkgs.python312Packages.setuptools ];
+    build-system = [ config.services.hermes-agent.package.python.pkgs.setuptools ];
   })
 ];
 ```

@@ -51,12 +51,13 @@ def _expand_hermes_home(path: str) -> Path:
 
 
 def _get_platform_default_hermes_home() -> Path:
-    """Return the platform-native default Hermes home path."""
+    """Return the platform default with the literal data-directory suffix."""
+    suffix = os.environ.get("HERMES_DATA_DIR_SUFFIX", "")
     if sys.platform == "win32":
         local_appdata = os.environ.get("LOCALAPPDATA", "").strip()
         base = Path(local_appdata) if local_appdata else Path.home() / "AppData" / "Local"
-        return base / "hermes"
-    return Path.home() / ".hermes"
+        return base / ("hermes" + suffix)
+    return Path.home() / (".hermes" + suffix)
 
 
 def sudo_invoker_default_home() -> Path | None:
@@ -176,11 +177,11 @@ LOCAL_RUNTIME_ROOT_DIRS: frozenset[str] = frozenset({"models", "runtimes", "node
 _default_hermes_root_memo: "tuple[str, str, Path] | None" = None
 
 
-def get_default_hermes_root() -> Path:
-    """Root Hermes dir for profile-level ops: ``<root>`` when ``HERMES_HOME=<root>/profiles/<name>``."""
+def get_default_hermes_root(*, home: str | Path | None = None) -> Path:
+    """Root of an explicit home, or the process home when none is supplied."""
     global _default_hermes_root_memo
     native_home = _get_platform_default_hermes_home()
-    env_home = os.environ.get("HERMES_HOME", "").strip()
+    env_home = str(home) if home is not None else os.environ.get("HERMES_HOME", "").strip()
     env_path = _expand_hermes_home(env_home) if env_home else None
     memo_key = (str(native_home), str(env_path) if env_path is not None else "")
     memo = _default_hermes_root_memo
@@ -1608,3 +1609,65 @@ def emit_partial_update_hint(exc: BaseException, *, file=None) -> bool:
     for line in (f"Error: {exc}", *lines):
         print(line, file=sys.stderr if file is None else file)
     return True
+
+def _pm_node_executable(command: str) -> str | None:
+    """The pm store's node/npm/npx binary for *command*, when installed.
+
+    node and npm are pm packages; npx ships inside npm's store entry, so it
+    resolves as a sibling of the npm binary. Returns ``None`` when pm has not
+    installed the package (the caller falls back to PATH).
+    """
+    base = Path(str(command)).name.lower()
+    for suffix in (".cmd", ".exe", ".ps1"):
+        if base.endswith(suffix):
+            base = base[: -len(suffix)]
+    package_name = {"node": "node", "npm": "npm", "npx": "npm"}.get(base)
+    if package_name is None:
+        return None
+    try:
+        import pm
+
+        if not pm.is_installed(package_name):
+            return None
+        from pm.ensure import _facts, _store
+        from pm.registry import get_package
+        from pm.store import current_target
+
+        fact = _facts().get(package_name)
+        if fact is None:
+            return None
+        binary = get_package(package_name).binary(
+            _store().entry(fact["entry"]), current_target()
+        )
+        if binary is None or not binary.is_file():
+            return None
+        if base == "npx":
+            for name in _candidate_node_command_names("npx"):
+                candidate = binary.parent / name
+                if candidate.is_file():
+                    return str(candidate)
+            return None
+        return str(binary)
+    except Exception:
+        pass
+    return None
+
+def normalize_scope(scope: str | Path | None) -> str | None:
+    """Normalize a WRITE-side registry scope key, preserving ``None``.
+
+    Two different contracts live on the same registries — do not unify them:
+
+    * **Write / slot paths** (``register_*``, ``snapshot_registration``,
+      ``restore_registration``, tool-registry slot lookup): ``None`` means
+      the process-global layer and must stay ``None``. Use this function.
+    * **Read paths** (``list_providers``, ``get_provider``): ``None`` means
+      "the active home's scope" and must go through :func:`hermes_home_key`
+      (falsy input resolves to the active default home). Using this
+      function there hides every scoped registration — the exact bug
+      fixed after e66a627aa5.
+
+    Both normalize non-None values identically (resolved absolute path,
+    normcase on Windows) so writes and reads agree on the key.
+    """
+    return hermes_home_key(scope) if scope is not None else None
+

@@ -18,8 +18,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import hermes_cli.main as main_mod
-import hermes_cli.main_install_repair as hermes_cli_main_install_repair
-from hermes_cli import main_install_repair
 from hermes_cli import update_cmd
 from hermes_cli import _early_recovery as er
 
@@ -76,37 +74,41 @@ class TestEarlyRecovery:
     def test_skips_live_checkout_before_any_probe_or_lock(self, monkeypatch):
         # A probe call would mean recovery is proceeding against the live
         # checkout; the guard must return before ANY side-effectful step.
-        def _boom():
-            raise AssertionError("probe ran against the live checkout")
+        # PM generation: recovery's repair action is pm.recovery.
+        # repair_dependencies, reached through er.recover_if_needed.
+        def _boom(*a, **k):
+            raise AssertionError("repair ran against the live checkout")
 
-        monkeypatch.setattr(er, "_probe_broken_packages", _boom)
-        monkeypatch.setattr(er, "_run_repair_install", lambda *a, **k: _boom())
-        er.recover_if_needed(project_root=CHECKOUT_ROOT, argv=[])
+        import pm.recovery as pm_recovery
+
+        monkeypatch.setattr(pm_recovery, "repair_dependencies", _boom)
+        assert er.recover_if_needed(project_root=CHECKOUT_ROOT, argv=[]) is False
 
     def test_sandboxed_root_still_recovers(self, tmp_path, monkeypatch):
         # The guard must not disable recovery for sandboxed roots: with a
-        # marker present and a broken probe, the repair path still runs.
-        (tmp_path / ".lazy-refresh-incomplete").write_text("started=1\npid=1\n")
+        # marker present, PM repair still runs and clears the marker.
+        import pm.recovery as pm_recovery
+
+        (tmp_path / ".lazy-refresh-incomplete").write_text("started=1\npid=0\n")
         (tmp_path / "pyproject.toml").write_text("[project]\nname='x'\n")
-        monkeypatch.setattr(er, "_probe_broken_packages", lambda: ["PyYAML"])
-        monkeypatch.setattr(er, "_pinned_specs", lambda broken, root: broken)
-        installs = []
+        repairs = []
         monkeypatch.setattr(
-            er, "_run_repair_install", lambda specs, root: installs.append(specs) or True
+            pm_recovery, "repair_dependencies", lambda root: repairs.append(root)
         )
-        er.recover_if_needed(project_root=tmp_path, argv=[])
-        assert installs, "sandboxed recovery was wrongly disabled by the guard"
+        assert er.recover_if_needed(project_root=tmp_path, argv=[]) is True
+        assert repairs == [tmp_path], "sandboxed recovery was wrongly disabled by the guard"
+        assert not (tmp_path / ".lazy-refresh-incomplete").exists()
 
 
 class TestLaunchRecovery:
-    def test_recover_from_interrupted_install_noops_on_live_checkout(
-        self, monkeypatch
-    ):
-        # PROJECT_ROOT is the live checkout in-suite; the launch-time
-        # recovery must return before touching markers or spawning installs.
-        def _boom(*a, **k):
-            raise AssertionError("launch recovery ran against the live checkout")
+    def test_recover_if_needed_noops_on_live_checkout(self, monkeypatch):
+        # PROJECT_ROOT is the live checkout in-suite. Startup recovery must
+        # return before touching markers, locks, or repair dependencies.
+        import pm.recovery as pm_recovery
 
-        monkeypatch.setattr(main_mod, "_update_marker_path", _boom)
-        monkeypatch.setattr(hermes_cli_main_install_repair, "_update_marker_path", _boom)
-        main_mod._recover_from_interrupted_install()
+        def _boom(*a, **k):
+            raise AssertionError("startup recovery ran against the live checkout")
+
+        monkeypatch.setattr(er, "_project_root", lambda: CHECKOUT_ROOT)
+        monkeypatch.setattr(pm_recovery, "repair_dependencies", _boom)
+        assert er.recover_if_needed(argv=[]) is False

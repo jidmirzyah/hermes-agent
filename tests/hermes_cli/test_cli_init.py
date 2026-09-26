@@ -137,56 +137,6 @@ class TestBusyInputMode:
         cli.process_command("/queue follow up")
         assert cli._pending_input.get_nowait() == "follow up"
 
-    def test_queue_command_can_edit_remove_move_and_clear_pending_items(self):
-        cli = _make_cli()
-        cli.process_command("/queue first prompt")
-        cli.process_command("/queue second prompt")
-        cli.process_command("/queue edit 2 replacement prompt")
-        assert cli._pending_input_items() == ["first prompt", "replacement prompt"]
-
-        cli.process_command("/queue move 2 1")
-        assert cli._pending_input_items() == ["replacement prompt", "first prompt"]
-
-        cli.process_command("/queue rm 2")
-        assert cli._pending_input_items() == ["replacement prompt"]
-
-        cli.process_command("/queue clear")
-        assert cli._pending_input_items() == []
-        # queue.Queue bookkeeping must stay consistent after clear
-        assert cli._pending_input.unfinished_tasks == 0
-        assert cli._pending_input.empty()
-
-    def test_queue_command_preserves_prompts_that_start_with_non_subcommand_words(self):
-        cli = _make_cli()
-        cli.process_command("/queue maybe run later")
-        assert cli._pending_input.get_nowait() == "maybe run later"
-
-    def test_queue_add_allows_prompts_that_start_with_management_words(self):
-        cli = _make_cli()
-        cli.process_command("/queue add clear the logs after tests")
-        assert cli._pending_input.get_nowait() == "clear the logs after tests"
-
-    def test_queue_edit_preserves_voice_sentinel(self):
-        cli = _make_cli()
-        # Import AFTER _make_cli: the harness reloads the cli module, so the
-        # sentinel class must come from the same (reloaded) module the
-        # instance's handler compares against.
-        import cli as _cli_mod
-        cli._pending_input.put(_cli_mod._VoiceInputMessage("spoken prompt"))
-        cli.process_command("/queue edit 1 corrected prompt")
-        items = cli._pending_input_items()
-        assert len(items) == 1
-        assert isinstance(items[0], _cli_mod._VoiceInputMessage)
-        assert str(items[0]) == "corrected prompt"
-
-    def test_queue_out_of_range_indices_leave_queue_untouched(self):
-        cli = _make_cli()
-        cli.process_command("/queue only item")
-        cli.process_command("/queue rm 5")
-        cli.process_command("/queue edit 3 nope")
-        cli.process_command("/queue move 1 9")
-        assert cli._pending_input_items() == ["only item"]
-
 
 
 
@@ -204,6 +154,7 @@ class TestBusyInputMode:
 
 
 class TestPromptToolkitTerminalCompatibility:
+    @pytest.mark.platforms("linux")
     def test_lf_enter_binding_respects_multiline_shortcuts(self):
         """Ctrl+J is reserved by default, with legacy LF-submit available as an opt-out.
 
@@ -272,7 +223,7 @@ class TestPromptToolkitTerminalCompatibility:
             assert bindings[("c-m",)] is submit_handler
             assert ("c-j",) not in bindings
 
-    @pytest.mark.windows_only
+    @pytest.mark.platforms("windows")
     def test_windows_leaves_ctrl_j_unbound(self):
         """On native Windows only enter submits; c-j is free for the newline
         binding added separately in the prompt setup."""
@@ -301,12 +252,13 @@ class TestPromptToolkitTerminalCompatibility:
 
 
 
+    @pytest.mark.platforms("linux")
     def test_cpr_gating_posix_suppresses_without_ssh(self, monkeypatch):
         """POSIX suppresses CPR without SSH.
 
         The native-Windows arm (``_terminal_may_leak_cpr() is False``, plus
         the ``PROMPT_TOOLKIT_NO_CPR`` override that outranks it) lives in
-        ``tests/hermes_cli/test_cpr_local_leak.py`` under ``windows_only``, where it
+        ``tests/cli/test_cpr_local_leak.py`` under ``platforms("windows")``, where it
         runs against a real Windows console.
         """
         from cli import _terminal_may_leak_cpr
@@ -540,7 +492,7 @@ class TestRootLevelProviderOverride:
 
     def test_model_provider_wins_over_root_provider(self, tmp_path, monkeypatch):
         """model.provider takes priority — root-level provider is only a fallback."""
-        import yaml
+        import hermes_yaml as yaml
 
         hermes_home = tmp_path / ".hermes"
         hermes_home.mkdir()
@@ -563,7 +515,7 @@ class TestRootLevelProviderOverride:
 
     def test_root_provider_used_as_fallback_when_model_provider_missing(self, tmp_path, monkeypatch):
         """Legacy root-level provider still populates model.provider in the CLI loader."""
-        import yaml
+        import hermes_yaml as yaml
 
         hermes_home = tmp_path / ".hermes"
         hermes_home.mkdir()
@@ -586,7 +538,7 @@ class TestRootLevelProviderOverride:
 
     def test_root_base_url_used_as_fallback_when_model_base_url_missing(self, tmp_path, monkeypatch):
         """Legacy root-level base_url still populates model.base_url in the CLI loader."""
-        import yaml
+        import hermes_yaml as yaml
 
         hermes_home = tmp_path / ".hermes"
         hermes_home.mkdir()
@@ -608,7 +560,7 @@ class TestRootLevelProviderOverride:
 
     def test_terminal_vercel_runtime_bridged_to_env(self, tmp_path, monkeypatch):
         """Classic CLI must expose terminal.vercel_runtime to terminal_tool.py."""
-        import yaml
+        import hermes_yaml as yaml
 
         hermes_home = tmp_path / ".hermes"
         hermes_home.mkdir()
@@ -761,54 +713,6 @@ class TestRootLevelProviderOverride:
         })
         assert result["model"]["default"] == "flat-default-model"
         assert result["model"]["provider"] == "auto"
-
-
-class TestPluginToolsetStartupValidation:
-    """A toolset that is merely *not registered yet* must not be reported as unknown.
-
-    Plugins register their toolsets during background discovery, while the CLI validates
-    the configured list during construction -- i.e. before that thread has landed. Judging
-    by the live registry alone therefore flags every configured plugin toolset as a typo on
-    every launch, including one-shot/quiet runs whose stdout is machine-parsed.
-    """
-
-    @staticmethod
-    def _init_toolsets(monkeypatch, toolsets, *, registry, plugin_keys):
-        import cli as _cli_mod
-
-        stub = object.__new__(_cli_mod.HermesCLI)
-        printed: list[str] = []
-        stub._console_print = printed.append
-        monkeypatch.setattr(_cli_mod, "validate_toolset", lambda name: name in registry)
-        monkeypatch.setattr(_cli_mod, "CLI_CONFIG", {"agent": {}})
-        monkeypatch.setattr(
-            "hermes_cli.plugins.get_plugin_toolset_keys_nowait",
-            lambda: set(plugin_keys),
-        )
-        stub._init_toolsets(list(toolsets))
-        return stub, printed
-
-    def test_plugin_toolset_not_yet_registered_is_not_flagged(self, monkeypatch):
-        stub, printed = self._init_toolsets(
-            monkeypatch,
-            ["terminal", "voice_stack"],
-            registry={"terminal"},
-            plugin_keys={"voice_stack"},
-        )
-        assert printed == []
-        # The configured list is kept verbatim; only the false warning is silenced.
-        assert stub.enabled_toolsets == ["terminal", "voice_stack"]
-
-    def test_real_typo_still_warns(self, monkeypatch):
-        _, printed = self._init_toolsets(
-            monkeypatch,
-            ["terminal", "voice_stak"],
-            registry={"terminal"},
-            plugin_keys={"voice_stack"},
-        )
-        assert len(printed) == 1
-        assert "voice_stak" in printed[0]
-        assert "voice_stack" not in printed[0]
 
 
 

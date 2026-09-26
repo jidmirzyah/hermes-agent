@@ -34,11 +34,14 @@ from __future__ import annotations  # allow PEP 604 `X | None` on Python 3.9+
 import argparse
 import json
 import os
-import shutil
-import subprocess
 import sys
-from importlib.metadata import version as _distribution_version
 from pathlib import Path
+
+try:
+    import pm
+except ImportError:
+    # A copied skill must not install into an unrelated Python environment.
+    pm = None
 
 # Ensure sibling modules (_hermes_home) are importable when run standalone.
 _SCRIPTS_DIR = str(Path(__file__).resolve().parent)
@@ -118,21 +121,6 @@ def _record_reauth_timestamp() -> None:
     except OSError:
         pass
 
-# Exact pins: keep in sync with pyproject.toml [project.optional-dependencies].google
-# and tools/lazy_deps.py LAZY_DEPS['skill.google_workspace'].
-# Pinning all protects against version drift and ensures the security floors
-# (httplib2 GHSA-j5g9-f88f-gfj3, stale pyasn1/google-auth) are honoured
-# regardless of install path.
-REQUIRED_PACKAGES = [
-    "google-api-python-client==2.194.0",
-    "google-auth==2.55.1",
-    "google-auth-oauthlib==1.3.1",
-    "google-auth-httplib2==0.3.1",
-    # GHSA-j5g9-f88f-gfj3 — Decompression Bomb DoS via unbounded gzip/deflate
-    "httplib2==0.32.0",
-    "pyasn1==0.6.4",
-]
-
 # OAuth redirect for "out of band" manual code copy flow.
 # Google deprecated OOB, so we use a localhost redirect and tell the user to
 # copy the code from the browser's URL bar (or the page body).
@@ -170,130 +158,29 @@ def _format_missing_scopes(missing_scopes: list[str]) -> str:
     )
 
 
-_DEDICATED_VENV = Path(__file__).resolve().parent / ".venv"
-
-
-def _reexec_under_dedicated_venv_if_needed():
-    """Transparently switch to a dedicated venv if the interpreter that actually launched us
-    (typically the bare system `python3` a terminal-tool invocation resolves to, not the Hermes
-    managed venv) is missing required packages and can't install them -- e.g. no `pip` and
-    PEP 668 "externally managed" blocking a direct install (see install_deps()'s third tier).
-    A no-op once already running under the dedicated venv, or when it doesn't exist yet."""
-    if sys.prefix != sys.base_prefix:
-        return  # already inside some venv -- never re-exec again, avoids any possible loop
-    venv_python = _DEDICATED_VENV / "bin" / "python3"
-    if not venv_python.exists() or not _missing_required_packages():
-        return
-    os.execv(str(venv_python), [str(venv_python)] + sys.argv)
-
-
-def _missing_required_packages() -> list[str]:
-    """Return exact requirements absent or stale in this interpreter.
-
-    All REQUIRED_PACKAGES entries are exact ``name==version`` pins, so a
-    direct version comparison is sufficient — no ``packaging`` dependency
-    needed in this standalone script.
-    """
-    missing = []
-    for spec in REQUIRED_PACKAGES:
-        name, _, wanted = spec.partition("==")
-        try:
-            if _distribution_version(name) != wanted:
-                missing.append(spec)
-        except Exception:
-            missing.append(spec)
-    return missing
-
-
 def install_deps():
-    """Install missing or stale Google API packages. Returns True on success."""
-    missing = _missing_required_packages()
-    if not missing:
-        print("Dependencies already installed.")
-        return True
-
-    print("Installing Google API dependencies...")
-
-    # First choice: pip in the current interpreter. Works for most installs.
+    """Sync Hermes' declared Google extra, ready for the next process."""
+    if pm is None:
+        print("ERROR: Run this script in the Hermes environment; use hermes setup first.")
+        return False
     try:
-        subprocess.check_call(
-            [sys.executable, "-m", "pip", "install", "--quiet"] + missing,
-            stdout=subprocess.DEVNULL,
-        )
-        remaining = _missing_required_packages()
-        if remaining:
-            print(f"ERROR: Dependencies remain stale after pip install: {' '.join(remaining)}")
-            return False
-        print("Dependencies installed.")
-        return True
-    except subprocess.CalledProcessError as e:
-        pip_error = e
-
-    # Fallback: the interpreter has no pip (the Hermes Docker image's venv is
-    # built with `uv sync`, which does not bootstrap pip). `uv pip install
-    # --python <interpreter>` installs into that exact interpreter without
-    # needing pip present. Targeting sys.executable keeps us on the venv the
-    # script is actually running under, rather than guessing.
-    uv = shutil.which("uv")
-    if uv:
-        try:
-            subprocess.check_call(
-                [uv, "pip", "install", "--python", sys.executable, "--quiet"]
-                + missing,
-                stdout=subprocess.DEVNULL,
-            )
-            remaining = _missing_required_packages()
-            if remaining:
-                print(f"ERROR: Dependencies remain stale after uv install: {' '.join(remaining)}")
-                return False
-            print("Dependencies installed.")
-            return True
-        except subprocess.CalledProcessError as e:
-            uv_error = e
-
-        # Third choice: sys.executable itself can't take an install (no pip, and PEP 668
-        # "externally managed" blocks a direct write into it -- the common case when this
-        # script is launched as a bare `python3 setup.py ...` and that resolves to the
-        # system interpreter rather than the Hermes managed venv). Create a small dedicated
-        # venv next to this script instead of fighting the OS protection, install there, and
-        # let _reexec_under_dedicated_venv_if_needed() route future runs (this one included,
-        # via install_deps()'s own caller re-running _missing_required_packages after this
-        # returns) through it transparently.
-        try:
-            if not _DEDICATED_VENV.exists():
-                subprocess.check_call(
-                    [uv, "venv", "--python", "3.11", str(_DEDICATED_VENV)],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                )
-            venv_python = _DEDICATED_VENV / "bin" / "python3"
-            subprocess.check_call(
-                [uv, "pip", "install", "--python", str(venv_python), "--quiet"] + missing,
-                stdout=subprocess.DEVNULL,
-            )
-            print("Dependencies installed into a dedicated venv (system Python has no pip / "
-                  "is externally managed).")
-            print(f"Re-run this command -- it will now transparently use {venv_python}.")
-            return True
-        except subprocess.CalledProcessError as e:
-            print(f"ERROR: Failed to install dependencies via uv (direct): {uv_error}")
-            print(f"ERROR: Dedicated-venv fallback also failed: {e}")
-            print(f"Manually: {uv} venv --python 3.11 {_DEDICATED_VENV} && "
-                  f"{uv} pip install --python {_DEDICATED_VENV}/bin/python3 {' '.join(REQUIRED_PACKAGES)}")
-            return False
-
-    print(f"ERROR: Failed to install dependencies: {pip_error}")
-    print(
-        "On environments without pip (e.g. Nix, or the Hermes Docker image's "
-        "uv-managed venv), install the optional extra instead:"
-    )
-    print("  hermes setup")
-    print(f"Or manually: {sys.executable} -m pip install {' '.join(REQUIRED_PACKAGES)}")
-    return False
+        pm.sync_venv(["google"], explicit=True)
+    except Exception as exc:
+        print(f"ERROR: Failed to install Google dependencies: {exc}")
+        return False
+    print("Google dependencies synced. Restart Hermes, then rerun setup to continue OAuth.")
+    return True
 
 
 def _ensure_deps():
-    """Check exact dependency versions, install if stale, exit on failure."""
-    if _missing_required_packages() and not install_deps():
+    """Let PM check imports and stop if activation needs a new process."""
+    if pm is None:
+        print("ERROR: Run this script in the Hermes environment; use hermes setup first.")
+        sys.exit(1)
+    try:
+        pm.ensure_import("google")
+    except Exception as exc:
+        print(f"ERROR: Google dependencies unavailable: {exc}")
         sys.exit(1)
 
 

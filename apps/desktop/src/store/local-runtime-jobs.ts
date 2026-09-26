@@ -74,116 +74,78 @@ export async function startLocalRuntimeInstall(): Promise<void> {
 }
 
 const POLL_ACTIVE_MS = 700
-let timer: null | ReturnType<typeof setTimeout> = null
-let polling: Promise<void> | null = null
-let generation = 0
-interface JobContext {
-  jobs: readonly LocalRuntimeJob[]
-  postPending: boolean
-  readPending: boolean
-  acceptedInstall: number
-  acceptedIds: Set<string>
-  settledNotified: Set<string>
+const POLL_PAUSED_MS = 3_000
+let timer: null | number = null
+// Jobs we've already toasted for, so a poll race can't double-notify.
+const settledNotified = new Set<string>()
+
+// The active set: running OR paused. Paused is NOT settled — it is user
+// intent, not failure — and a paused job that later runs again must stay
+// tracked so its eventual done/error notifies exactly once.
+function isActive(status: LocalRuntimeJob['status']): boolean {
+  return status === 'paused' || status === 'running'
 }
 
-// Only foreground requests run; switching away retains ownership, not a poller.
-const contexts = new Map<string, JobContext>()
-
-function contextKey() {
-  const connection = $connection.get()
-
-  return JSON.stringify([
-    getApiRequestConnection() ?? connection?.connectionId ?? [connection?.mode, connection?.baseUrl],
-    $activeGatewayRoute.get()
-  ])
+// A job is the same observation unless ANY user-visible payload changed —
+// bytes, percent, phase, detail, error, control flags, and the per-file
+// ranges. The backend re-sorts jobs per poll, so compare by id, not index.
+function jobEqual(a: LocalRuntimeJob, b: LocalRuntimeJob): boolean {
+  return (
+    a.job_id === b.job_id &&
+    a.status === b.status &&
+    a.phase === b.phase &&
+    a.detail === b.detail &&
+    a.done_bytes === b.done_bytes &&
+    a.total_bytes === b.total_bytes &&
+    a.percent === b.percent &&
+    a.error === b.error &&
+    a.can_pause === b.can_pause &&
+    a.can_resume === b.can_resume &&
+    a.pause_requested === b.pause_requested &&
+    rangesEqual(a.ranges, b.ranges)
+  )
 }
 
-function cachedContext(key: string): JobContext {
-  let state = contexts.get(key)
-
-  if (!state) {
-    state = {
-      jobs: [],
-      postPending: false,
-      readPending: false,
-      acceptedInstall: 0,
-      acceptedIds: new Set(),
-      settledNotified: new Set()
-    }
-    contexts.set(key, state)
+function rangesEqual(
+  a: Record<string, [number, number][]> | undefined,
+  b: Record<string, [number, number][]> | undefined
+): boolean {
+  if (a === b) {
+    return true
   }
 
-  return state
-}
-
-let activeKey = contextKey()
-let activeContext = cachedContext(activeKey)
-
-function resetContext() {
-  activeContext.jobs = $localRuntimeJobs.get()
-  const context = ++generation
-
-  if (timer !== null) {
-    clearTimeout(timer)
-  }
-
-  timer = null
-  polling = null
-  activeKey = contextKey()
-  activeContext = cachedContext(activeKey)
-  activeContext.readPending ||= activeContext.jobs.some(job => job.status === 'running')
-  $localRuntimeJobs.set(activeContext.jobs)
-  $localRuntimeInstallStarting.set(activeContext.postPending || activeContext.readPending)
-
-  // Gateway activation publishes the route BEFORE the REST profile tag.
-  // Coalesce that synchronous re-home before any ambient API request.
-  void Promise.resolve().then(() => {
-    if (context !== generation) {
-      return
-    }
-
-    if (activeKey !== contextKey()) {
-      resetContext()
-
-      return
-    }
-
-    if ($localModelsEnabled.get() && activeContext.readPending && !activeContext.postPending) {
-      void poll()
-    }
-  })
-}
-
-$connection.listen(resetContext)
-$activeGatewayRoute.listen(resetContext)
-
-function jobsEqual(a: readonly LocalRuntimeJob[], b: readonly LocalRuntimeJob[]) {
-  if (a.length !== b.length) {
+  if (!a || !b) {
     return false
   }
 
-  return a.every((job, i) => {
-    const other = b[i]
+  const keysA = Object.keys(a)
+  const keysB = Object.keys(b)
 
-    return (
-      job.job_id === other.job_id &&
-      job.status === other.status &&
-      job.phase === other.phase &&
-      job.done_bytes === other.done_bytes
-    )
+  if (keysA.length !== keysB.length) {
+    return false
+  }
+
+  return keysA.every(key => {
+    const ra = a[key]
+    const rb = b[key]
+
+    if (!ra || !rb || ra.length !== rb.length) {
+      return false
+    }
+
+    return ra.every((range, i) => range[0] === rb[i]?.[0] && range[1] === rb[i]?.[1])
   })
 }
 
+function jobsEqual(a: readonly LocalRuntimeJob[], b: readonly LocalRuntimeJob[]) {
+  return a.length === b.length && a.every(job => b.some(other => jobEqual(job, other)))
+}
+
 function notifySettled(previous: readonly LocalRuntimeJob[], next: readonly LocalRuntimeJob[]) {
-  const { acceptedIds, settledNotified } = activeContext
-  const wasRunning = new Set(previous.filter(j => j.status === 'running').map(j => j.job_id))
+  const wasActive = new Set(previous.filter(j => isActive(j.status)).map(j => j.job_id))
 
   for (const job of next) {
-    if (
-      job.status === 'running' ||
-      (!wasRunning.has(job.job_id) && !acceptedIds.has(job.job_id)) ||
-      settledNotified.has(job.job_id)
-    ) {
+    if (isActive(job.status) || !wasActive.has(job.job_id) || settledNotified.has(job.job_id)) {
       continue
     }
 
@@ -219,17 +181,39 @@ function notifySettled(previous: readonly LocalRuntimeJob[], next: readonly Loca
   }
 }
 
-function poll(): Promise<void> {
-  if (polling) {
-    return polling
+let inFlight = false
+let refreshRequested = false
+
+async function poll(): Promise<void> {
+  timer = null
+  inFlight = true
+
+  try {
+    const { jobs } = await getLocalModelsJobs()
+    const previous = $localRuntimeJobs.get()
+
+    if (!jobsEqual(previous, jobs)) {
+      notifySettled(previous, jobs)
+      $localRuntimeJobs.set(jobs)
+    }
+  } catch {
+    // Preserve the last snapshot while the backend is unreachable.
+  } finally {
+    inFlight = false
   }
 
-  const context = generation
-  const owner = activeContext
-  const accepted = owner.acceptedInstall
+  if (refreshRequested) {
+    refreshRequested = false
+    void poll()
 
-  if (timer !== null) {
-    clearTimeout(timer)
+    return
+  }
+
+  const jobs = $localRuntimeJobs.get()
+  const anyRunning = jobs.some(job => job.status === 'running')
+
+  if (anyRunning || jobs.some(job => job.status === 'paused')) {
+    timer = window.setTimeout(() => void poll(), anyRunning ? POLL_ACTIVE_MS : POLL_PAUSED_MS)
   }
 
   timer = null
@@ -272,36 +256,49 @@ function poll(): Promise<void> {
   return polling
 }
 
-// Idempotent kick: start (or keep) the poll loop while work is in flight.
-// Call after starting a job AND on app boot (to rediscover work started
-// before a reload).
-export function watchLocalRuntimeJobs() {
-  if (polling || timer !== null) {
+export function watchLocalRuntimeJobs(): void {
+  if (inFlight) {
+    refreshRequested = true
+
     return
+  }
+
+  if (timer !== null) {
+    window.clearTimeout(timer)
+    timer = null
   }
 
   void poll()
 }
 
-// Selector: the running download job for a catalog model id, if any.
+// Selector: the in-flight (running or paused) download job for a catalog
+// model id, if any. Paused stays visible — the row parks, it doesn't
+// vanish (progress loss is information loss).
 export function runningDownloadFor(jobs: readonly LocalRuntimeJob[], modelId: string): LocalRuntimeJob | null {
-  return jobs.find(j => j.kind === 'model-download' && j.status === 'running' && j.model_id === modelId) ?? null
+  return jobs.find(j => j.kind === 'model-download' && isActive(j.status) && j.model_id === modelId) ?? null
 }
 
 // Selector: every model on its way to the library right now — plain
 // downloads plus quickstart runs while they are still fetching bytes
-// (later quickstart phases mean the model is staged and activating).
-// The model picker renders these as disabled progress rows.
-const DOWNLOAD_PHASES = new Set(['starting', 'installing-runtime', 'downloading'])
+// (later quickstart phases mean the model is staged and activating),
+// paused ones included. The model picker renders these as disabled
+// progress rows.
+const DOWNLOAD_PHASES = new Set([
+  'starting',
+  'installing-runtime',
+  'downloading-runtime',
+  'unpacking-runtime',
+  'verifying-runtime',
+  'downloading'
+])
 
 export function runningModelDownloads(jobs: readonly LocalRuntimeJob[]): LocalRuntimeJob[] {
   return jobs.filter(
     j =>
-      j.status === 'running' &&
-      (j.kind === 'model-download' || (j.kind === 'quickstart' && DOWNLOAD_PHASES.has(j.phase)))
+      isActive(j.status) && (j.kind === 'model-download' || (j.kind === 'quickstart' && DOWNLOAD_PHASES.has(j.phase)))
   )
 }
 
 export function runningRuntimeInstall(jobs: readonly LocalRuntimeJob[]): LocalRuntimeJob | null {
-  return jobs.find(j => j.kind === 'runtime-install' && j.status === 'running') ?? null
+  return jobs.find(j => j.kind === 'runtime-install' && isActive(j.status)) ?? null
 }

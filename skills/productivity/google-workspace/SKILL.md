@@ -54,7 +54,12 @@ The setup is fully non-interactive — you drive it step by step so it works
 on CLI, Telegram, Discord, or any platform. **Every step below needs
 `--identity <name>` for the specific person being set up.**
 
-Define a shorthand first (fill in the resolved identity — do not leave this as a literal placeholder):
+Run the setup script with Python from the Hermes environment, not an unrelated
+system Python. `--install-deps` syncs Hermes' declared Google extra through PM;
+after syncing, restart Hermes and rerun the OAuth command. If Hermes is not
+importable, use `hermes setup` first rather than installing packages with pip.
+
+Define a shorthand first:
 
 ```bash
 IDENTITY="jid"   # or "zarkash", etc. — the resolved identity for THIS setup, never guessed

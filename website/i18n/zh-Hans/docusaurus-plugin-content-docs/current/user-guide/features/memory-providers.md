@@ -197,7 +197,7 @@ hermes honcho sync
 
 通过 [Honcho 控制台](https://app.honcho.dev) 设置的服务端开关优先于本地默认值——在会话初始化时同步回来。
 
-参见 [Honcho 页面](./honcho.md#observation-directional-vs-unified) 获取完整的 observation 参考。
+参见 [Honcho 页面](./honcho.md#观察模式定向-vs-统一) 获取完整的 observation 参考。
 
 <details>
 <summary>完整 honcho.json 示例（多 profile）</summary>
@@ -344,15 +344,18 @@ hermes config set memory.provider hindsight
 echo "HINDSIGHT_API_KEY=your-key" >> ~/.hermes/.env
 ```
 
-安装向导会自动安装依赖，并仅安装所选模式所需的内容（云端用 `hindsight-client`，本地用 `hindsight-all`）。需要 `hindsight-client >= 0.4.22`（会话启动时若版本过旧则自动升级）。
+安装向导通过 PM 的 `hindsight` extra 准备客户端。
+`local_embedded` 模式使用独立环境，选择记录位于
+`$HERMES_HOME/profiles/Hindsight/env/active.json`，不把 `hindsight-all` 安装到 Hermes 主环境。
+`local_external` 连接已有服务。各模式的平台限制仍适用。
 
-**本地模式 UI：** `hindsight-embed -p hermes ui start`
+详见[插件 README](https://github.com/NousResearch/hermes-agent/blob/main/plugins/memory/hindsight/README.md)。
 
 **配置：** `$HERMES_HOME/hindsight/config.json`
 
 | 键 | 默认值 | 描述 |
 |-----|---------|-------------|
-| `mode` | `cloud` | `cloud` 或 `local` |
+| `mode` | `cloud` | `cloud`、`local_embedded` 或 `local_external` |
 | `bank_id` | `hermes` | 记忆库标识符 |
 | `recall_budget` | `mid` | 召回彻底程度：`low` / `mid` / `high` |
 | `memory_mode` | `hybrid` | `hybrid`（上下文 + 工具）、`context`（仅自动注入）、`tools`（仅工具） |

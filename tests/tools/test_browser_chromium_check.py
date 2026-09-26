@@ -17,7 +17,8 @@ from tools import browser_tool_cloud as bt_cloud
 
 
 @pytest.fixture(autouse=True)
-def _reset_chromium_cache():
+def _reset_chromium_cache(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_RUNTIME_DIR", str(tmp_path / "tools"))
     bt._cached_chromium_installed = None
     yield
     bt._cached_chromium_installed = None
@@ -38,7 +39,17 @@ class TestChromiumSearchRoots:
 
 
 class TestChromiumInstalled:
-    def test_true_when_plain_chromium_on_path(self, monkeypatch):
+    def test_shell_only_cache_does_not_satisfy_full_browser(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("AGENT_BROWSER_EXECUTABLE_PATH", raising=False)
+        monkeypatch.setattr(bt_install, "_chromium_search_roots", lambda: [str(tmp_path)])
+        (tmp_path / "chromium_headless_shell-1234").mkdir()
+        assert bt_install._chromium_installed() is False
+
+    def test_system_chromium_on_path_alone_is_not_enough(self, monkeypatch, tmp_path):
+        """Pinned-store-only (gap plan D3): a system Chromium in PATH does
+        NOT satisfy the check — only AGENT_BROWSER_EXECUTABLE_PATH or the
+        pinned browser store do."""
+        monkeypatch.setattr(bt_install, "_chromium_search_roots", lambda: [str(tmp_path)])
         monkeypatch.delenv("AGENT_BROWSER_EXECUTABLE_PATH", raising=False)
         monkeypatch.setattr(
             shutil,
@@ -46,6 +57,13 @@ class TestChromiumInstalled:
             lambda name, path=None: "/usr/bin/chromium" if name == "chromium" else None,
         )
 
+        assert bt_install._chromium_installed() is False
+
+
+    def test_true_when_agent_browser_executable_path_set(self, monkeypatch, tmp_path):
+        exe = tmp_path / ("chrome.exe" if os.name == "nt" else "chrome")
+        exe.write_bytes(b"")
+        monkeypatch.setenv("AGENT_BROWSER_EXECUTABLE_PATH", str(exe))
         assert bt_install._chromium_installed() is True
 
 
@@ -63,7 +81,6 @@ class TestCheckBrowserRequirementsChromium:
     def test_local_mode_with_chromium_returns_true(self, monkeypatch, tmp_path):
         monkeypatch.setattr(bt, "_is_camofox_mode", lambda: False)
         monkeypatch.setattr(bt_install, "_find_agent_browser", lambda **_kw: "/usr/local/bin/agent-browser")
-        monkeypatch.setattr("tools.browser_tool_install._requires_real_termux_browser_install", lambda _: False)
         monkeypatch.setattr(bt_cloud, "_get_cloud_provider", lambda: None)
         monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path))
         (tmp_path / "chromium-1208").mkdir()

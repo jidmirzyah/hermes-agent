@@ -20,7 +20,7 @@
 #   cmd /d /s /c start "" /b powershell -NoProfile -ExecutionPolicy Bypass
 #     -File scripts\desktop-update\windows.ps1
 #     -InstallRoot <path>   repo checkout (HERMES_HOME\hermes-agent)
-#     -Branch <ref>         branch to update against
+#     [-Branch <ref> | -Channel stable|canary|main]  default: branch main
 #     -DesktopPid <pid>     the Electron main process to wait out
 #     [-RelaunchExe <path>] Hermes.exe to start when done (omit = no relaunch)
 #     [-NoUi]               headless (tests); default shows a progress window
@@ -44,6 +44,8 @@
 param(
     [string]$InstallRoot,
     [string]$Branch = "main",
+    [ValidateSet("stable", "canary", "main")]
+    [string]$Channel,
     [int]$DesktopPid = 0,
     [string]$RelaunchExe = "",
     [switch]$NoUi,
@@ -54,6 +56,11 @@ param(
     [switch]$SelfTestMarker,
     [switch]$SelfTestWorkingDirectory
 )
+
+if ($PSBoundParameters.ContainsKey("Branch") -and $PSBoundParameters.ContainsKey("Channel")) {
+    throw "-Branch and -Channel are mutually exclusive"
+}
+$targetArgs = if ($Channel) { @("--channel", $Channel.ToLowerInvariant()) } else { @("--branch", $Branch) }
 
 if (-not $SelfTestUi -and -not $SelfTestPipeDrain -and -not $InstallRoot) {
     # Mandatory in spirit; relaxed in the signature only so the self-test
@@ -83,7 +90,8 @@ try {
     $OutputEncoding = [System.Text.Encoding]::UTF8
 } catch {}
 $TempDir = if ($env:TEMP) { $env:TEMP } else { [System.IO.Path]::GetTempPath() }
-$HermesHome = if ($InstallRoot) { Split-Path -Parent $InstallRoot } else { $TempDir }
+$HermesHome = if ($env:HERMES_HOME) { $env:HERMES_HOME } elseif ($InstallRoot) { Split-Path -Parent $InstallRoot } else { $TempDir }
+$env:HERMES_HOME = $HermesHome
 $MarkerPath = Join-Path $HermesHome ".hermes-update-in-progress"
 $LogDir = Join-Path $HermesHome "logs"
 $LogPath = Join-Path $LogDir "desktop-update-handoff.log"
@@ -578,6 +586,7 @@ function Write-Result([bool]$Ok, [int]$Code, [string]$Message, [bool]$ManualActi
             manual     = $ManualAction
             message    = $Message
             branch     = $Branch
+            channel    = $Channel
             finished_at = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
         } | ConvertTo-Json -Compress
         [System.IO.File]::WriteAllText($ResultPath, $obj)
@@ -1285,7 +1294,7 @@ $psi.Arguments = "-NoProfile -Command Start-Sleep -Seconds $Hold"
 $psi.UseShellExecute = $false
 $psi.CreateNoWindow = $true
 $grandchild = [System.Diagnostics.Process]::Start($psi)
-[System.IO.File]::WriteAllText($PidFile, [string]$grandchild.Id)
+[System.IO.File]::WriteAllLines($PidFile, @([string]$grandchild.Id, [string][System.Diagnostics.Stopwatch]::GetTimestamp()))
 Write-Output "pipe-drain step output"
 [Console]::Out.Flush()
 exit 7
@@ -1332,17 +1341,26 @@ exit 3
     [System.IO.File]::WriteAllText($floodPs1, $floodSource)
     [System.IO.File]::WriteAllText($stallPs1, $stallSource)
     [System.IO.File]::WriteAllText($logStallPs1, $logStallSource)
-    $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    $res = Invoke-HermesStep $powershell @(
-        "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $childPs1,
-        "-Hold", [string]$hold, "-PidFile", $pidFile
-    ) "pipedrain"
-    $sw.Stop()
-    $elapsed = [Math]::Round($sw.Elapsed.TotalSeconds, 2)
-
+    # The leak arm measures post-exit draining, not cold PowerShell startup.
+    $savedIdle = $script:StepIdleTimeoutSeconds
+    try {
+        $script:StepIdleTimeoutSeconds = 120
+        $res = Invoke-HermesStep $powershell @(
+            "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $childPs1,
+            "-Hold", [string]$hold, "-PidFile", $pidFile
+        ) "pipedrain"
+    } finally {
+        $script:StepIdleTimeoutSeconds = $savedIdle
+    }
+    $returnedAt = [System.Diagnostics.Stopwatch]::GetTimestamp()
+    $elapsed = [double]::PositiveInfinity
     $leakPid = 0
     if (Test-Path -LiteralPath $pidFile) {
-        [void][int]::TryParse((Get-Content -LiteralPath $pidFile -Raw).Trim(), [ref]$leakPid)
+        $leakReceipt = @(Get-Content -LiteralPath $pidFile)
+        [void][int]::TryParse($leakReceipt[0].Trim(), [ref]$leakPid)
+        if ($leakReceipt.Count -eq 2) {
+            $elapsed = [Math]::Round(($returnedAt - [long]$leakReceipt[1]) / [double][System.Diagnostics.Stopwatch]::Frequency, 2)
+        }
     }
     $leakAlive = $false
     if ($leakPid -gt 0) {
@@ -1439,7 +1457,7 @@ try {
     New-Item -ItemType Directory -Path $LogDir -Force -ErrorAction SilentlyContinue | Out-Null
     Remove-Item -LiteralPath $ResultPath -Force -ErrorAction SilentlyContinue
     Show-ProgressWindow
-    Write-HandoffLog "hand-off start: root=$InstallRoot branch=$Branch desktopPid=$DesktopPid pid=$PID"
+    Write-HandoffLog "hand-off start: root=$InstallRoot branch=$Branch channel=$Channel desktopPid=$DesktopPid pid=$PID"
 
     # -- 0. Claim the update marker with OUR pid ---------------------------
     try {
@@ -1609,7 +1627,7 @@ try {
         $gatewayArg = @()
         Write-HandoffLog "update requested without --gateway (remote-served Desktop)"
     }
-    $updateArgs = @("-m", "hermes_cli.main", "update", "--yes") + $gatewayArg + @("--force", "--branch", $Branch)
+    $updateArgs = @("-m", "hermes_cli.main", "update", "--yes") + $gatewayArg + @("--force") + $targetArgs
     # --keep-stash: never re-apply local source edits after the update (they
     # stay parked in git stash). Probe --help first: the flag ships with newer
     # backends and an unknown flag would abort argparse with exit 2, which

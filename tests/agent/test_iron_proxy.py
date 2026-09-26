@@ -55,6 +55,24 @@ def test_mint_proxy_token_has_prefix_and_length():
     assert len(t) >= len("alpha-") + 32
 
 
+def test_management_token_path_is_single_authority(hermes_home):
+    """One token path: <hermes_home>/proxy/management.token, shared by mint, reuse and readers."""
+    assert ip._management_token_path() == ip._proxy_state_dir_ro() / "management.token"
+    assert not (hermes_home / "proxy").exists()
+
+    token = ip.ensure_management_token()
+    assert token
+    p = ip._management_token_path()
+    assert p.is_file()
+    assert p.read_text(encoding="utf-8-sig").strip() == token
+    # 0600-style private write: reuse without minting a second token.
+    assert ip.ensure_management_token() == token
+    # Forced rotation mints a new token at the same single path.
+    rotated = ip.ensure_management_token(force=True)
+    assert rotated != token
+    assert ip._management_token_path().read_text(encoding="utf-8-sig").strip() == rotated
+
+
 
 
 
@@ -341,6 +359,7 @@ def test_subprocess_env_strips_unrelated_secrets(hermes_home, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.platforms("linux")
 def test_ca_key_created_with_0o600(hermes_home, monkeypatch):
     """The CA private key must NEVER exist on disk with default umask
     permissions, even transiently.  Fix: open with explicit mode=0o600
@@ -376,6 +395,7 @@ def test_ca_key_created_with_0o600(hermes_home, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.platforms("linux")
 def test_ensure_audit_log_creates_with_0o600(hermes_home, tmp_path):
     audit = tmp_path / "audit.log"
     ip.ensure_audit_log(audit)
@@ -384,6 +404,7 @@ def test_ensure_audit_log_creates_with_0o600(hermes_home, tmp_path):
     assert mode == 0o600
 
 
+@pytest.mark.platforms("linux")
 def test_ensure_audit_log_tightens_existing_perms(hermes_home, tmp_path):
     audit = tmp_path / "audit.log"
     audit.write_text("preexisting content\n")
@@ -398,6 +419,7 @@ def test_ensure_audit_log_tightens_existing_perms(hermes_home, tmp_path):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.platforms("linux")
 def test_proxy_state_dir_is_0o700(hermes_home):
     state = ip._proxy_state_dir()
     mode = state.stat().st_mode & 0o777
@@ -485,6 +507,7 @@ def test_mappings_roundtrip_preserves_headers_and_aliases(hermes_home):
 
 
 
+@pytest.mark.platforms("linux")
 def test_ensure_management_token_persists_and_is_stable(hermes_home):
     t1 = ip.ensure_management_token()
     t2 = ip.ensure_management_token()
@@ -539,6 +562,7 @@ def test_reload_proxy_posts_bearer_to_management_endpoint(hermes_home, monkeypat
     assert captured["auth"] == f"Bearer {token}"
 
 
+@pytest.mark.platforms("linux")
 def test_start_proxy_injects_management_key_env(hermes_home, monkeypatch):
     """When the generated config has a management listener, start_proxy
     must inject the bearer key env var — v0.39 refuses to start when

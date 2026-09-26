@@ -280,8 +280,10 @@ def _verify_checksums_signature(tmp: Path, checksum_path: Path) -> bool:
 
 
 def _expected_sha256(checksum_file: Path, asset_name: str) -> str:
-    """Parse ``sha256sum`` output (``<hex>  <filename>``)."""
-    for line in checksum_file.read_text(encoding="utf-8", errors="replace").splitlines():
+    """Parse the standard ``sha256sum`` output: ``<hex>  <filename>``."""
+
+    text = checksum_file.read_text(encoding="utf-8-sig", errors="replace")
+    for line in text.splitlines():
         parts = line.strip().split()
         if len(parts) >= 2 and parts[-1] == asset_name:
             return parts[0]
@@ -382,14 +384,27 @@ def mint_proxy_token(prefix: str = "hermes-proxy") -> str:
 def _read_text_or_none(p: Path) -> Optional[str]:
     """Stripped file contents, or None when missing/unreadable/empty."""
     try:
-        return p.read_text(encoding="utf-8").strip() or None
+        return p.read_text(encoding="utf-8-sig").strip() or None
     except OSError:
         return None
 
 
+def _management_token_path() -> Path:
+    """Management-token location; resolving it never creates or changes state."""
+    return _proxy_state_dir_ro() / "management.token"
+
+
 def ensure_management_token(*, force: bool = False) -> str:
-    """Return the management-API bearer key (0600 at <proxy>/management.token), minting on first call."""
-    p = _proxy_state_dir() / "management.token"
+    """Return the management-API bearer key, minting it on first call.
+
+    Stored at the path from :func:`_management_token_path` with 0600 perms.
+    The daemon receives it via the ``HERMES_IRON_PROXY_MGMT_KEY`` env var
+    (named in the generated config's ``management.api_key_env``);
+    ``hermes egress reload`` reads the same file to authenticate.
+    """
+
+    _proxy_state_dir()
+    p = _management_token_path()
     if not force and (existing := _read_text_or_none(p)):
         return existing
     token = mint_proxy_token(prefix="hermes-mgmt")
@@ -398,9 +413,10 @@ def ensure_management_token(*, force: bool = False) -> str:
 
 
 def _yaml():
-    """PyYAML module or None (it is a Hermes dep, but never a hard requirement here)."""
+    """Shared YAML helpers or None (not a hard requirement for proxy discovery)."""
+
     try:
-        import yaml
+        import hermes_yaml as yaml
         return yaml
     except ImportError:
         return None
@@ -408,6 +424,7 @@ def _yaml():
 
 def _parse_listen(listen) -> Optional[Tuple[str, int]]:
     """``"host:port"`` -> ``(host, port)``; empty host means loopback."""
+
     if not isinstance(listen, str) or ":" not in listen:
         return None
     host, _, port_s = listen.rpartition(":")
@@ -419,11 +436,11 @@ def _parse_listen(listen) -> Optional[Tuple[str, int]]:
 
 
 def _config_listen(section: str, *keys: str, config_path: Optional[Path] = None) -> Optional[Tuple[str, int]]:
-    """``(host, port)`` from the first truthy ``proxy.yaml[section][key]``, or None (also when file/PyYAML is missing)."""
+    """``(host, port)`` from the first truthy ``proxy.yaml[section][key]``, or None (also when file/ruamel.yaml is missing)."""
     yaml, data = _yaml(), {}
     if yaml is not None:
         with suppress(OSError, yaml.YAMLError):
-            data = yaml.safe_load((config_path or (_proxy_state_dir_ro() / "proxy.yaml")).read_text(encoding="utf-8")) or {}
+            data = yaml.safe_load((config_path or (_proxy_state_dir_ro() / "proxy.yaml")).read_text(encoding="utf-8-sig")) or {}
     block = data.get(section) or {}
     return _parse_listen(next((block[k] for k in keys if block.get(k)), ""))
 
@@ -453,7 +470,7 @@ def reload_proxy() -> bool:
         raise RuntimeError(
             "The generated proxy.yaml has no management listener (written before reload support).  Re-run `hermes egress setup` and use `hermes egress restart` this one time."
         )
-    if not (token := _read_text_or_none(_proxy_state_dir_ro() / "management.token")):
+    if not (token := _read_text_or_none(_management_token_path())):
         raise RuntimeError("management.token is missing — re-run `hermes egress setup`, then `hermes egress restart`.")
     host, port = mgmt
     req = urllib.request.Request(f"http://{host}:{port}/v1/reload", method="POST", headers={"Authorization": f"Bearer {token}"}, data=b"")
@@ -584,10 +601,8 @@ def write_proxy_config(config: Dict) -> Path:
 
     The file holds proxy tokens: written 0600 from creation, never at process umask."""
     if (yaml := _yaml()) is None:
-        raise RuntimeError("PyYAML is required to write the iron-proxy config but is not installed.")
-    path = _proxy_state_dir() / "proxy.yaml"
-    atomic_write_text(path, yaml.safe_dump(config, default_flow_style=False, sort_keys=False), mode=0o600)
-    return path
+        raise RuntimeError("ruamel.yaml is required to write the iron-proxy config but is not installed.")
+    return _write_state_file_atomic(_proxy_state_dir(), "proxy.yaml", lambda f: yaml.safe_dump(config, f, default_flow_style=False, sort_keys=False))
 
 
 def write_mappings(mappings: List[TokenMapping]) -> Path:
@@ -606,7 +621,7 @@ def load_mappings() -> List[TokenMapping]:
     if not (f := _proxy_state_dir() / "mappings.json").exists():
         return []
     try:
-        payload = json.loads(f.read_text(encoding="utf-8"))
+        payload = json.loads(f.read_text(encoding="utf-8-sig"))
     except (OSError, json.JSONDecodeError) as exc:
         logger.warning("Failed to read iron-proxy mappings.json: %s", exc)
         return []
@@ -652,8 +667,9 @@ def _pidfile() -> Path:
 
 def _read_pid() -> Optional[int]:
     try:
-        pid = int(_read_text_or_none(_proxy_state_dir_ro() / "iron-proxy.pid") or "")
-    except ValueError:
+        pid = int((_proxy_state_dir_ro() / "iron-proxy.pid").read_text(encoding="utf-8-sig", errors="replace").strip())
+    except (OSError, ValueError):
+
         return None
     return pid if pid > 0 else None
 
@@ -661,7 +677,7 @@ def _read_pid() -> Optional[int]:
 def _pid_proc_starttime(pid: int) -> Optional[str]:
     """/proc/<pid>/stat starttime (field 22) on Linux, else None — cheap PID-recycling detector."""
     try:
-        text = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+        text = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8-sig")
     except OSError:
         return None
     # comm may contain spaces/parens, so split after the LAST ")"; field 22 -> tail index 19.

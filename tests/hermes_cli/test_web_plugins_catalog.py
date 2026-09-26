@@ -1,12 +1,12 @@
 """Dashboard plugin-catalog surface: GET /api/dashboard/plugins/catalog merges installed state (via the
-install-metadata ``catalog`` record) and the install endpoint has NO kill-list bypass."""
+shared install record) and the install endpoint has NO kill-list bypass."""
 
 from __future__ import annotations
 
 import json
 
 import pytest
-import yaml
+import hermes_yaml as yaml
 
 from hermes_cli import plugin_catalog as pc_cat
 
@@ -50,10 +50,10 @@ def _install(name: str, sidecar: dict | None):
     d.mkdir(parents=True)
     (d / "plugin.yaml").write_text(yaml.safe_dump({"name": name, "version": "1.0", "description": "x"}))
     if sidecar:
-        block = {"name": sidecar["catalog_name"], "sha": sidecar["sha"], "tier": sidecar.get("tier", "community")}
-        _write_install_metadata({**_read_install_metadata(), name: {
-            "pinned": True, "revision": sidecar["sha"], "source": "https://github.com/example/alpha-plugin.git",
-            "catalog": block}})
+        (d.parent / ".install-metadata.json").write_text(json.dumps({name: {
+            "catalog_name": sidecar["catalog_name"], "revision": sidecar["sha"],
+            "catalog_tier": sidecar["tier"], "source": "https://github.com/example/alpha-plugin",
+        }}), encoding="utf-8")
 
 
 def test_catalog_endpoint_merges_installed_state_from_sidecar(client):

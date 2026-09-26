@@ -35,6 +35,11 @@ _BROWSER_PASSTHROUGH_KEYS: tuple[str, ...] = (
 )
 
 
+def warm_agent_browser_npx_cache(timeout: float = 60.0) -> bool:
+    # Shim to stop the old updater doing work until relaunch. Nothing was warmed.
+    return False
+
+
 def _build_browser_env() -> dict:
     """Credential-scrubbed env for an agent-browser subprocess (deferred import: test
     harnesses stub the ``tools`` package). The passthrough keys are re-added from the active
@@ -104,12 +109,17 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-# PATH fallbacks for minimal-PATH environments (systemd services): Termux,
-# macOS Homebrew, and the usual system dirs — needed for agent-browser/npx/node.
+# Standard PATH entries for environments with minimal PATH (e.g. systemd services).
+# Includes macOS Homebrew locations needed for agent-browser, npx, and node.
 _SANE_PATH_DIRS = (
-    "/data/data/com.termux/files/usr/bin", "/data/data/com.termux/files/usr/sbin",
-    "/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/sbin", "/usr/local/bin",
-    "/usr/sbin", "/usr/bin", "/sbin", "/bin",
+    "/opt/homebrew/bin",
+    "/opt/homebrew/sbin",
+    "/usr/local/sbin",
+    "/usr/local/bin",
+    "/usr/sbin",
+    "/usr/bin",
+    "/sbin",
+    "/bin",
 )
 _SANE_PATH = os.pathsep.join(_SANE_PATH_DIRS)
 

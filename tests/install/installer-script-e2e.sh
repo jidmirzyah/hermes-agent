@@ -40,6 +40,9 @@
 #                                       drives it) and click Update now
 #   --install-ref    what to install first; anything git resolves. Default:
 #                    the newest release tag in the checkout.
+#   --update-ref     what to update TO. Default: HEAD. Pass the next release
+#                    tag for a stable-to-stable leg; only label the leg
+#                    stable-to-stable when BOTH refs are release tags.
 #
 # Requires a clean full-history checkout with release tags fetched.
 
@@ -53,6 +56,7 @@ export TS_BASE=$SECONDS
 INSTALL_METHOD="installer-script"
 UPDATE_METHOD=""
 INSTALL_REF=""
+UPDATE_REF=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --install-method)
@@ -64,6 +68,9 @@ while [ "$#" -gt 0 ]; do
     --install-ref)
       [ "$#" -ge 2 ] || { echo 'error: --install-ref needs a value' >&2; exit 1; }
       INSTALL_REF="$2"; shift 2 ;;
+    --update-ref)
+      [ "$#" -ge 2 ] || { echo 'error: --update-ref needs a value' >&2; exit 1; }
+      UPDATE_REF="$2"; shift 2 ;;
     -h|--help) sed -n '2,45p' "$0"; exit 0 ;;
     *) echo "error: unknown argument: $1" >&2; exit 1 ;;
   esac
@@ -92,6 +99,8 @@ ok()   { printf '  OK %s\n' "$*"; }
 fail() { printf 'E2E ASSERTION FAILED: %s\n' "$*" >&2; exit 1; }
 # shellcheck source=../e2e-assets/ts-prefix.sh
 source "$(dirname "$0")/e2e-assets/ts-prefix.sh" 2>/dev/null || ts_prefix() { cat; }
+# shellcheck source=../e2e-assets/preserve-plugins.sh
+source "$(dirname "$0")/e2e-assets/preserve-plugins.sh"
 # Full transcript in the job log, collapsed (GitHub renders ::group:: as a
 # fold; plain text anywhere else). Win or lose -- a green install's log is
 # how you diagnose the leg that fails next.
@@ -120,7 +129,17 @@ if [ -z "$INSTALL_REF" ]; then
 fi
 OLD_SHA="$(git -C "$REPO_ROOT" rev-parse "${INSTALL_REF}^{commit}")"
 HEAD_SHA="$(git -C "$REPO_ROOT" rev-parse HEAD)"
-[ "$OLD_SHA" != "$HEAD_SHA" ] || fail "OLD ($INSTALL_REF) IS HEAD; no update would be available"
+
+# The update target defaults to HEAD; --update-ref selects any other ref so
+# a stable-to-stable leg can target the next release tag instead of the tip.
+# Only call this leg stable-to-stable when BOTH refs are release tags.
+TARGET_LABEL="HEAD"
+TARGET_SHA="$HEAD_SHA"
+if [ -n "$UPDATE_REF" ]; then
+  TARGET_SHA="$(git -C "$REPO_ROOT" rev-parse "${UPDATE_REF}^{commit}")"
+  TARGET_LABEL="$UPDATE_REF"
+fi
+[ "$OLD_SHA" != "$TARGET_SHA" ] || fail "OLD ($INSTALL_REF) IS the update target ($TARGET_LABEL); no update would be available"
 
 git clone --bare --quiet "$REPO_ROOT" "$SERVE_REPO"
 git -C "$SERVE_REPO" update-ref refs/heads/main "$OLD_SHA"
@@ -322,12 +341,13 @@ else
   assert_checkout "$OLD_SHA" OLD
 fi
 smoke_desktop old
+preserve_before_upgrade
 
 # --- update OLD -> HEAD ----------------------------------------------------------
 
-step "advancing served main to HEAD"
-git -C "$SERVE_REPO" update-ref refs/heads/main "$HEAD_SHA"
-ok "serve.git main = $HEAD_SHA"
+step "advancing served main to $TARGET_LABEL ($TARGET_SHA)"
+git -C "$SERVE_REPO" update-ref refs/heads/main "$TARGET_SHA"
+ok "serve.git main = $TARGET_SHA"
 
 step "updating via $UPDATE_METHOD"
 case "$UPDATE_METHOD" in
@@ -348,11 +368,11 @@ case "$UPDATE_METHOD" in
     ;;
   installer-script)
     # A user re-running the one-liner today gets the CURRENT script.
-    run_installer "$HEAD_SHA" head
+    run_installer "$TARGET_SHA" "$TARGET_LABEL"
     ;;
   installer-script+desktop)
-    run_installer "$HEAD_SHA" head desktop
-    assert_desktop_artifact HEAD
+    run_installer "$TARGET_SHA" "$TARGET_LABEL" desktop
+    assert_desktop_artifact "$TARGET_LABEL"
     ;;
   hermes-desktop-app-update)
     # The real user surface: `hermes desktop` launches the app, the user
@@ -402,7 +422,7 @@ case "$UPDATE_METHOD" in
     (cd "$PW_DIR" && node launch-from-spec.mjs \
       --spec "$SPEC" \
       --result "$HERMES_HOME/.hermes-update-result.json" \
-      --expect-sha "$HEAD_SHA" \
+      --expect-sha "$TARGET_SHA" \
       --repo-dir "$INSTALL_DIR" 2>&1 \
       | ts_prefix > "$LOG_DIR/app-update.log") || rc=$?
     log_group "app update (Playwright) transcript" "$LOG_DIR/app-update.log"
@@ -482,7 +502,9 @@ ls -la "$HERMES_HOME" > "$ildest/hermes-home-ls.txt" 2>/dev/null || true
 ls -la "$INSTALL_DIR/venv/bin" > "$ildest/venv-bin-ls.txt" 2>/dev/null || true
 ok "collected install-side logs to $ildest"
 
-assert_checkout "$HEAD_SHA" HEAD
-smoke_desktop head
+assert_checkout "$TARGET_SHA" "$TARGET_LABEL"
+smoke_desktop "$TARGET_LABEL"
 
-step "PASS: $INSTALL_REF -> HEAD via $UPDATE_METHOD"
+preserve_after_upgrade
+
+step "PASS: $INSTALL_REF -> $TARGET_LABEL via $UPDATE_METHOD"

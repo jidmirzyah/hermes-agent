@@ -4,13 +4,10 @@ from __future__ import annotations
 
 import copy
 import logging
-import os
 import ssl
-import sys
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Iterable
-from pathlib import Path
 from typing import Any
 
 from utils import file_signature
@@ -21,7 +18,6 @@ logger = logging.getLogger(__name__)
 # custom provider headers routinely carry credentials under arbitrary names.
 _CROSS_ORIGIN_SAFE_HEADERS = frozenset({"accept", "user-agent"})
 _DEFAULT_PORTS = {"http": 80, "https": 443}
-_CA_BUNDLE_ENV_VARS = ("HERMES_CA_BUNDLE", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE")
 
 
 def url_origin(url: str) -> tuple[str, str, int | None]:
@@ -176,9 +172,11 @@ def _build_https_context(candidates: tuple[str, ...]) -> tuple[ssl.SSLContext | 
 def _secure_opener_from_installed_policy(original_url: str, *, ssl_context=None):
     """Clone the installed opener's handlers, replacing redirect policy only.
 
-    ``ssl_context`` rebinds the cloned HTTPS handler so per-provider TLS settings
-    (``ssl_ca_cert``/``ssl_verify``) apply; with None a Hermes-owned opener gets the explicit CA
-    default from ``_resolved_https_context`` and an application-installed opener keeps its TLS.
+    When ``ssl_context`` is provided, the cloned HTTPS handler is replaced with
+    one bound to that context so per-provider TLS settings (``ssl_ca_cert`` /
+    ``ssl_verify``) apply to this request. When it is None, Hermes-owned
+    openers verify against the OS trust store; an application-installed
+    opener's TLS policy is preserved unchanged.
     """
     installed = getattr(urllib.request, "_opener", None)
     if installed is None:
@@ -214,9 +212,16 @@ def open_credentialed_url(
 ):
     """Open a request without forwarding credentials across origins.
 
-    Preserves an application-installed opener's proxy/TLS/cookies/handlers while replacing its
-    redirect handler. ``opener_factory`` is an explicit test seam (security is never disabled
-    based on global ``urlopen`` identity); ``ssl_context`` overrides TLS for this request only.
+    The default preserves an application-installed opener's proxy, TLS,
+    cookies, custom protocol handlers, and instrumentation while replacing its
+    redirect handler. ``opener_factory`` is an explicit test seam; security is
+    never disabled based on global ``urlopen`` identity.
+
+    ``ssl_context`` (an ``ssl.SSLContext``) overrides the HTTPS handler's TLS
+    policy for this request only. It is used to honor a custom provider's
+    ``ssl_ca_cert`` / ``ssl_verify`` on the ``/models`` discovery path, which
+    otherwise falls back to the process-wide platform trust store
+    (``agent.ssl_verify.install_truststore``).
     """
     if opener_factory is None:
         opener = _secure_opener_from_installed_policy(request.full_url, ssl_context=ssl_context)

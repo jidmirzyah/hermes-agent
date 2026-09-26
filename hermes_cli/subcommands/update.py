@@ -96,4 +96,38 @@ def build_update_parser(subparsers, *, cmd_update: Callable) -> None:
         # Internal: the pre-pull interpreter re-executes itself here after the code swap so the
         # rest of the update runs on the pulled code (hermes_cli/update_handoff.py).
     )
+    update_parser.add_argument(
+        "--set-channel",
+        default=None,
+        choices=("main", "stable", "canary"),
+        metavar="CHANNEL",
+        help=(
+            "Persist the update channel for THIS install (recorded per "
+            "install in config.yaml under update.installs). 'stable' tracks "
+            "published stable releases, 'main' the git main branch, and "
+            "'canary' published canary prereleases. Source installs check out "
+            "the selected release's exact commit. Package channels are baked "
+            "into their separate stable/canary identities and cannot be changed."
+        ),
+    )
+    update_parser.add_argument(
+        "--install-id",
+        action="store_true",
+        default=False,
+        help=(
+            "Print this install's id and path (the id keys its per-install "
+            "channel record in config.yaml) and exit."
+        ),
+    )
+    update_parser.add_argument(
+        "--channel",
+        default=None,
+        choices=("stable", "main", "canary"),
+        metavar="CHANNEL",
+        help=(
+            "Track CHANNEL for this run only (transient override; "
+            "--set-channel persists). 'stable' and 'canary' select published "
+            "releases, 'main' the branch tip. Source installs only."
+        ),
+    )
     update_parser.set_defaults(func=cmd_update)

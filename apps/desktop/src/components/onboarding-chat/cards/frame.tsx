@@ -53,7 +53,7 @@ export function CardFrame({
   onContinue
 }: {
   children: React.ReactNode
-  /** The action, named for what it does when the default label says nothing specific.
+  /** The action, named for what it does when the default reads as a shrug —
    *  "Continue with 2" tells them the picks registered. */
   continueLabel?: string
   disabled?: boolean

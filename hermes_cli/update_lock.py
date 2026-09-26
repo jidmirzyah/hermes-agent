@@ -121,7 +121,7 @@ def read_live_update(*, path: Path | None = None) -> UpdateHolder | None:
     """
     marker = path or update_marker_path()
     try:
-        lines = marker.read_text(encoding="utf-8").splitlines()
+        lines = marker.read_text(encoding="utf-8-sig").splitlines()
     except OSError:
         return None
     try:
@@ -199,7 +199,7 @@ class UpdateLock:
             return
         self.acquired = False
         try:
-            owner = int(self.path.read_text(encoding="utf-8").splitlines()[0].strip())
+            owner = int(self.path.read_text(encoding="utf-8-sig").splitlines()[0].strip())
         except (OSError, IndexError, ValueError):
             return
         if owner != os.getpid():

@@ -1,350 +1,201 @@
-import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { setApiRequestConnection, setApiRequestProfile } from '@/api/client'
-import { $activeGatewayRoute } from '@/store/gateway'
-import { $localModelsEnabled } from '@/store/local-models-flag'
-import { $connection } from '@/store/session'
 import type { LocalRuntimeJob } from '@/types/hermes'
 
-import {
-  $localRuntimeInstallStarting,
-  $localRuntimeJobs,
-  startLocalRuntimeInstall,
-  watchLocalRuntimeJobs
-} from './local-runtime-jobs'
+// The BACKEND is the authority: a staged registry the poll reads from, so
+// transitions arrive the way production sees them — via a poll response,
+// never by mutating the cache directly.
+const backend = vi.hoisted(() => ({ jobs: [] as LocalRuntimeJob[] }))
 
-const notices = vi.hoisted(() => ({ notify: vi.fn(), notifyError: vi.fn() }))
-vi.mock('@/store/notifications', () => notices)
-const api = vi.fn()
+vi.mock('@/hermes', () => ({
+  getLocalModelsJobs: vi.fn(async () => ({ jobs: backend.jobs })),
+  getLocalModelsStatus: vi.fn(async () => ({ enabled: true, update_available: false }))
+}))
 
-const job: LocalRuntimeJob = {
-  job_id: 'install',
-  kind: 'runtime-install',
-  target: 'target',
-  model_id: null,
-  status: 'running',
-  phase: 'download',
-  detail: 'Real download',
-  total_bytes: 100,
-  done_bytes: 25,
-  percent: 25,
-  error: null
+vi.mock('@/i18n', () => ({
+  translateNow: (key: string, ...args: unknown[]) => (args.length ? `${key}:${args.join(',')}` : key)
+}))
+
+vi.mock('@/store/notifications', () => ({
+  notify: vi.fn(),
+  notifyError: vi.fn()
+}))
+
+const { $localRuntimeJobs, watchLocalRuntimeJobs } = await import('./local-runtime-jobs')
+const { getLocalModelsJobs } = await import('@/hermes')
+const { notify, notifyError } = await import('@/store/notifications')
+
+function job(overrides: Partial<LocalRuntimeJob>): LocalRuntimeJob {
+  return {
+    detail: '',
+    done_bytes: 0,
+    error: null,
+    job_id: 'j1',
+    kind: 'model-download',
+    model_id: 'm1',
+    phase: 'downloading',
+    status: 'running',
+    target: 'Qwen3.6 27B',
+    total_bytes: 100,
+    ...overrides
+  }
 }
 
-function deferred<T>() {
-  let resolve!: (value: T) => void
-  let reject!: (error: Error) => void
+beforeEach(() => {
+  vi.clearAllMocks()
+  backend.jobs = []
+  $localRuntimeJobs.set([])
+})
 
-  const promise = new Promise<T>((done, fail) => {
-    resolve = done
-    reject = fail
+afterEach(async () => {
+  backend.jobs = []
+  watchLocalRuntimeJobs()
+  await vi.waitFor(() => expect($localRuntimeJobs.get()).toEqual([]))
+})
+
+const settle = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
+
+// Drive the poller: each advance lets the pending tick fire, the fetch read
+// the staged backend snapshot, and the next tick re-arm.
+// Stage-then-poll: the kick starts the loop AND the loop only re-arms while
+// work is active, so each tick re-kicks (idempotent) then waits for the
+// fetch to land the staged snapshot.
+async function pollTick() {
+  watchLocalRuntimeJobs()
+  await settle(150)
+  await new Promise(resolve => setTimeout(resolve, 0))
+}
+
+describe('local runtime jobs store — pause/settle contract', () => {
+  it('running→paused settles NOTHING: no error toast, job stays visible', async () => {
+    backend.jobs = [job({ done_bytes: 40 })]
+    await pollTick()
+    expect($localRuntimeJobs.get()[0]?.status).toBe('running')
+
+    // Backend pauses the job (status='paused', error=null).
+    backend.jobs = [job({ done_bytes: 40, status: 'paused' })]
+    await pollTick()
+    await pollTick()
+
+    expect(notifyError).not.toHaveBeenCalled()
+    expect(notify).not.toHaveBeenCalled()
+
+    const snapshot = $localRuntimeJobs.get()
+    expect(snapshot).toHaveLength(1)
+    expect(snapshot[0]?.status).toBe('paused')
   })
 
-  return { promise, resolve, reject }
-}
+  it('a paused job that resumes and finishes notifies done exactly once (paused→done still notifies)', async () => {
+    backend.jobs = [job({ done_bytes: 40 })]
+    await pollTick()
 
-async function flush() {
-  for (let i = 0; i < 12; i++) {
-    await Promise.resolve()
-  }
-}
+    backend.jobs = [job({ done_bytes: 40, status: 'paused' })]
+    await pollTick()
 
-let contextNumber = 0
-const posts = () => api.mock.calls.filter(([request]) => request.method === 'POST')
-beforeEach(() => {
-  vi.useFakeTimers()
-  vi.clearAllMocks()
-  api.mockReset()
-  setApiRequestConnection(null)
-  $localModelsEnabled.set(true)
-  $connection.set({ mode: 'local', baseUrl: `http://test-${++contextNumber}` } as never)
-  setApiRequestProfile('default')
-  $activeGatewayRoute.set('default')
-  $localRuntimeJobs.set([])
-  window.hermesDesktop = { api } as never
-})
-afterEach(async () => {
-  api.mockResolvedValue({ jobs: [] })
-  await vi.advanceTimersByTimeAsync(700)
-  $connection.set(null)
-  vi.clearAllTimers()
-  vi.useRealTimers()
-})
-it.each(['connection', 'profile'])('retains late install acceptance after a %s round trip', async context => {
-  const post = deferred<{ job_id: string }>()
-  api.mockImplementation(request => (request.method === 'POST' ? post.promise : Promise.resolve({ jobs: [job] })))
-  const first = startLocalRuntimeInstall()
-  const original = $connection.get()
+    backend.jobs = [job({ done_bytes: 60 })]
+    await pollTick()
 
-  if (context === 'connection') {
-    $connection.set({ mode: 'remote' } as never)
-    $connection.set(original)
-  } else {
-    $activeGatewayRoute.set('other')
-    $activeGatewayRoute.set('default')
-  }
+    backend.jobs = [job({ done_bytes: 100, percent: 100, status: 'done', total_bytes: 100 })]
+    await pollTick()
 
-  void startLocalRuntimeInstall()
-  expect(posts()).toHaveLength(1)
-  post.resolve({ job_id: 'install' })
-  await first
-  expect(posts()).toHaveLength(1)
-  expect($localRuntimeJobs.get()).toEqual([job])
-  expect($localRuntimeInstallStarting.get()).toBe(false)
-})
-it.each(['connection', 'profile'])('ignores late job completion and notifications after a %s switch', async context => {
-  api.mockResolvedValue({ jobs: [job] })
-  watchLocalRuntimeJobs()
-  await flush()
-  const read = deferred<{ jobs: LocalRuntimeJob[] }>()
-  api.mockReturnValue(read.promise)
-  await vi.advanceTimersByTimeAsync(700)
+    expect(notify).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(notify).mock.calls[0][0]).toMatchObject({ kind: 'success' })
+    expect(notifyError).not.toHaveBeenCalled()
+  })
 
-  if (context === 'connection') {
-    $connection.set({ mode: 'remote' } as never)
-  } else {
-    $activeGatewayRoute.set('other')
-  }
+  it('running→error still toasts exactly once', async () => {
+    backend.jobs = [job({ done_bytes: 10, job_id: 'j-err' })]
+    await pollTick()
 
-  read.resolve({ jobs: [{ ...job, status: 'done' }] })
-  await flush()
-  expect($localRuntimeJobs.get()).toEqual([])
-  expect(notices.notify).not.toHaveBeenCalled()
-  expect(notices.notifyError).not.toHaveBeenCalled()
-  expect(vi.getTimerCount()).toBe(0)
-})
-it('does not let an old POST failure clear a new context start or notify it', async () => {
-  const old = deferred<{ job_id: string }>()
-  const current = deferred<{ job_id: string }>()
-  api.mockReturnValueOnce(old.promise).mockReturnValueOnce(current.promise).mockResolvedValue({ jobs: [] })
-  const first = startLocalRuntimeInstall()
-  $activeGatewayRoute.set('other')
-  const second = startLocalRuntimeInstall()
-  old.reject(new Error('old connection failed'))
-  await first
-  const stillStarting = $localRuntimeInstallStarting.get()
-  current.resolve({ job_id: 'new' })
-  await second
-  expect(stillStarting).toBe(true)
-  expect(notices.notifyError).not.toHaveBeenCalled()
-  expect(posts()).toHaveLength(2)
-})
-it.each(['connection', 'profile'])(
-  'resumes accepted work on a %s round trip before permitting another install',
-  async context => {
-    api.mockImplementation(request =>
-      Promise.resolve(request.method === 'POST' ? { job_id: job.job_id } : { jobs: [job] })
-    )
-    await startLocalRuntimeInstall()
-    const original = $connection.get()
+    backend.jobs = [job({ done_bytes: 10, error: 'disk full', job_id: 'j-err', status: 'error' })]
+    await pollTick()
 
-    if (context === 'profile') {
-      $activeGatewayRoute.set('other')
-      setApiRequestProfile('other')
-    } else {
-      $connection.set({ mode: 'remote', baseUrl: 'http://other' } as never)
-    }
+    expect(notifyError).toHaveBeenCalledTimes(1)
+    expect(notify).not.toHaveBeenCalled()
+  })
 
-    const readsBefore = api.mock.calls.length
-    await vi.advanceTimersByTimeAsync(1400)
-    expect(api.mock.calls).toHaveLength(readsBefore)
-    expect($localRuntimeJobs.get()).toEqual([])
-    const discovery = deferred<{ jobs: LocalRuntimeJob[] }>()
-    api.mockReturnValue(discovery.promise)
+  it('keeps polling while a job is paused (a resume from another surface is witnessed)', async () => {
+    backend.jobs = [job({ status: 'paused' })]
+    await pollTick()
 
-    if (context === 'profile') {
-      $activeGatewayRoute.set('default')
-    } else {
-      $connection.set({ ...original } as never)
-    }
+    const callsAfterPause = vi.mocked(getLocalModelsJobs).mock.calls.length
+    expect(callsAfterPause).toBeGreaterThan(0)
 
-    setApiRequestProfile('default')
-    void startLocalRuntimeInstall()
-    await flush()
-    expect(posts()).toHaveLength(1)
-    expect(api.mock.calls).toHaveLength(readsBefore + 1)
-    expect(api.mock.calls.at(-1)?.[0].profile).toBe('default')
-    expect($localRuntimeInstallStarting.get()).toBe(true)
-    discovery.resolve({ jobs: [{ ...job, status: 'done' }] })
-    await flush()
-    expect($localRuntimeJobs.get()[0].status).toBe('done')
-    expect(notices.notify).toHaveBeenCalledTimes(1)
-    await startLocalRuntimeInstall()
-    expect(posts()).toHaveLength(2)
-  }
-)
-it.each(['error', 'done'] as const)(
-  'notifies an accepted early %s exactly once after a polling outage, not history',
-  async status => {
-    const terminal = { ...job, job_id: 'accepted-id', status, error: status === 'error' ? 'download failed' : null }
-    const jobs = [{ ...terminal, job_id: 'unrelated-history' }, terminal]
-    api
-      .mockResolvedValueOnce({ job_id: 'accepted-id' })
-      .mockRejectedValueOnce(new Error('offline'))
-      .mockResolvedValue({ jobs })
-    await startLocalRuntimeInstall()
-    expect($localRuntimeInstallStarting.get()).toBe(true)
-    $activeGatewayRoute.set('other')
-    setApiRequestProfile('other')
-    await vi.advanceTimersByTimeAsync(1400)
-    expect(api).toHaveBeenCalledTimes(2)
-    $activeGatewayRoute.set('default')
-    setApiRequestProfile('default')
-    await flush()
-    expect($localRuntimeInstallStarting.get()).toBe(false)
-    const expected = status === 'error' ? notices.notifyError : notices.notify
-    expect(expected).toHaveBeenCalledTimes(1)
-    expect(status === 'error' ? notices.notify : notices.notifyError).not.toHaveBeenCalled()
+    // The paused cadence is slower (3s), not dead: wait past it and the
+    // poll fires again WITHOUT any new kick.
+    await settle(3_400)
+
+    expect(vi.mocked(getLocalModelsJobs).mock.calls.length).toBeGreaterThan(callsAfterPause)
+
+    // And a backend-side resume IS picked up with no local kick at all.
+    backend.jobs = [job({ done_bytes: 90 })]
+    await pollTick()
+    expect($localRuntimeJobs.get()[0]?.status).toBe('running')
+  })
+
+  it('coalesces refresh requests while one backend read is in flight', async () => {
+    let release: (value: { jobs: LocalRuntimeJob[] }) => void = () => {}
+
+    const pending = new Promise<{ jobs: LocalRuntimeJob[] }>(resolve => {
+      release = resolve
+    })
+
+    vi.mocked(getLocalModelsJobs).mockReturnValueOnce(pending)
     watchLocalRuntimeJobs()
-    await flush()
-    $activeGatewayRoute.set('other')
-    $activeGatewayRoute.set('default')
     watchLocalRuntimeJobs()
-    await flush()
-    expect(expected).toHaveBeenCalledTimes(1)
-  }
-)
-it('notifies accepted failure even when a pane read saw it before the POST response', async () => {
-  const post = deferred<{ job_id: string }>()
-  const failed = { ...job, job_id: 'fast-failure', status: 'error' as const, error: 'download failed' }
-  api.mockImplementation(request => (request.method === 'POST' ? post.promise : Promise.resolve({ jobs: [failed] })))
-  const starting = startLocalRuntimeInstall()
-  watchLocalRuntimeJobs()
-  await flush()
-  expect(notices.notifyError).not.toHaveBeenCalled()
-  post.resolve({ job_id: failed.job_id })
-  await starting
-  expect(notices.notifyError).toHaveBeenCalledTimes(1)
-  watchLocalRuntimeJobs()
-  await flush()
-  expect(notices.notifyError).toHaveBeenCalledTimes(1)
-})
-it('isolates registry sources with the same profile and defers reads until activation settles', async () => {
-  const original = $connection.get()
-  setApiRequestConnection('source-a')
-  $connection.set({ ...original, connectionId: 'source-a' } as never)
-  api.mockImplementation(request =>
-    Promise.resolve(request.method === 'POST' ? { job_id: job.job_id } : { jobs: [job] })
-  )
-  await startLocalRuntimeInstall()
-  setApiRequestConnection('source-b')
-  $connection.set({ ...original, connectionId: 'source-b' } as never)
-  await flush()
-  expect($localRuntimeJobs.get()).toEqual([])
-  expect(api).toHaveBeenCalledTimes(2)
-  setApiRequestProfile('other')
-  setApiRequestConnection('source-a')
-  $connection.set({ ...original, connectionId: 'source-a' } as never)
-  // The REST tag is assigned by the activation callback AFTER the atoms.
-  expect(api).toHaveBeenCalledTimes(2)
-  setApiRequestProfile('default')
-  await flush()
-  expect(api.mock.calls.at(-1)?.[0]).toMatchObject({ connectionId: 'source-a', profile: 'default' })
-  expect($localRuntimeJobs.get()).toEqual([job])
-  await startLocalRuntimeInstall()
-  expect(posts()).toHaveLength(1)
-})
-it('does not discover unused contexts or automatically resume with the launch flag off', async () => {
-  $activeGatewayRoute.set('unused')
-  $activeGatewayRoute.set('default')
-  await flush()
-  expect(api).not.toHaveBeenCalled()
-  api.mockImplementation(request =>
-    Promise.resolve(request.method === 'POST' ? { job_id: job.job_id } : { jobs: [job] })
-  )
-  await startLocalRuntimeInstall()
-  $localModelsEnabled.set(false)
-  $activeGatewayRoute.set('other')
-  $activeGatewayRoute.set('default')
-  await flush()
-  await vi.advanceTimersByTimeAsync(1400)
-  expect(api).toHaveBeenCalledTimes(2)
-})
-it.each(['connection', 'profile'])('reports a POST failure after returning to its owning %s', async context => {
-  const post = deferred<{ job_id: string }>()
-  api.mockReturnValue(post.promise)
-  const starting = startLocalRuntimeInstall()
-  const original = $connection.get()
+    watchLocalRuntimeJobs()
+    expect(getLocalModelsJobs).toHaveBeenCalledTimes(1)
+    backend.jobs = [job({ done_bytes: 40 })]
+    release({ jobs: [] })
+    await vi.waitFor(() => expect(getLocalModelsJobs).toHaveBeenCalledTimes(2))
+    expect($localRuntimeJobs.get()[0]?.done_bytes).toBe(40)
+  })
 
-  if (context === 'connection') {
-    $connection.set({ mode: 'remote' } as never)
-    $connection.set(original)
-  } else {
-    $activeGatewayRoute.set('other')
-    $activeGatewayRoute.set('default')
-  }
+  it('does not re-set the atom when a poll returns the identical payload', async () => {
+    backend.jobs = [job({ done_bytes: 40 })]
+    await pollTick()
+    expect($localRuntimeJobs.get()).toHaveLength(1)
 
-  post.reject(new Error('installation request failed'))
-  await starting
-  expect(notices.notifyError).toHaveBeenCalledTimes(1)
-  expect($localRuntimeInstallStarting.get()).toBe(false)
-  expect(posts()).toHaveLength(1)
-})
-it('releases a failed POST for retry', async () => {
-  api
-    .mockRejectedValueOnce(new Error('offline'))
-    .mockImplementation(request => Promise.resolve(request.method === 'POST' ? { job_id: 'install' } : { jobs: [job] }))
-  await startLocalRuntimeInstall()
-  expect($localRuntimeInstallStarting.get()).toBe(false)
-  expect(notices.notifyError).toHaveBeenCalledTimes(1)
-  await startLocalRuntimeInstall()
-  expect(posts()).toHaveLength(2)
-  expect($localRuntimeJobs.get()).toEqual([job])
-})
-it('retries a failed post-acceptance jobs read without inventing progress or allowing another POST', async () => {
-  api
-    .mockResolvedValueOnce({ job_id: 'install' })
-    .mockRejectedValueOnce(new Error('offline'))
-    .mockResolvedValue({ jobs: [job] })
-  await startLocalRuntimeInstall()
-  const lockedAfterFailure = $localRuntimeInstallStarting.get()
-  const snapshotAfterFailure = $localRuntimeJobs.get()
-  await startLocalRuntimeInstall()
-  await vi.advanceTimersByTimeAsync(700)
-  expect(lockedAfterFailure).toBe(true)
-  expect(snapshotAfterFailure).toEqual([])
-  expect(posts()).toHaveLength(1)
-  expect($localRuntimeJobs.get()).toEqual([job])
-  expect($localRuntimeInstallStarting.get()).toBe(false)
-})
-it('keeps the shared start locked until the first authoritative jobs read finishes', async () => {
-  const read = deferred<{ jobs: LocalRuntimeJob[] }>()
-  api.mockImplementation(request => (request.method === 'POST' ? Promise.resolve({ job_id: 'install' }) : read.promise))
-  const first = startLocalRuntimeInstall()
-  await flush()
-  expect($localRuntimeInstallStarting.get()).toBe(true)
-  await startLocalRuntimeInstall()
-  expect(posts()).toHaveLength(1)
-  read.resolve({ jobs: [job] })
-  await first
-  expect($localRuntimeJobs.get()).toEqual([job])
-  expect($localRuntimeInstallStarting.get()).toBe(false)
-})
-it('serializes pane polling and reads again after POST acceptance before releasing the lock', async () => {
-  const post = deferred<{ job_id: string }>()
-  const stale = deferred<{ jobs: LocalRuntimeJob[] }>()
-  const fresh = deferred<{ jobs: LocalRuntimeJob[] }>()
-  let reads = 0
-  api.mockImplementation(request =>
-    request.method === 'POST' ? post.promise : ++reads === 1 ? stale.promise : fresh.promise
-  )
-  const first = startLocalRuntimeInstall()
-  watchLocalRuntimeJobs()
-  post.resolve({ job_id: 'install' })
-  await flush()
-  watchLocalRuntimeJobs()
-  expect(reads).toBe(1)
-  stale.resolve({ jobs: [] })
-  await flush()
-  expect(reads).toBe(2)
-  expect($localRuntimeInstallStarting.get()).toBe(true)
-  await startLocalRuntimeInstall()
-  expect(posts()).toHaveLength(1)
-  fresh.resolve({ jobs: [job] })
-  await first
-  expect($localRuntimeJobs.get()).toEqual([job])
-  expect($localRuntimeInstallStarting.get()).toBe(false)
-  await vi.advanceTimersByTimeAsync(700)
-  expect(reads).toBe(3)
-  expect(vi.getTimerCount()).toBe(1)
+    const reference = $localRuntimeJobs.get()
+    await pollTick()
+    await pollTick()
+
+    // Same reference preserved — no-op polls never hand React fresh arrays.
+    expect($localRuntimeJobs.get()).toBe(reference)
+  })
+
+  it('equality covers control flags, ranges, percent, detail and error — not just done_bytes', async () => {
+    backend.jobs = [job({ done_bytes: 40, ranges: { 'model.gguf': [[0, 100]] } })]
+    await pollTick()
+    const first = $localRuntimeJobs.get()
+
+    // Backend flips can_pause:false (e.g. a phase change) with identical bytes.
+    backend.jobs = [job({ can_pause: false, done_bytes: 40, ranges: { 'model.gguf': [[0, 100]] } })]
+    await pollTick()
+
+    const second = $localRuntimeJobs.get()
+    expect(second).not.toBe(first)
+    expect(second[0]?.can_pause).toBe(false)
+
+    // A ranges-only change re-publishes too.
+    const before = $localRuntimeJobs.get()
+    backend.jobs = [
+      job({
+        can_pause: false,
+        done_bytes: 40,
+        ranges: {
+          'model.gguf': [
+            [0, 100],
+            [100, 200]
+          ]
+        }
+      })
+    ]
+    await pollTick()
+    expect($localRuntimeJobs.get()).not.toBe(before)
+    expect($localRuntimeJobs.get()[0]?.ranges?.['model.gguf']).toEqual([
+      [0, 100],
+      [100, 200]
+    ])
+  })
 })

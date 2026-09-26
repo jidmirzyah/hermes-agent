@@ -292,64 +292,46 @@ def ensure_local_runtime(config: dict, force: bool = False) -> "object | None":
     # port — the loser waits here, then re-checks state and adopts the winner's server instead.
     from hermes_cli.local_runtime.endpoint import _state_endpoint
 
-    with _cross_process_boot_lock():
-        state = _state_endpoint()
-        if state is not None:
-            if not _presets_stale():
-                logger.info("managed llama-server already running (another process)")
-                return None
-            logger.info("running server's presets predate the staged models; "
-                        "replacing it so every model launches with a policy")
-            _stop_state_server(state)
-
-        try:
-            from hermes_cli.local_runtime.binaries import (
-                default_tag, ensure_runtime_installed, installed_tags, select_backend)
-            from hermes_cli.local_runtime.supervisor import LlamaServerSupervisor
-
-            backend = section.get("backend", "auto")
-            if backend == "auto":
-                backend = select_backend(_detect_gpu_vendor())
-            # Boot ladder: serve what is INSTALLED, never download here. The configured tag is
-            # preferred; when it isn't installed yet, the newest installed tag serves and the
-            # status endpoint reports the pending update — the download is a deliberate click in
-            # the pane, not a boot-path surprise (a multi-minute inline download here is exactly
-            # how the onboarding bounce returns).
-            tag = section.get("tag") or default_tag()
-            have = installed_tags()
-            if tag not in have:
-                if not have:
-                    logger.info("local runtime enabled but no build installed; "
-                                "install happens in the Local Models pane")
-                    return None
-                logger.info("configured tag %s not installed; serving %s "
-                            "(update is a click in Local Models)", tag, have[0])
-                tag = have[0]
-            install_dir = ensure_runtime_installed(tag, backend)
-
-            mdir = models_dir()
-            mdir.mkdir(parents=True, exist_ok=True)
-            preset_path = _generate_presets(mdir, runtimes_root() / "presets.ini")
-
-            sup = LlamaServerSupervisor(install_dir, mdir, preset_path=preset_path,
-                                        models_max=_admitted_models_max(
-                                            mdir, int(section.get("models_max", 4))),
-                                        port=int(section.get("port", 0)) or None)
-            try:
-                sup.start()
-            except Exception:
-                # start() can fail after the router process exists (health timeout): leaving it
-                # running unsupervised strands its VRAM behind a port nothing will clean up.
-                with suppress(Exception):
-                    sup.stop()
-                raise
-            _SUPERVISOR = sup
-            logger.info("managed llama-server up at %s (backend=%s tag=%s)", sup.base_url, backend, tag)
-            _start_idle_sweeper(sup)
-            return sup
-        except Exception as exc:  # noqa: BLE001 — never break session start
-            logger.warning("managed local runtime unavailable: %s", exc)
+    state = _state_endpoint()
+    if state is not None:
+        if not _presets_stale():
+            logger.info("managed llama-server already running (another process)")
             return None
+        logger.info("running server's presets predate the staged models; "
+                    "replacing it so every model launches with a policy")
+        _stop_state_server(state)
+
+    try:
+        from hermes_cli.local_runtime.binaries import installed_engine
+        from hermes_cli.local_runtime.supervisor import LlamaServerSupervisor
+
+        engine = installed_engine(section.get("backend", "auto"))
+        if engine is None:
+            logger.info("local runtime enabled but no PM engine installed; use the Local Models pane")
+            return None
+
+        mdir = models_dir()
+        mdir.mkdir(parents=True, exist_ok=True)
+        preset_path = _generate_presets(mdir, runtimes_root() / "presets.ini")
+
+        sup = LlamaServerSupervisor(engine.binary, mdir, preset_path=preset_path,
+                                    models_max=int(section.get("models_max", 4)),
+                                    port=int(section.get("port", 0)) or None)
+        try:
+            sup.start()
+        except Exception:
+            # start() can fail after the router process exists (health timeout): leaving it
+            # running unsupervised strands its VRAM behind a port nothing will clean up.
+            with suppress(Exception):
+                sup.stop()
+            raise
+        _SUPERVISOR = sup
+        logger.info("managed llama-server up at %s (backend=%s tag=%s)", sup.base_url, engine.backend, engine.tag)
+        _start_idle_sweeper(sup)
+        return sup
+    except Exception as exc:  # noqa: BLE001 — never break session start
+        logger.warning("managed local runtime unavailable: %s", exc)
+        return None
 
 
 def shutdown_local_runtime() -> None:

@@ -8,8 +8,7 @@ export const GUEST_ONBOARDING_ENV = 'HERMES_GUEST_ONBOARDING'
 export const GUEST_ONBOARDING_FLAG = '--guest-onboarding'
 // Skip the first-run film. A rehearsal aid: the intro is a one-time reveal,
 // so anyone iterating on the guided chat behind it otherwise sits through it
-// on every fresh HERMES_HOME. The guide still runs — only the film is
-// skipped. Renderer-only; the backend never sees it.
+// on every fresh HERMES_HOME. Renderer-only; the backend never sees it.
 export const SKIP_INTRO_ENV = 'HERMES_SKIP_INTRO'
 export const SKIP_INTRO_FLAG = '--skip-intro'
 
@@ -20,10 +19,7 @@ export function guestOnboardingEnabled(
   return env[GUEST_ONBOARDING_ENV] === '1' || argv.includes(GUEST_ONBOARDING_FLAG)
 }
 
-export function skipIntroEnabled(
-  argv: readonly string[] = process.argv,
-  env: NodeJS.ProcessEnv = process.env
-): boolean {
+export function skipIntroEnabled(argv: readonly string[] = process.argv, env: NodeJS.ProcessEnv = process.env): boolean {
   return env[SKIP_INTRO_ENV] === '1' || argv.includes(SKIP_INTRO_FLAG)
 }
 

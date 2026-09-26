@@ -267,12 +267,10 @@ def _config_default_interface_early() -> str:
     value = "cli"
     try:
         if os.path.exists(cfg_path):
-            import yaml as _yaml_iface
+            import hermes_yaml as _yaml_iface
 
-            with open(cfg_path, encoding="utf-8") as _f:
-                raw = _yaml_iface.load(
-                    _f, Loader=getattr(_yaml_iface, "CSafeLoader", None) or _yaml_iface.SafeLoader
-                ) or {}
+            with open(cfg_path, encoding="utf-8-sig") as _f:
+                raw = _yaml_iface.safe_load(_f) or {}
             disp = raw.get("display", {})
             if isinstance(disp, dict):
                 iface = disp.get("interface")
@@ -612,7 +610,7 @@ def _apply_profile_override() -> None:
 
             active_path = get_default_hermes_root() / "active_profile"
             if active_path.exists():
-                name = active_path.read_text(encoding="utf-8").strip()
+                name = active_path.read_text(encoding="utf-8-sig").strip()
                 if name and name != "default":
                     profile_name = name  # consume stays 0: nothing to strip
         except (UnicodeDecodeError, OSError):
@@ -652,6 +650,12 @@ try:
     _export_scratch_tmp_env()
 except Exception:
     pass  # an unwritable home leaves the system temp dir in place; never block startup
+
+# PM runs after profile resolution but before application dependency imports.
+if sys.argv[1:2] == ["pm"]:
+    from pm.cli import main as _pm_main
+
+    raise SystemExit(_pm_main(sys.argv[2:]))
 
 # Windows launcher self-heal — the ``hermes`` command is a COPY of the venv
 # console script staged into the managed bin dir (outside the checkout, since
@@ -810,33 +814,51 @@ from hermes_cli.main_provider_setup import (
     _prompt_provider_choice,
     _remove_custom_provider,
 )
-from hermes_cli.main_install_repair import (
-    _cleanup_quarantined_exes,
-    _recover_from_interrupted_install,
-)
-from hermes_cli.main_install_repair import (  # frozen updater surface: update_cmd*.py resolve these via _m()
+# Frozen external updater API: old in-memory siblings still import these names
+# after a checkout swap. Keep their inert shims separate from live launch helpers.
+from hermes_cli.old_updater_main import (
     ShimQuarantineError,
+    _BYTECODE_FINGERPRINT_FILE,
+    _desktop_stamp_path,
+    _detect_broken_lazy_refresh_imports,
+    _expected_windows_pe_machines,
+    _hermes_exe_shims,
+    _insert_python_pin,
+    _interpreter_scripts_dir,
+    _load_installable_optional_extras,
+    _parse_pe_machine,
+    _quarantine_running_hermes_exe,
+    _repair_broken_lazy_refresh_imports,
+    _resolve_install_target_python,
+    _restore_quarantined_exes,
+    _run_install_with_heartbeat,
+    _run_package_only_install,
+    _run_quarantined_install,
+    _run_with_idle_timeout,
+    _self,
+    _verify_console_scripts_installed,
+    _verify_core_dependencies_installed,
+    _web_ui_build_needed,
+    _windows_native_machine,
+    _windows_shim_in_process_chain,
+    _write_web_ui_build_stamp,
+)
+from hermes_cli.main_install_repair import _cleanup_quarantined_exes
+from hermes_cli.main_install_repair import (  # frozen updater surface: update_cmd*.py resolve these via _m()
     _UPDATE_REEXEC_ENV,
     _clear_lazy_refresh_incomplete_marker,
     _clear_marker_file,
     _clear_update_incomplete_marker,
-    _install_python_dependencies_with_optional_fallback,
     _is_termux_env,
     _is_windows,
     _is_windows_npm_path,
     _lazy_refresh_marker_path,
     _pytest_owns_live_checkout,
     _reexec_dependency_sync_off_windows_shim,
-    _repair_venv_via_import_probes,
-    _resolve_install_target_python,
     _resolve_node_runtime_npm,
     _resolve_update_branch,
-    _run_install_with_heartbeat,
-    _run_package_only_install,
     _update_marker_path,
     _venv_scripts_dir,
-    _verify_console_scripts_installed,
-    _verify_core_dependencies_installed,
 )
 from hermes_cli.main_desktop import (
     cmd_gui,
@@ -884,7 +906,7 @@ def _read_packed_ref(common_dir: Path, ref: str) -> str | None:
     peel lines and ``#``-prefixed comments / ``# pack-refs with:`` header.
     """
     try:
-        text = (common_dir / "packed-refs").read_text(encoding="utf-8", errors="replace")
+        text = (common_dir / "packed-refs").read_text(encoding="utf-8-sig", errors="replace")
     except OSError:
         return None
     for line in text.splitlines():
@@ -901,7 +923,7 @@ def _read_git_revision_fingerprint(repo_root: Path) -> str | None:
     git_dir = repo_root / ".git"
     try:
         if git_dir.is_file():
-            for line in git_dir.read_text(encoding="utf-8", errors="replace").splitlines():
+            for line in git_dir.read_text(encoding="utf-8-sig", errors="replace").splitlines():
                 key, _, value = line.partition(":")
                 if key.strip() == "gitdir" and value.strip():
                     git_dir = (repo_root / value.strip()).resolve()
@@ -913,12 +935,12 @@ def _read_git_revision_fingerprint(repo_root: Path) -> str | None:
         commondir_file = git_dir / "commondir"
         if commondir_file.exists():
             try:
-                rel = commondir_file.read_text(encoding="utf-8", errors="replace").strip()
+                rel = commondir_file.read_text(encoding="utf-8-sig", errors="replace").strip()
                 if rel:
                     common_dir = (git_dir / rel).resolve()
             except OSError:
                 pass
-        head = (git_dir / "HEAD").read_text(encoding="utf-8", errors="replace").strip()
+        head = (git_dir / "HEAD").read_text(encoding="utf-8-sig", errors="replace").strip()
         if head.startswith("ref:"):
             ref = head.split(":", 1)[1].strip()
             # Loose refs may live in the worktree gitdir OR the common dir
@@ -927,7 +949,7 @@ def _read_git_revision_fingerprint(repo_root: Path) -> str | None:
             for candidate in (git_dir, common_dir):
                 ref_file = candidate / ref
                 if ref_file.exists():
-                    return f"git:{ref}:{ref_file.read_text(encoding='utf-8', errors='replace').strip()}"
+                    return f"git:{ref}:{ref_file.read_text(encoding='utf-8-sig', errors='replace').strip()}"
             packed_sha = _read_packed_ref(common_dir, ref)
             if packed_sha:
                 return f"git:{ref}:{packed_sha}"
@@ -964,7 +986,7 @@ def _termux_bundled_skills_sync_needed() -> bool:
         return True
     try:
         stamp = _termux_bundled_skills_stamp_path()
-        return stamp.read_text(encoding="utf-8").strip() != _termux_bundled_skills_fingerprint()
+        return stamp.read_text(encoding="utf-8-sig").strip() != _termux_bundled_skills_fingerprint()
     except OSError:
         return True
 
@@ -1008,7 +1030,7 @@ def _dotenv_has_provider_key(env_file: Path, provider_env_vars: set) -> bool:
     if not env_file.exists():
         return False
     try:
-        for line in env_file.read_text(encoding="utf-8").splitlines():
+        for line in env_file.read_text(encoding="utf-8-sig").splitlines():
             line = line.strip()
             if line.startswith("#") or "=" not in line:
                 continue
@@ -1762,7 +1784,7 @@ def _read_query_file(args) -> None:
         if _qfile == "-":
             args.query = sys.stdin.read()
         else:
-            with open(_qfile, "r", encoding="utf-8", errors="replace") as _fh:
+            with open(_qfile, "r", encoding="utf-8-sig", errors="replace") as _fh:
                 args.query = _fh.read()
     except OSError as _e:
         print(f"Error: cannot read --query-file {_qfile}: {_e}", file=sys.stderr)
@@ -2163,6 +2185,12 @@ def select_provider_and_model(args=None):
         _clear_stale_openai_base_url()
 
 
+def _detect_venv_python_processes(*, exclude_pids: set[int] | None = None) -> list[tuple[int, str, str]]:
+    # Shim to stop the old updater doing work until relaunch. Do not scan or kill.
+    # Current Windows checks use the real detector in update_cmd_windows instead.
+    return []
+
+
 # Frozen updater surface (PEP 562 ``__getattr__`` below): the frozen
 # ``hermes_cli/update_cmd*.py`` files resolve these names via ``_m().<name>``
 # on hermes_cli.main; importing update_cmd eagerly would cost every ``hermes``
@@ -2175,6 +2203,26 @@ _FROZEN_UPDATER_SURFACE: dict[str, tuple[str, ...]] = {
     ),
     "hermes_cli.main_desktop": (
         "_desktop_build_needed", "_desktop_dist_exists", "_desktop_packaged_executable",
+    ),
+    "hermes_cli.update_cmd": (
+        "_assess_parked_branch_switch",
+        "_capture_active_lazy_features",
+        "_cold_start_windows_gateway_after_update", "_discard_stashed_changes",
+        "_filter_non_gateway_concurrent_instances", "_fleet_probe_expected_runtimes",
+        "_get_origin_url", "_handoff_reapable_backend_pids", "_ledger_manual_serve_holders",
+        "_ledger_reapable_backend_pids", "_leftover_pausable_gateway_pids", "_npm_lockfile_changed",
+        "_orphaned_desktop_backend_pids", "_park_stashed_changes",
+        "_pause_windows_gateways_for_update", "_print_parked_branch_kept_notice",
+        "_print_parked_branch_skip_warning", "_purge_stale_hermes_modules",
+        "_refresh_active_lazy_features", "_refresh_active_memory_provider_dependencies",
+        "_refresh_bootstrap_cache_scripts", "_refresh_windows_gateway_launchers",
+        "_relaunch_stopped_serves", "_reload_updated_runtime_modules",
+        "_restore_stashed_changes",
+        "_resume_windows_gateways_after_update", "_run_logged_subprocess", "_run_pre_update_backup",
+        "_stash_local_changes_if_needed", "_stop_process_trees", "_sync_with_upstream_if_needed",
+        "_venv_launcher_ancestors",
+        "_wait_for_windows_update_gateway_exit", "_warn_orphaned_update_autostashes",
+        "_write_update_incomplete_marker",
     ),
     "hermes_cli.dashboard_procs": (
         "_detect_concurrent_hermes_instances",
@@ -2276,7 +2324,6 @@ _FROZEN_UPDATER_SURFACE: dict[str, tuple[str, ...]] = {
         "_sync_with_upstream_if_needed",
         "_update_node_dependencies",
         "_update_via_zip",
-        "_upgrade_pip_before_lazy_refresh",
         "_validate_critical_files_syntax",
         "_validate_critical_modules_import",
         "_venv_core_imports_healthy",
@@ -2410,6 +2457,14 @@ def cmd_uninstall(args):
         from hermes_cli.gui_uninstall import gui_install_summary
 
         print(json.dumps(gui_install_summary()))
+        return
+
+    if getattr(args, "data", False):
+        if not getattr(args, "yes", False) and not getattr(args, "dry_run", False):
+            _require_tty("uninstall --data")
+        from hermes_cli.uninstall import run_data_uninstall
+
+        run_data_uninstall(args)
         return
 
     if getattr(args, "gui", False):
@@ -2581,6 +2636,8 @@ def cmd_update(args, *, approved: bool = False):
                     _emit_approval_event("updates", "approved", target, f"applied but cleanup failed: {e}")
         return
 
+    if handle_metadata_args(args, PROJECT_ROOT):
+        sys.exit(0)
     if is_managed():
         managed_error("update Hermes Agent")
         return True
@@ -2640,37 +2697,18 @@ def cmd_update(args, *, approved: bool = False):
         _cmd_update_check(
             branch=branch,
             branch_explicit=bool(getattr(args, "branch", None)),
+            **({"channel": args.channel} if getattr(args, "channel", None) else {}),
         )
         return None
 
-    if ua.apply_approval_enabled() and not approved and not ua.approval_bypass_active():
-        try:
-            record = ua.stage_update(
-                ua.payload_from_args(args),
-                summary=ua.update_summary(ua.payload_from_args(args)),
-            )
-        except Exception as e:
-            print(f"Could not stage the update for approval ({e}). No changes were applied.")
-            sys.exit(1)
-        _emit_approval_event("updates", "staged", record["id"], record.get("summary", ""))
-        print("⚕ Update staged for approval.")
-        print(f"  Pending id: {record['id']}")
-        print("  Review:     /update pending")
-        print(f"  Approve:    /update approve {record['id']}")
-        print(f"  Reject:     /update reject {record['id']}")
-        print()
-        print("No changes were applied yet.")
-        # Distinct exit code so nothing that only checks "did this exit 0"
-        # (dashboard status poll, gateway chat notification) mistakes a
-        # staged-for-approval request for a completed update.
-        from hermes_cli.update_lock import UPDATE_EXIT_STAGED_FOR_APPROVAL
-        sys.exit(UPDATE_EXIT_STAGED_FOR_APPROVAL)
-        # Defense-in-depth: a real sys.exit() always raises SystemExit, so
-        # this return never runs in production. It exists so that if
-        # anything ever stops sys.exit() from propagating — e.g. code under
-        # test wholesale-mocking `hermes_cli.main.sys`, which turns the call
-        # above into a no-op — execution still cannot fall through into
-        # applying an update the approval gate was supposed to block.
+
+from hermes_cli.update_receipt import update_receipt_scope
+
+
+@update_receipt_scope()
+def cmd_update(args):
+    """Update Hermes Agent: hangup protection + update lock around ``_cmd_update_impl``."""
+    if _update_preflight_handled(args):
         return
 
     if not ua.apply_approval_enabled():
@@ -2896,10 +2934,9 @@ def _dashboard_prepare_runtime(args, headless_backend) -> bool:
         import fastapi  # noqa: F401
         import uvicorn  # noqa: F401
     except ImportError as e:
-        from hermes_cli.main_dep_hints import missing_optional_deps_message
-
-        print(missing_optional_deps_message("dashboard", "its web-server packages (fastapi, uvicorn)", "all"))
-        print(f"Details: {e}")
+        print("Web UI dependencies not installed (need fastapi + uvicorn).")
+        print("Run `hermes pm install`, then restart Hermes to activate the dependencies.")
+        print(f"Import error: {e}")
         sys.exit(1)
 
     # Seed bundled skills on first dashboard launch so the desktop GUI's
@@ -3093,21 +3130,10 @@ def _first_positional_argv() -> str | None:
     Not a full argparse simulation: an unknown ``--foo bar`` may classify
     ``bar`` as positional, which at worst forces a one-time plugin discovery.
     """
-    from hermes_cli._parser import top_level_value_flag_sets
+    from hermes_cli._parser import command_argv
 
-    required_value_flags, optional_value_flags = top_level_value_flag_sets()
-    value_flags = required_value_flags | optional_value_flags
-    argv = sys.argv[1:]
-    i = 0
-    while i < len(argv):
-        tok = argv[i]
-        if tok == "--":  # everything after is positional
-            return argv[i + 1] if i + 1 < len(argv) else None
-        if not tok.startswith("-"):
-            return tok
-        # ``--flag=value`` is a single token; a known value flag consumes the next.
-        i += 2 if ("=" not in tok and tok in value_flags and i + 1 < len(argv)) else 1
-    return None
+    args = command_argv(sys.argv[1:])
+    return args[0] if args else None
 
 
 def _plugin_cli_discovery_needed() -> bool:
@@ -3486,7 +3512,7 @@ def _try_termux_fast_cli_launch() -> bool:
     if _wants_tui_early(argv):  # TUI fast path / full dispatch owns those
         return False
 
-    if _startup_fast.is_termux_fast_version_argv(argv):
+    if _startup_fast.is_global_fast_version_argv(argv):
         _print_version_info(check_updates=True)
         return True
 
@@ -3800,8 +3826,19 @@ def main():
     except Exception:
         pass
 
+    # One TLS authority: trust the OS store process-wide before any outbound
+    # call resolves a CA bundle (see agent/ssl_verify.py). Covers the CLI
+    # entrypoint, which agent_init's own install_truststore() call does not
+    # reach when the CLI never constructs an AIAgent (subcommands, help).
+    try:
+        from agent.ssl_verify import install_truststore
+
+        install_truststore()
+    except Exception:
+        pass
+
     # Sweep stale ``hermes.exe.old.*`` quarantine files from previous Windows
-    # updates (see ``_quarantine_running_hermes_exe``). No-op elsewhere.
+    # updates. No-op elsewhere.
     try:
         _cleanup_quarantined_exes()
     except Exception:
@@ -3811,25 +3848,19 @@ def main():
     # process resolves fresh source against old bytecode. Never raises.
     _sweep_stale_bytecode_if_checkout_changed()
 
-    # Self-heal a venv left half-built by an interrupted ``hermes update``, and
-    # hint (never restart) about a fleet the interrupted update never
-    # restarted. Both skipped while the user is *running* update — that flow
-    # owns its marker and a recovery install must not race the real one. The
-    # substring match is deliberately loose: over-matching (``hermes skills
-    # install update``) only defers recovery one launch; under-matching
-    # (``hermes -p work update``) would race. Never raises.
-    # See #95294.
+    # Dependency recovery already ran before imports. Report any fleet restart
+    # still owed by a previous update without restarting services here.
     if "update" not in sys.argv[1:]:
-        try:
-            _recover_from_interrupted_install()
-        except Exception:
-            pass
         try:
             from hermes_cli.update_cmd_fleet import _warn_pending_fleet_restart_on_startup
 
             _warn_pending_fleet_restart_on_startup()
         except Exception:
             pass
+
+    if _first_positional_argv() != "update":
+        from hermes_cli.boot_bootstrap import default_project_root, maybe_run_boot_bootstrap
+        maybe_run_boot_bootstrap(default_project_root())
 
     if _try_termux_fast_tui_launch():
         return
@@ -3839,6 +3870,27 @@ def main():
         return
     if _try_fast_chat_launch():
         return
+
+    # The startup check: O(1) stamp comparisons, no network, no installs.
+    # One loud line when the install is damaged; never blocks the command.
+    # Then provision: prepend the store's tool dirs to PATH so reactive
+    # which('git'|'bash'|'ffmpeg'|...) resolves the bundled binaries.
+    try:
+        import pm
+
+        pm.adopt()
+        problems = pm.check()
+        if problems:
+            print(
+                f"⚠ install out of sync ({'; '.join(problems)}) — run `hermes pm install`",
+                file=sys.stderr,
+            )
+        else:
+            pm.activate()
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).debug("pm startup check failed", exc_info=True)
 
     parser, subparsers = _build_cli_parser()
 

@@ -14,6 +14,8 @@
   hermesNpmLib,
   electron,
   hermesAgent,
+  installStampFile,
+  generatedIcons,
   python3,
   # Environment to bake into the launcher. A GUI launcher reads none of the
   # shell profile, so a variable that an interactive shell exports does not
@@ -68,6 +70,8 @@ let
     dirs = [
       "apps/desktop"
       "apps/shared"
+      "scripts/build/desktop.mjs"
+      "scripts/build/frontend-common.mjs"
     ];
     pname = "hermes-desktop-renderer";
 
@@ -76,42 +80,30 @@ let
     buildPhase = ''
       runHook preBuild
 
-      mkdir -p apps/desktop/build
-
       patchShebangs .
 
-      pushd apps/desktop
-        # typecheck :3
-        npm exec -- tsc -b
+      # The native provider runs before compilation. Use the headers for
+      # the exact Electron runtime shipped by this derivation, offline.
+      mkdir -p "$TMPDIR/electron-headers"
+      tar -xzf ${electronHeaders} -C "$TMPDIR/electron-headers" --strip-components=1
+      ${lib.getExe hermesNpmLib.node-gyp} rebuild \
+        --directory=node_modules/node-pty \
+        --build-from-source \
+        --runtime=electron \
+        --target=${electron.version} \
+        --arch=${targetArch} \
+        --nodedir="$TMPDIR/electron-headers" \
+        --disturl="" \
+        --offline
 
-        # build the renderer bundle
-        # vite's emptyOutDir wipes dist/ on every run
-        # so it has to be first
-        npm exec -- vite build
-
-        # build the electron bundle
-        node scripts/bundle-electron-main.mjs
-
-        # Compile node-pty against Electron's actual ABI (the nixpkgs
-        # `electron` we ship). Headers come from a pinned fetchurl input
-        # since the sandbox has no network here, so node-gyp's
-        # normal --disturl download path can't run.
-        mkdir -p "$TMPDIR/electron-headers"
-        tar -xzf ${electronHeaders} -C "$TMPDIR/electron-headers" --strip-components=1
-
-        ${lib.getExe hermesNpmLib.node-gyp} rebuild \
-          --directory=../../node_modules/node-pty \
-          --build-from-source \
-          --runtime=electron \
-          --target=${electron.version} \
-          --nodedir="$TMPDIR/electron-headers" \
-          --disturl="" \
-          --offline
-
-        # Target platform/arch come from stdenv.hostPlatform, not the
-        # build host's own process.platform/arch.
-        node scripts/stage-native-deps.mjs ${targetPlatform} ${targetArch}
-      popd
+      node apps/desktop/scripts/stage-native-deps.mjs \
+        --source "$PWD" --out "$TMPDIR/desktop-native-deps" \
+        --platform ${targetPlatform} --arch ${targetArch}
+      node scripts/build/desktop.mjs \
+        --source "$PWD" --out "$PWD/apps/desktop/dist" \
+        --icons ${generatedIcons} --stamp ${installStampFile} \
+        --native-deps "$TMPDIR/desktop-native-deps" \
+        --platform ${targetPlatform} --typecheck
 
       runHook postBuild
     '';
@@ -140,14 +132,10 @@ let
     installPhase = ''
       runHook preInstall
       mkdir -p $out
-      # vite writes to apps/desktop/dist/ (we cd'd there in buildPhase).
-      # stage-native-deps.mjs stages node-pty into dist/node_modules/node-pty,
-      # so copying dist/ wholesale carries the native dep along with the
-      # esbuild bundle that require()s it. apps/desktop/build was created
-      # before the cd.
+      # The shared product contains renderer, main/preload, and native deps.
       cp -rn apps/desktop/dist $out/
 
-      echo '{"schemaVersion":1,"commit":"nix-dummy-commit","branch":"nix","dirty":false,"source":"nix"}' > $out/install-stamp.json
+      cp ${installStampFile} $out/install-stamp.json
 
       cp -n apps/desktop/package.json $out/
       runHook postInstall
@@ -193,7 +181,7 @@ stdenv.mkDerivation {
 
     # XDG launcher entry
     mkdir -p $out/share/applications $out/share/icons/hicolor/1024x1024/apps
-    install -m 0644 ${../apps/desktop/assets/icon.png} \
+    install -m 0644 ${generatedIcons}/apps/desktop/assets/icon.png \
       $out/share/icons/hicolor/1024x1024/apps/hermes.png
     export PYTHONPATH=$(mktemp -d)
     cp ${../hermes_cli/linux_desktop_entry.py} "$PYTHONPATH/linux_desktop_entry.py"

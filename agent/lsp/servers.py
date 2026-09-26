@@ -174,10 +174,29 @@ def _spawn_pyright(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
     return _make_spec(root, ctx, "pyright", [bin_path, "--stdio"], {"python": {"pythonPath": py}} if py else {})
 
 
+def _pm_store_python() -> Optional[str]:
+    """The PM interpreter used when the analyzed project has no environment."""
+    try:
+        from pm import paths
+        from pm.lock import Facts
+    except Exception:
+        return None
+    try:
+        fact = Facts(paths.facts_path()).get("python")
+        if not fact or "entry" not in fact:
+            return None
+        entry = paths.store_root() / fact["entry"]
+        exe = entry / ("python.exe" if os.name == "nt" else "bin/python3")
+        return str(exe) if exe.exists() else None
+    except Exception:
+        return None
+
+
 def _detect_python(root: str) -> Optional[str]:
+    # Pyright needs the project's dependencies, not Hermes's runtime packages.
     venvs = [v for v in (os.environ.get("VIRTUAL_ENV"), os.path.join(root, ".venv"), os.path.join(root, "venv")) if v]
     paths = (os.path.join(v, sub) for v in venvs for sub in ("bin/python", "bin/python3", "Scripts/python.exe"))
-    return next((p for p in paths if os.path.exists(p)), None)
+    return next((p for p in paths if os.path.exists(p)), None) or _pm_store_python()
 
 
 _warned_once: set = set()

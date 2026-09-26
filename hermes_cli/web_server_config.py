@@ -15,6 +15,7 @@ from hermes_cli.config import (
     read_raw_config,
 )
 from hermes_cli.web_server_memory import _normalize_memory_provider_name
+from tools.wake_word import _PROVIDER_PREFERENCE
 
 if TYPE_CHECKING:
     from hermes_cli.model_switch import ModelSwitchResult
@@ -67,6 +68,10 @@ _SCHEMA_OVERRIDES: Dict[str, Dict[str, Any]] = {
         *_timezone_options(), searchable=True, clearable=True,
     ),
     "memory.provider": _select("Memory provider plugin", *_memory_provider_options()),
+    "wake_word.provider": _select(
+        "Wake engine. Auto selects a platform-supported engine; Porcupine requires PORCUPINE_ACCESS_KEY.",
+        "auto", *_PROVIDER_PREFERENCE,
+    ),
     "model": {
         "type": "string",
         "description": "Default model (e.g. anthropic/claude-sonnet-4.6)",

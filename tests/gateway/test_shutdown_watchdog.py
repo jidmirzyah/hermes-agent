@@ -123,14 +123,12 @@ def short_home():
         shutil.rmtree(path, ignore_errors=True)
 
 
-@pytest.mark.windows_only
+@pytest.mark.platforms("windows")
 @pytest.mark.asyncio
-async def test_loop_tick_witness_arms_over_tcp_on_windows(short_home, caplog):
-    """Non-POSIX never touches AF_UNIX; the witness arms over TCP loopback.
-
-    Runs on native Windows (``os.name == "nt"`` for real) rather than faking
-    the platform from Linux — see "Don't fake the host OS" in AGENTS.md.
-    """
+async def test_loop_tick_witness_arms_over_tcp_on_windows(
+    short_home, caplog, monkeypatch
+):
+    """Non-POSIX never touches AF_UNIX; the witness arms over TCP loopback."""
     tmp_path = short_home
     start_unix_server_calls = []
 
@@ -141,12 +139,7 @@ async def test_loop_tick_witness_arms_over_tcp_on_windows(short_home, caplog):
     with patch.object(
         shutdown_watchdog_module.asyncio,
         "start_unix_server",
-        side_effect=_forbid_start_unix_server,
-        # ``asyncio.start_unix_server`` does not exist on native Windows, so
-        # without create=True patch.object itself raises AttributeError.
-        # create=True arms the forbidden-call tripwire anyway and mock
-        # deletes the created attribute on exit.
-        create=True,
+        side_effect=_forbid_start_unix_server, create=True,
     ), caplog.at_level(logging.DEBUG, logger="gateway.shutdown_watchdog"):
         payload = await _run_heartbeat_until_payload(tmp_path)
 
@@ -166,6 +159,7 @@ async def test_loop_tick_witness_arms_over_tcp_on_windows(short_home, caplog):
     assert not list(tmp_path.glob("**/gateway.loop-tick.*.sock"))
 
 
+@pytest.mark.platforms("posix")
 @pytest.mark.asyncio
 async def test_loop_tick_witness_arms_on_posix(short_home):
     payload = await _run_heartbeat_until_payload(short_home)

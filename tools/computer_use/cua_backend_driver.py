@@ -71,7 +71,7 @@ def _wsl_windows_path_to_posix(path: str) -> str:
         wsl = False
     win = PureWindowsPath(path)
     drive = (win.drive or "").rstrip(":").lower()
-    return os.path.join("/mnt", drive, *(str(part) for part in win.parts[1:])) if wsl and drive else path
+    return "/".join(["/mnt", drive, *win.parts[1:]]) if wsl and drive else path
 
 def _candidate_cua_driver_commands(override: Optional[str] = None) -> List[str]:
     """Candidate commands in resolution order. ``override`` / a non-empty ``HERMES_CUA_DRIVER_CMD`` is authoritative

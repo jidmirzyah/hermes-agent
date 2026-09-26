@@ -10,39 +10,8 @@ from hermes_cli import main as hermes_main
 from hermes_cli import update_cmd
 
 
-# ---------------------------------------------------------------------------
-# Managed-uv compatibility for tests that patch shutil.which
-# ---------------------------------------------------------------------------
-# The production code now uses ``ensure_uv()`` / ``update_managed_uv()``
-# instead of ``shutil.which("uv")``.  Many tests in this file patch
-# ``shutil.which`` to control whether uv is "available" — these autouse
-# fixtures make the managed_uv functions delegate to the patched
-# ``shutil.which`` so the existing test setup keeps working without
-# per-test changes.
 @pytest.fixture(autouse=True)
-def _patch_managed_uv(request):
-    """Make managed_uv helpers follow shutil.which mocking in tests."""
-    import shutil
-
-    # resolve_uv delegates to shutil.which("uv") so that test patches
-    # on shutil.which flow through naturally.
-    def _fake_resolve_uv(**kwargs):
-        return shutil.which("uv")
-
-    def _fake_ensure_uv(**kwargs):
-        return shutil.which("uv")
-
-    def _fake_update_managed_uv(**kwargs):
-        return None  # never actually self-update in tests
-
-    with patch("hermes_cli.managed_uv.resolve_uv", side_effect=_fake_resolve_uv), \
-         patch("hermes_cli.managed_uv.ensure_uv", side_effect=_fake_ensure_uv), \
-         patch("hermes_cli.managed_uv.update_managed_uv", side_effect=_fake_update_managed_uv):
-        yield
-
-
-@pytest.fixture(autouse=True)
-def _patch_gateway_discovery():
+def _patch_gateway_discovery(monkeypatch):
     """Keep cmd_update's gateway auto-restart phase off this machine's gateways.
 
     Tests in this file that reach the full success path (e.g. the #87694
@@ -56,6 +25,10 @@ def _patch_gateway_discovery():
     derives labels from the profile layout, so a default profile alone hands
     it ``ai.hermes.gateway`` and the verify step exits 1 (#111866, #110701).
     """
+    monkeypatch.setattr(hermes_main, "_pause_windows_gateways_for_update", lambda: None)
+    monkeypatch.setattr(hermes_main, "_resume_windows_gateways_after_update", lambda *a: None)
+    monkeypatch.setattr("pm.sync_venv", lambda *a, **k: None)
+    monkeypatch.setattr("hermes_cli.update_cmd_maint._run_post_update_maintenance", lambda *a, **k: None)
     with patch("hermes_cli.gateway.find_gateway_pids", return_value=[]), \
          patch("hermes_cli.gateway.supports_systemd_services", return_value=False), \
          patch("hermes_cli.update_cmd_fleet._restart_macos_launchd_gateways", lambda *a, **k: None), \
@@ -92,7 +65,6 @@ def _setup_update_mocks(monkeypatch, tmp_path):
     monkeypatch.setattr(hermes_config, "get_missing_config_fields", lambda: [])
     monkeypatch.setattr(hermes_config, "check_config_version", lambda **_kwargs: (5, 5))
     monkeypatch.setattr(hermes_config, "migrate_config", lambda **kw: {"env_added": [], "config_added": []})
-    monkeypatch.setattr(hermes_main, "_upgrade_pip_before_lazy_refresh", lambda *a, **kw: None)
     monkeypatch.setattr(hermes_main, "_refresh_active_lazy_features", lambda *a, **kw: True)
 
 

@@ -98,10 +98,11 @@ test('a remote pooled descriptor without a local child does not require quit def
   assert.equal(stopper.hasPending(), false)
 })
 
-test('stopAll stops every pooled backend and resolves after all exits', async () => {
+test('stopAll waits for current and already-stopping backends', async () => {
   const { addChild, exitResolvers, pool, stopper } = harness()
   const a = addChild('a')
   const b = addChild('b')
+  const priorStop = stopper.stop('a')
 
   let settled = false
 
@@ -113,12 +114,13 @@ test('stopAll stops every pooled backend and resolves after all exits', async ()
   assert.equal(a.killed, true)
   assert.equal(b.killed, true)
 
-  exitResolvers.get(a)?.()
+  exitResolvers.get(b)?.()
   await Promise.resolve()
+  await new Promise(setImmediate)
   assert.equal(settled, false, 'must wait for EVERY child, not the first')
 
-  exitResolvers.get(b)?.()
-  await all
+  exitResolvers.get(a)?.()
+  await Promise.all([all, priorStop])
   assert.equal(settled, true)
 })
 
@@ -225,25 +227,31 @@ test('a respawn can await the in-flight stop before reusing the key', async () =
   assert.deepEqual(order, ['exit-signal', 'spawn'])
 })
 
-test('failed teardown blocks same-profile respawn until the actual late exit', async () => {
-  const child = Object.assign(new EventEmitter(), { exitCode: null, signalCode: null })
+test('failed stops block respawn and retain the child for a later stop retry', async () => {
+  const child: Child = { exited: false, killed: false }
   const pool = new Map([['profile', { process: child }]])
+  const failure = new Error('child is still alive')
+  const attempts: Child[] = []
+  let refuses = true
 
   const stopper = createPoolStopper({
     pool,
-    stopChild: () => {},
-    waitForExit: async () => {
-      throw new Error('child did not exit')
+    stopChild: current => { attempts.push(current!) },
+    waitForExit: async current => {
+      if (refuses) { throw failure }
+      current!.exited = true
     }
   })
 
-  const stopping = stopper.stop('profile')
+  const failed = stopper.stop('profile')
+  await assert.rejects(failed, error => error === failure)
+  assert.equal(pool.has('profile'), false)
+  assert.equal(stopper.inFlight('profile'), failed)
+  await assert.rejects(stopper.inFlight('profile')!, error => error === failure)
 
-  await assert.rejects(stopping, /did not exit/)
-  assert.equal(stopper.inFlight('profile'), stopping)
-  assert.equal(stopper.hasPending(), true)
-  await assert.rejects(stopper.stop('profile'), /did not exit/)
-  child.emit('exit')
+  refuses = false
+  await stopper.stopAll()
+  assert.deepEqual(attempts, [child, child])
+  assert.equal(child.exited, true)
   assert.equal(stopper.inFlight('profile'), undefined)
-  assert.equal(stopper.hasPending(), false)
 })

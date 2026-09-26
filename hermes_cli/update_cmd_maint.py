@@ -22,6 +22,23 @@ from hermes_cli.update_cmd_common import _best_effort
 logger = logging.getLogger("hermes_cli.update_cmd")
 
 
+_UPDATE_RUNTIME_RELOAD_MODULES = "hermes_constants", "tools.environments.local", "pm.extras"
+
+#: Package prefixes whose cached modules go stale when the checkout changes under this
+#: process; purged (not reloaded) so any LATER import chain resolves against fresh source.
+_STALE_PURGE_PREFIXES = "hermes_cli", "gateway", "tools", "tui_gateway", "agent"
+
+#: Modules EXECUTING the update survive the purge: evicting them buys nothing (running frames
+#: keep them alive) and reloading them mid-flight is the one genuinely unsafe move.
+_STALE_PURGE_PROTECTED = frozenset({"hermes_cli", "hermes_cli.main", "hermes_cli.hermes_logging"})
+
+#: The updater's own module family (``update_cmd*``, ``update_receipt``, ``update_inventory``,
+#: ``update_lock``, ...) is protected as a prefix: these hold per-run state — the open receipt
+#: singleton, the pre-update plan's ``RuntimeRecord`` class identity, the lock — and evicting
+#: one swaps in a fresh module whose ``_current`` is None (receipt silently never written) or
+#: whose dataclass fails every ``isinstance`` against the plan built before the purge.
+_STALE_PURGE_PROTECTED_PREFIX = "hermes_cli.update_"
+
 _PRE_UPDATE_SNAPSHOT_KEEP = 1
 
 # Per-file cap for the quick snapshot (larger files skipped with a warning): it protects
@@ -406,7 +423,8 @@ def _restore_state_db_from_snapshot(state_path: Path, snap_state: Path) -> bool:
     clobbers pages. Holder scan ``None`` proceeds (gateways drained; refusing on unknown would
     disable auto-restore on non-Linux). Raises OSError if the copy fails.
     """
-    from hermes_cli.backup import _foreign_db_holder_pids, verify_sqlite_integrity
+    from hermes_cli.backup import verify_sqlite_integrity
+    from hermes_cli.backup_restore import _foreign_db_holder_pids
     from hermes_cli.sqlite_safe_read import LiveConnectionError, offline_file_access
     holders = _foreign_db_holder_pids(state_path)
     if holders:
@@ -560,7 +578,7 @@ def _ensure_fhs_path_guard() -> None:
         if not cfg.is_file():
             continue
         try:
-            existing = cfg.read_text(errors="replace", encoding="utf-8")
+            existing = cfg.read_text(errors="replace", encoding="utf-8-sig")
         except OSError:
             continue
         # Idempotency: any uncommented PATH line referencing /usr/local/bin (install.sh grep).
@@ -809,7 +827,7 @@ def _sweep_bytecode_after_update(branch: str) -> None:
     from hermes_cli.update_cmd import _m
     # The update process is still the old Python interpreter process. Run one final cache/module refresh
     # immediately before lazy backend refresh, which imports newly-pulled modules that may depend on fresh
-    # symbols in hermes_constants or lazy_deps. The dependency install above may also have regenerated
+    # symbols in hermes_constants or pm.extras. The dependency install above may also have regenerated
     # bytecode from build-cache copies — this second sweep catches those stragglers (#60242, #65240).
     removed = _m()._clear_bytecode_cache(_m().PROJECT_ROOT)
     if removed:

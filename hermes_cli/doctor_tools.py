@@ -8,6 +8,7 @@ import os
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 from hermes_cli.doctor_platform import _system_package_install_cmd
 from hermes_cli.doctor_report import Finding, _fail_and_issue, check_bool, check_info, check_ok, check_warn, doctor_check
 from hermes_cli.vercel_auth import describe_vercel_auth
@@ -21,6 +22,71 @@ def _safe_which(cmd: str) -> str | None:
         return shutil.which(cmd)
     except Exception:
         return None
+
+
+def _pm_tool_path(name: str) -> Path | None:
+    """Answer a tool's binary from the pm store (facts.json), not PATH.
+
+    Doctor probes tools (git, rg, ...) that pinned installs run out of
+    the store; nothing puts the store on an interactive shell's PATH, so
+    a PATH-only probe reports a healthy managed install as "not found".
+    This answers from pm's registry/store/package authority: the recorded
+    entry's binary when it exists on disk, None when unstaged or the
+    recorded binary is gone (deleted = report missing, never guess).
+    Contract tests: tests/hermes_cli/test_doctor_pm_store_probe.py.
+    """
+    try:
+        import pm  # noqa: F401 — imports pm.packages, registering the definitions
+        from pm import paths, registry, store
+        from pm.lock import Facts
+
+        fact = Facts(paths.facts_path()).get(name) or {}
+        entry_name = fact.get("entry")
+        if not entry_name:
+            return None
+        package = registry.get_package(name)
+        binary = package.binary(store.Store(paths.store_root()).entry(entry_name), store.current_target())
+    except Exception:
+        return None
+    if binary is None or not binary.is_file():
+        return None
+    return binary
+
+
+def _pm_package_for_command(command: str) -> str | None:
+    """The pm package that provisions *command*, derived from pm's own
+    package definitions (binary_rel → executable basename) — no restated
+    name table, so new pm packages are covered without doctor changes."""
+    try:
+        import pm  # noqa: F401 — imports pm.packages, registering the definitions
+        from pm import registry, store
+        from pm.packages import BinaryPackage
+
+        target = store.current_target()
+        for package_name in registry.all_packages():
+            package = registry.get_package(package_name)
+            if isinstance(package, BinaryPackage):
+                rel = package._rel(target)
+                if rel and Path(rel).name.removesuffix(".exe").removesuffix(".cmd") == command:
+                    return package_name
+    except Exception:
+        return None
+    return None
+
+
+def _doctor_tool(name: str) -> tuple[str | None, str]:
+    """Resolve the tool Hermes would actually run: the pm store first
+    (pinned installs run tools out of the store, which nothing puts on
+    PATH), then PATH. *name* is the command ("rg"); its pm package
+    ("ripgrep") is resolved from pm's own definitions. Returns
+    ``(path, ok-row detail)``."""
+    for package_name in (name, _pm_package_for_command(name)):
+        if not package_name:
+            continue
+        staged = _pm_tool_path(package_name)
+        if staged:
+            return str(staged), "(pm store)"
+    return _safe_which(name), ""
 
 
 def _run_ok(cmd: list[str], timeout: int, **kw) -> bool:
@@ -38,7 +104,7 @@ def _termux_browser_setup_steps(node_installed: bool) -> list[str]:
 
 
 _TERMUX_INSTALL_ALL_FALLBACK_NOTES = (
-    "Termux install profile: use .[termux-all] for broad compatibility (installer default on Termux).",
+    "Termux uses the Hermes APT package: pkg install hermes-agent.",
     "Matrix E2EE extra is excluded on Termux (python-olm currently fails to build).",
     "Local faster-whisper extra is excluded on Termux (ctranslate2/av build path unavailable).",
     "STT fallback: use Groq Whisper (set GROQ_API_KEY) or OpenAI Whisper (set VOICE_TOOLS_OPENAI_KEY).",
@@ -137,8 +203,10 @@ def _missing_api_key_toolsets_for_summary(unavailable: list[dict]) -> list[dict]
 
 @doctor_check()
 def _check_git_and_rg(should_fix: bool, f: Finding) -> None:
-    check_bool(_safe_which("git"), "git", ("git not found", "(optional)"))
-    if not check_bool(_safe_which("rg"), ("ripgrep (rg)", "(faster file search)"),
+    git, git_detail = _doctor_tool("git")
+    rg, rg_detail = _doctor_tool("rg")
+    check_bool(git, ("git", git_detail), ("git not found", "(optional)"))
+    if not check_bool(rg, ("ripgrep (rg)", f"{rg_detail} (faster file search)".strip()),
                       ("ripgrep (rg) not found", "(file search uses grep fallback)")):
         check_info(f"Install for faster search: {_system_package_install_cmd('ripgrep')}")
 
@@ -202,7 +270,7 @@ def _check_daytona_backend(issues: list[str]) -> None:
         from daytona import Daytona  # noqa: F401 — SDK presence check
         check_ok("daytona SDK", "(installed)")
     except ImportError:
-        _fail_and_issue("daytona SDK not installed", "(pip install daytona)", "Install daytona SDK: pip install daytona", issues)
+        _fail_and_issue("daytona SDK not installed", "(run hermes setup terminal)", "Run hermes setup terminal and select Daytona, then restart Hermes", issues)
 
 
 def _check_vercel_backend(issues: list[str]) -> None:
@@ -215,8 +283,8 @@ def _check_vercel_backend(issues: list[str]) -> None:
              ("Vercel disk setting", "(uses platform default)"), ("Vercel custom disk unsupported", "(reset terminal.container_disk to 51200)"),
              "Vercel Sandbox does not support custom container_disk; use the shared default 51200", issues)
     _require(importlib.util.find_spec("vercel") is not None, ("vercel SDK", "(installed)"),
-             ("vercel SDK not installed", "(pip install 'hermes-agent[vercel]')"),
-             "Install the Vercel optional dependency: pip install 'hermes-agent[vercel]'", issues)
+             ("vercel SDK not installed", "(run hermes setup terminal)"),
+             "Run hermes setup terminal and select Vercel Sandbox, then restart Hermes", issues)
     auth_status = describe_vercel_auth()
     if auth_status.ok:
         check_ok("Vercel auth", f"({auth_status.label})")
@@ -319,7 +387,6 @@ def _check_chromium() -> None:
     Lazy import: browser_tool is ~150KB; an import failure is a separate bug surfaced elsewhere. Camofox, a
     CDP override, a cloud provider, or Lightpanda all bypass the local Chromium requirement (no warning).
     """
-    from hermes_cli.doctor import PROJECT_ROOT
     try:
         from tools.browser_tool import _is_camofox_mode
         from tools.browser_tool_cloud import _get_cloud_provider
@@ -332,8 +399,7 @@ def _check_chromium() -> None:
         return
     if not check_bool(_chromium_installed(), ("Playwright Chromium", "(browser engine)"),
                       ("Playwright Chromium not installed", "(browser_* tools will be hidden from the agent)")):
-        with_deps = "" if sys.platform == "win32" else "--with-deps "
-        check_info(f"Install with: cd {PROJECT_ROOT} && npx playwright install {with_deps}chromium")
+        check_info("Install with: hermes pm install chromium")
 
 
 def _check_lightpanda() -> None:

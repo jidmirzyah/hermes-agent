@@ -314,14 +314,23 @@ def _sanitize_subprocess_env(base_env: dict | None, extra_env: dict | None = Non
                          _plugin_terminal_env_strip_keys(), lambda p: p)
 
 
-def hermes_subprocess_env(*, inherit_credentials: bool = False) -> dict[str, str]:
+def hermes_subprocess_env(
+    *, inherit_credentials: bool = False, base_env: dict[str, str] | None = None
+) -> dict[str, str]:
     """Sanitized env for the **non-terminal** spawn surface (browser, ACP/CLI executors,
-    computer-use driver, TUI Node host). Tier 1 (``_ALWAYS_STRIP_KEYS``, plugin keys,
-    force-prefixed hints, dynamic internal secrets) is always removed; Tier 2 (the
-    provider/tool blocklist) unless ``inherit_credentials`` — pass that **only** for
-    children that legitimately need LLM credentials (user-blessed claude/codex/gemini
-    CLI, TUI Node host). Terminal/execute_code use ``_sanitize_subprocess_env``."""
-    env = _scrub_credentials(os.environ.copy(), inherit_credentials=inherit_credentials)
+    computer-use driver, TUI Node host, dep-ensure, detached gateway). Tier 1
+    (_ALWAYS_STRIP_KEYS, plugin keys, force-prefixed hints, dynamic internal secrets)
+    is always removed; Tier 2 (the provider/tool blocklist) unless inherit_credentials —
+    pass that **only** for children that legitimately need LLM credentials (user-blessed
+    claude/codex/gemini CLI, TUI Node host). Terminal/execute_code use
+    :func:"_sanitize_subprocess_env".
+
+    base_env swaps the starting environment (default os.environ) — for callers
+    that already hold a curated env (e.g. pm's sanitized uv env) and want the strip
+    policy applied on top of it.
+    """
+    base = dict(base_env) if base_env is not None else os.environ.copy()
+    env = _scrub_credentials(base, inherit_credentials=inherit_credentials)
     env.setdefault("PYTHONUTF8", "1")  # Windows UTF-8 safety for spawned processes
     return _finalize_child_env(env)
 
@@ -481,33 +490,18 @@ def _windows_bash_candidates(custom: "str | None") -> list[str]:
 
 
 def _find_bash() -> str:
-    """Find bash for command execution."""
-    if not _IS_WINDOWS:
-        return (shutil.which("bash")
-                or next((p for p in ("/usr/bin/bash", "/bin/bash") if os.path.isfile(p)), None)
-                or os.environ.get("SHELL") or "/bin/sh")
-    custom = os.environ.get("HERMES_GIT_BASH_PATH")
-    candidates = _windows_bash_candidates(custom)
-    # First candidate that can actually start wins: a stale HERMES_GIT_BASH_PATH
-    # pointing at a broken install must not beat a healthy portable Git.
-    for candidate in candidates:
-        if _bash_starts(candidate):
-            if candidate != custom and custom and os.path.isfile(custom):
-                logger.warning(
-                    "HERMES_GIT_BASH_PATH=%s fails to start; using %s instead", custom, candidate)
-            return candidate
-    if candidates:
-        probe_details = "\n".join(
-            detail for c in candidates if (detail := _bash_probe_details_cache.get(c)))
-        if _mandatory_aslr_enabled() is True or _looks_like_msys_spawn_failure(probe_details):
-            raise RuntimeError(_git_bash_aslr_help(candidates[0], probe_details))
-        # Unknown failure class: return the first path so the caller sees the
-        # real bash error instead of a less useful "not found".
-        return candidates[0]
+    """Resolve the shell Hermes runs commands with. Owned by pm (the store
+    is the authority on bundled bash); this is a thin wrapper over
+    pm.shell() for callers that need a bash binary."""
+    import pm.shell
+
+    bash = pm.shell.bash()
+    if bash:
+        return bash
     raise RuntimeError(
-        "Git Bash not found. Hermes Agent requires Git for Windows on Windows.\n"
-        "Install it from: https://git-scm.com/download/win\n"
-        "Or set HERMES_GIT_BASH_PATH to your bash.exe location.")
+        "No shell found. Hermes needs bash (Git for Windows on Windows). "
+        "Run `hermes pm install` or reinstall the bundle."
+    )
 
 
 _git_bash_bin_dirs_cache: "list[str] | None" = None
@@ -612,12 +606,32 @@ def _prepend_hermes_bin_dir(existing_path: str) -> str:
 
 
 def _managed_runtime_path_entries() -> list[str]:
-    """Existing Hermes-managed runtime dirs: ``$HERMES_HOME/node`` (+``/bin``) and
-    ``$HERMES_HOME/bin`` (managed ``uv``). Per call, not cached: home is
-    profile-scoped and a managed tree can appear mid-process."""
+    """Return existing Hermes-managed runtime dirs for the terminal subshell PATH.
+
+    The terminal tool spawns a subshell whose PATH is the agent process's PATH
+    plus ``_SANE_PATH``. Neither carries the runtimes Hermes installs for
+    itself, so on a machine where Hermes provisioned its own toolchain a
+    command the agent runs resolves a system copy instead — or nothing at all:
+
+    - the pm store's node/npm entries — installed to satisfy the desktop and
+      browser toolchain. ``tools/browser_tool.py`` already does this for its own
+      subprocesses; the agent's shell deserves the same.
+    - ``$HERMES_HOME/bin`` — the managed ``uv``. ``install.sh`` writes it there
+      and nothing has ever put that directory on PATH, so an install whose only
+      uv is the managed one looks uv-less to both the agent and the model.
+
+    Resolved per call rather than cached in a module constant because
+    ``get_hermes_home()`` is profile-scoped and a managed runtime can appear
+    mid-process (a lazy pm install, a first browser install).
+    """
     try:
-        from hermes_constants import get_hermes_home, iter_hermes_node_dirs
-        return [str(d) for d in (*iter_hermes_node_dirs(), get_hermes_home() / "bin") if d.is_dir()]
+        import pm
+        from hermes_constants import get_hermes_home
+
+        env = pm.env_for("npm", base_env={"PATH": ""})
+        managed = [Path(d) for d in env.get("PATH", "").split(os.pathsep) if d]
+        candidates = [*managed, get_hermes_home() / "bin"]
+        return [str(d) for d in candidates if d.is_dir()]
     except Exception:
         return []
 
@@ -874,6 +888,10 @@ class LocalEnvironment(BaseEnvironment):
         overrides work. Windows: ``%TEMP%`` often has spaces that break unquoted bash,
         so always the HERMES_HOME cache dir with forward slashes (bash- and Python-valid)."""
         if _IS_WINDOWS:
+            for key in ("TERMINAL_TEMP_DIR", "TMPDIR"):
+                candidate = self.env.get(key) or os.environ.get(key)
+                if candidate and os.path.isabs(candidate) and os.path.isdir(candidate):
+                    return Path(candidate).as_posix()
             cache_dir = (_default_terminal_temp_dir()
                          or Path(tempfile.gettempdir()) / "hermes_terminal")
             cache_dir.mkdir(parents=True, exist_ok=True)

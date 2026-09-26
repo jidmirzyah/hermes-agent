@@ -360,6 +360,10 @@ Server-side LLM fact extraction with semantic search, reranking, and automatic d
 | **Data storage** | Mem0 Cloud (platform), your own Mem0 server (self-hosted dashboard), or in-process (OSS) |
 | **Cost** | Mem0 pricing (platform) / free (self-hosted or OSS) |
 
+The `mem0` SDK extra is excluded on native Windows ARM64. An external Mem0
+server over HTTP is a separate mode; a remote service does not imply that the
+in-process SDK runs on that target.
+
 **Tools (4):** `mem0_search` (semantic search; optional reranking in platform mode, off by default), `mem0_add` (store verbatim facts), `mem0_update` (update by ID), `mem0_delete` (delete by ID)
 
 **Setup (Platform):**
@@ -449,15 +453,22 @@ hermes config set memory.provider hindsight
 echo "HINDSIGHT_API_KEY=your-key" >> ~/.hermes/.env
 ```
 
-The setup wizard installs dependencies automatically and only installs what's needed for the selected mode (`hindsight-client` for cloud, `hindsight-all` for local). Requires `hindsight-client >= 0.4.22` (auto-upgraded on session start if outdated).
+The client uses the locked `hindsight` extra through PM. Local Embedded adds
+a separately resolved runtime for `hindsight-embed` and `hindsight-api-slim`,
+outside Hermes' shared Python environment. Its generations and `active.json`
+selection live under `$HERMES_HOME/profiles/Hindsight/env/`. The daemon uses that
+interpreter, and Hermes connects through the HTTP client. Re-run
+`hermes memory setup` to install or repair the local runtime. A client dependency
+change can require restarting Hermes.
 
-**Local mode UI:** `hindsight-embed -p hermes ui start`
+The local Hindsight CLI belongs to the selected side environment, not the
+global PATH. Its environment is independent of the Hermes application payload.
 
 **Config:** `$HERMES_HOME/hindsight/config.json`
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `mode` | `cloud` | `cloud` or `local` |
+| `mode` | `cloud` | `cloud`, `local_embedded`, or `local_external` |
 | `bank_id` | `hermes` | Memory bank identifier |
 | `recall_budget` | `mid` | Recall thoroughness: `low` / `mid` / `high` |
 | `memory_mode` | `hybrid` | `hybrid` (context + tools), `context` (auto-inject only), `tools` (tools only) |

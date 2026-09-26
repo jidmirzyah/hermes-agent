@@ -73,6 +73,23 @@ def _is_client_error(exc: Exception) -> bool:
     return type(exc).__name__ in _CLIENT_ERROR_TYPES or any(s in err_str for s in ("404", "not found", "valid uuid"))
 
 
+def _read_mem0_json(config_path: Path) -> dict:
+    """Best-effort read of mem0.json; missing/corrupt file -> {}."""
+    if config_path.exists():
+        with suppress(Exception):
+            return json.loads(config_path.read_text(encoding="utf-8-sig"))
+    return {}
+
+
+def _scoped_env(name: str) -> str:
+    """Profile-scoped read of a non-secret mem0 setting; no scope under multiplex = unset (never
+    ``os.environ``). Only the API key may fail closed — OSS mode has none to read (#99121)."""
+    try:
+        return get_secret(name, "") or ""
+    except UnscopedSecretError:
+        return ""
+
+
 def _load_config() -> dict:
     """Env vars provide defaults; $HERMES_HOME/mem0.json overrides individual keys.
     Layering avoids a silent failure when the JSON file exists but lacks fields
@@ -173,8 +190,8 @@ class Mem0MemoryProvider(MemoryProvider):
         # Lazy-install the mem0 SDK before the backend imports it (honors security.allow_lazy_installs);
         # on failure the backend import raises the canonical error, captured below.
         with suppress(Exception):
-            from tools.lazy_deps import ensure as _lazy_ensure
-            _lazy_ensure("memory.mem0", prompt=False)
+            from pm import ensure_import
+            ensure_import("mem0")
         try:
             from . import _backend
             if self._mode == "oss":

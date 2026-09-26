@@ -77,8 +77,8 @@ def test_genuine_external_worker_crash_is_recovered_unknown(
     assert "whether side effects ran is unknown" in recovered["error"]
 
 
-@pytest.mark.linux_only
-def test_restart_safe_gateway_child_fails_closed_when_required(monkeypatch):
+@pytest.mark.platforms("linux")
+def test_restart_safe_gateway_child_fails_closed_without_scope(monkeypatch):
     import tools.process_registry as process_registry
 
     monkeypatch.setattr(process_registry, "_is_supervised_gateway_process", lambda: True)
@@ -832,7 +832,7 @@ def test_lost_execution_start_cas_prevents_side_effects(monkeypatch):
     run.assert_not_called()
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 @pytest.mark.live_system_guard_bypass
 def test_managed_gateway_restart_preserves_active_worker_and_single_side_effect(
     tmp_path, monkeypatch

@@ -23,7 +23,7 @@ def _read_tui_active_session_file(path: Optional[str]) -> Optional[str]:
     if not path:
         return None
     try:
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        data = json.loads(Path(path).read_text(encoding="utf-8-sig"))
         return str(data.get("session_id") or "").strip() or None
     except Exception:
         return None
@@ -228,8 +228,8 @@ def _tui_need_npm_install(root: Path) -> bool:
         return True
 
     try:
-        wanted = json.loads(lock.read_text(encoding="utf-8")).get("packages") or {}
-        installed = json.loads(marker.read_text(encoding="utf-8")).get("packages") or {}
+        wanted = json.loads(lock.read_text(encoding="utf-8-sig")).get("packages") or {}
+        installed = json.loads(marker.read_text(encoding="utf-8-sig")).get("packages") or {}
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return lock.stat().st_mtime > marker.stat().st_mtime
 
@@ -278,7 +278,8 @@ _TUI_BUILD_INPUT_FILES = (
     "tsconfig.json",
     "tsconfig.build.json",
     "babel.compiler.config.cjs",
-    "scripts/build.mjs",
+    "../scripts/build/tui.mjs",
+    "../scripts/build/frontend-common.mjs",
     "packages/hermes-ink/package.json",
     "packages/hermes-ink/index.js",
     "packages/hermes-ink/text-input.js",
@@ -631,7 +632,7 @@ def _read_cgroup_memory_limit() -> Optional[int]:
     )
     for path in candidates:
         try:
-            with open(path, "r", encoding="utf-8") as f:
+            with open(path, "r", encoding="utf-8-sig") as f:
                 raw = f.read().strip()
         except (OSError, ValueError):
             continue
