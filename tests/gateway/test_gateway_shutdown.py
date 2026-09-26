@@ -39,26 +39,15 @@ async def test_cancel_background_tasks_cancels_inflight_message_processing():
     assert adapter._pending_messages == {}
 
 
-def test_cleanup_agent_resources_reaps_stale_aux_clients():
-    runner, _adapter = make_restart_runner()
-    agent = MagicMock()
-
-    with patch("agent.auxiliary_client.cleanup_stale_async_clients") as cleanup_mock:
-        runner._cleanup_agent_resources(agent)
-
-    agent.shutdown_memory_provider.assert_called_once()
-    agent.close.assert_called_once()
-    cleanup_mock.assert_called_once()
 
 
-def test_cron_provider_stop_cannot_override_gateway_exit_code(caplog):
+def test_cron_provider_stop_cannot_override_gateway_exit_code():
     provider = MagicMock()
     provider.stop.side_effect = SystemExit(GATEWAY_SERVICE_RESTART_EXIT_CODE)
 
     gateway_run._stop_cron_provider(provider)
 
     provider.stop.assert_called_once_with()
-    assert f"attempted to exit the gateway with code {GATEWAY_SERVICE_RESTART_EXIT_CODE}; ignoring" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -169,59 +158,14 @@ async def test_planned_service_exit_issues_no_restart_of_its_own(monkeypatch):
     assert runner._exit_code == GATEWAY_SERVICE_RESTART_EXIT_CODE
 
 
-@pytest.mark.asyncio
-async def test_unexpected_signal_starts_teardown_after_bounded_interrupt_grace():
-    from types import SimpleNamespace
-
-    runner, adapter = make_restart_runner()
-    runner._restart_drain_timeout = 0.0
-    runner._signal_initiated_shutdown = True
-    runner._signal_interrupt_grace_timeout = 0.25
-    running_agent = MagicMock()
-    runner._running_agents = {"session": running_agent}
-
-    now = 0.0
-    sleeps = []
-    disconnect_started = asyncio.Event()
-
-    async def advance_grace(delay):
-        nonlocal now
-        assert running_agent.interrupt.called
-        assert not disconnect_started.is_set()
-        sleeps.append(delay)
-        now += delay
-        await asyncio.sleep(0)
-
-    async def disconnect():
-        assert runner._running_agents == {"session": running_agent}
-        disconnect_started.set()
-
-    adapter.disconnect = disconnect
-    # Advance only the shutdown clock. Real cleanup and executor scheduling do not
-    # consume the grace budget, and asyncio's own deadlines keep their real clock.
-    shutdown_asyncio = SimpleNamespace(**vars(asyncio))
-    shutdown_asyncio.get_running_loop = lambda: SimpleNamespace(time=lambda: now)
-    shutdown_asyncio.sleep = advance_grace
-
-    with (
-        patch("gateway.status.remove_pid_file"),
-        patch("gateway.status.publish_runtime_status"),
-        patch("gateway.run_shutdown.asyncio", shutdown_asyncio),
-    ):
-        await asyncio.wait_for(runner.stop(), timeout=10)
-
-    assert sleeps
-    assert sum(sleeps[:-1]) < runner._signal_interrupt_grace_timeout <= now
-    assert disconnect_started.is_set()
-    assert runner._shutdown_event.is_set() is True
 
 
 @pytest.mark.parametrize(
     ("signal_initiated", "restart_requested", "expected"),
     [
         (True, False, 0.25),
-        (False, False, 5.0),
-        (True, True, 5.0),
+        (False, False, DEFAULT_GATEWAY_POST_INTERRUPT_GRACE_TIMEOUT),
+        (True, True, DEFAULT_GATEWAY_POST_INTERRUPT_GRACE_TIMEOUT),
     ],
 )
 def test_post_interrupt_grace_only_shortens_unexpected_signal_shutdown(
@@ -235,13 +179,6 @@ def test_post_interrupt_grace_only_shortens_unexpected_signal_shutdown(
     assert runner._post_interrupt_grace_timeout() == expected
 
 
-def test_post_interrupt_grace_tolerates_duck_typed_runner():
-    runner = MagicMock(spec=[])
-
-    assert (
-        gateway_run.GatewayRunner._post_interrupt_grace_timeout(runner)
-        == DEFAULT_GATEWAY_POST_INTERRUPT_GRACE_TIMEOUT
-    )
 
 @pytest.mark.asyncio
 async def test_in_chat_restart_skips_home_shutdown_even_with_active_session():

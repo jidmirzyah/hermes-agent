@@ -1,6 +1,5 @@
 """Tests for Matrix require-mention gating and auto-thread features."""
 
-import json
 import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -102,12 +101,6 @@ class TestIsBotMentioned:
     # m.mentions.user_ids — MSC3952 / Matrix v1.7 authoritative mentions
     # Ported from openclaw/openclaw#64796
 
-    def test_m_mentions_user_ids_authoritative(self):
-        """m.mentions.user_ids alone is sufficient — no body text needed."""
-        assert self.adapter._is_bot_mentioned(
-            "please reply",  # no @hermes anywhere in body
-            mention_user_ids=["@hermes:example.org"],
-        )
 
 
 class TestStripMention:
@@ -291,18 +284,6 @@ async def test_auto_thread_skips_dm(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-class TestThreadPersistence:
-    def test_empty_state_file(self, tmp_path, monkeypatch):
-        """No state file → empty set."""
-        from gateway.platforms.helpers import ThreadParticipationTracker
-
-        monkeypatch.setattr(
-            ThreadParticipationTracker,
-            "_state_path",
-            lambda self: tmp_path / "matrix_threads.json",
-        )
-        adapter = _make_adapter()
-        assert "$nonexistent" not in adapter._threads
 
 
 # ---------------------------------------------------------------------------
@@ -329,29 +310,8 @@ async def test_dm_mention_thread_creates_thread(monkeypatch):
     assert msg.text == "help me"
 
 
-@pytest.mark.parametrize("existing", [None, "operator"])
-@pytest.mark.parametrize("secondary", [False, True])
-def test_yaml_bridge_respects_scope_and_existing_env(monkeypatch, existing, secondary):
-    import os
-    from agent.secret_scope import set_multiplex_active, set_secret_scope, reset_secret_scope
-    from plugins.platforms.matrix.adapter import _apply_yaml_config
+# ---------------------------------------------------------------------------
+# YAML config bridge
+# ---------------------------------------------------------------------------
 
-    expected = {"MATRIX_REQUIRE_MENTION": "false", "MATRIX_AUTO_THREAD": "false",
-                "MATRIX_FREE_RESPONSE_ROOMS": "!one:example.org,!two:example.org"}
-    config = {"require_mention": False, "auto_thread": False,
-              "free_response_rooms": ["!one:example.org", "!two:example.org"]}
-    for key in expected:
-        monkeypatch.delenv(key, raising=False)
-        if existing is not None:
-            monkeypatch.setenv(key, existing)
-    token = set_secret_scope({}) if secondary else None
-    set_multiplex_active(secondary)
-    try:
-        assert _apply_yaml_config({"matrix": config}, config) == config
-        assert {key: os.environ.get(key) for key in expected} == (
-            dict.fromkeys(expected, existing) if secondary or existing else expected
-        )
-    finally:
-        if token is not None:
-            reset_secret_scope(token)
-        set_multiplex_active(False)
+

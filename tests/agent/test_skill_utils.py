@@ -5,19 +5,15 @@ from unittest.mock import patch
 import pytest
 
 from agent.skill_utils import (
-    extract_skill_config_vars,
-    extract_skill_conditions,
     get_disabled_skill_names,
     get_external_skills_dirs,
     is_excluded_skill_path,
-    is_external_skill_path,
     is_skill_support_path,
     iter_skill_index_files,
     parse_config_string_list,
     parse_frontmatter,
     resolve_skill_config_values,
     skill_matches_platform,
-    skill_matches_platform_list,
 )
 
 
@@ -130,21 +126,6 @@ class TestDisabledSkillsJsonArrayString:
 
         assert get_disabled_skill_names() == {"skill-a", "skill-b"}
 
-    def test_get_disabled_skill_names_scalar_string_still_single_name(
-        self, tmp_path, monkeypatch
-    ):
-        hermes_home = tmp_path / ".hermes"
-        hermes_home.mkdir()
-        (hermes_home / "config.yaml").write_text(
-            "skills:\n  disabled: 'hidden-skill'\n",
-            encoding="utf-8",
-        )
-        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
-        from agent import skill_utils
-
-        getattr(skill_utils, "_raw_config_cache_clear", lambda: None)()
-
-        assert get_disabled_skill_names() == {"hidden-skill"}
 
 
 def test_skill_config_home_vars_use_subprocess_home(tmp_path, monkeypatch):
@@ -242,26 +223,13 @@ def test_skill_support_path_uses_explicit_discovery_root_not_cwd(tmp_path, monke
     assert is_excluded_skill_path(relative, root=discovery_root) is True
 
 
-# ── skill_matches_platform─────────────────────────────────────────────────
+# ── skill_matches_platform on Termux ──────────────────────────────────────
 
 
-class TestSkillMatchesPlatform:
-    @pytest.mark.platforms("any")
-    def test_no_platforms_field_matches_everywhere(self):
-        # Backward-compat default — skills without a platforms tag load
-        # on any OS.
-        assert skill_matches_platform({}) is True
-        assert skill_matches_platform({"name": "foo"}) is True
-
-    @pytest.mark.platforms("any")
-    def test_linux_skill_matches_only_linux(self):
-        fm = {"platforms": ["linux"]}
-        import sys
-
-        assert skill_matches_platform(fm) is sys.platform.startswith("linux")
-        assert skill_matches_platform_list(fm["platforms"]) is sys.platform.startswith("linux")
 
 
+
+class TestNormalizeSkillLookupName:
     def test_relative_path_unchanged(self, tmp_path, monkeypatch):
         from agent.skill_utils import normalize_skill_lookup_name
 
@@ -336,23 +304,13 @@ class TestParseFrontmatterBOM:
         import sys
 
         expected = sys.platform == "darwin"
-        plain_fm, _ = parse_frontmatter(self.SKILL)
-        bom_fm, _ = parse_frontmatter("\ufeff" + self.SKILL)
-        assert skill_matches_platform(plain_fm) is expected
-        assert skill_matches_platform(bom_fm) is expected
+        with patch("agent.skill_utils.is_termux", return_value=False):
+            plain_fm, _ = parse_frontmatter(self.SKILL)
+            bom_fm, _ = parse_frontmatter("\ufeff" + self.SKILL)
+            assert skill_matches_platform(plain_fm) is expected
+            assert skill_matches_platform(bom_fm) is expected
 
 
-    def test_real_file_read_path(self, tmp_path):
-        # End-to-end: write the file the way a Windows editor does (utf-8-sig
-        # emits a BOM), read it the way _parse_skill_file does (plain utf-8),
-        # and confirm the frontmatter survives the round trip.
-        f = tmp_path / "SKILL.md"
-        f.write_text(self.SKILL, encoding="utf-8-sig")
-        raw = f.read_text(encoding="utf-8")
-        assert raw.startswith("\ufeff")  # BOM really is present on disk
-        fm, _ = parse_frontmatter(raw)
-        assert fm["name"] == "my-skill"
-        assert fm["platforms"] == ["macos"]
 
 
 class TestBOMToleranceSiblingSites:

@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import sys
 import types
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from hermes_cli import main as cli_main
@@ -204,7 +203,6 @@ def test_missing_psutil_keeps_refusal():
 
 
 def test_stop_process_trees_kills_full_tree():
-    from hermes_cli import update_cmd
 
     with patch("gateway.status.get_process_start_time", return_value=123), patch(
         "hermes_cli._subprocess_compat.pid_is_hermes", return_value=True

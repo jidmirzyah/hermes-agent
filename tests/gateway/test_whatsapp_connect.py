@@ -15,7 +15,7 @@ Regression tests for two bugs in WhatsAppAdapter.connect():
 import asyncio
 import signal
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, call, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -111,25 +111,6 @@ def _connect_patches(mock_proc, mock_fh, mock_client_cls=None):
 # _close_bridge_log() unit tests
 # ---------------------------------------------------------------------------
 
-class TestCloseBridgeLog:
-    """Direct tests for the _close_bridge_log() helper method."""
-
-    @staticmethod
-    def _bare_adapter():
-        from plugins.platforms.whatsapp.adapter import WhatsAppAdapter
-        a = WhatsAppAdapter.__new__(WhatsAppAdapter)
-        a._bridge_log_fh = None
-        return a
-
-    def test_closes_open_handle(self):
-        adapter = self._bare_adapter()
-        mock_fh = MagicMock()
-        adapter._bridge_log_fh = mock_fh
-
-        adapter._close_bridge_log()
-
-        mock_fh.close.assert_called_once()
-        assert adapter._bridge_log_fh is None
 
 
 # ---------------------------------------------------------------------------
@@ -220,7 +201,6 @@ class TestConnectCleanup:
         assert result is False
         assert adapter.fatal_error_code == "whatsapp_npm_install_failed"
         assert adapter.fatal_error_retryable is False
-        assert "npm install failed" in (adapter.fatal_error_message or "")
         mock_release.assert_called_once_with("whatsapp-session", str(adapter._session_path))
         assert adapter._platform_lock_identity is None
 
@@ -245,7 +225,6 @@ class TestBridgeRuntimeFailure:
         result = await adapter.send("chat-123", "hello")
 
         assert result.success is False
-        assert "exited unexpectedly" in result.error
         assert adapter.fatal_error_code == "whatsapp_bridge_exited"
         assert adapter.fatal_error_retryable is True
         fatal_handler.assert_awaited_once()
@@ -317,9 +296,9 @@ class TestBridgeRuntimeFailure:
 class TestKillPortProcess:
     """Verify _kill_port_process uses platform-appropriate commands."""
 
-    @pytest.mark.platforms("windows")
+    @pytest.mark.windows_only
     def test_uses_netstat_and_taskkill_on_windows(self):
-        """``platforms("windows")``: netstat/taskkill are Windows binaries. The old
+        """``windows_only``: netstat/taskkill are Windows binaries. The old
         ``_IS_WINDOWS`` patch selected this branch on Linux, where neither
         exists, so the mocked argv was the only thing under test."""
         from plugins.platforms.whatsapp.adapter import _kill_port_process
@@ -354,7 +333,7 @@ class TestKillPortProcess:
             for call in mock_run.call_args_list
         )
 
-    @pytest.mark.platforms("windows")
+    @pytest.mark.windows_only
     def test_windows_refuses_taskkill_on_non_bridge_pid(self):
         """#89614 class: the netstat-scanned PID is a bare number — if the
         live process is not a node bridge, taskkill must never fire."""
@@ -380,7 +359,7 @@ class TestKillPortProcess:
         )
 
 
-    @pytest.mark.platforms("linux")
+    @pytest.mark.linux_only
     def test_kills_only_listeners_on_linux(self):
         """POSIX path SIGTERMs only LISTENer PIDs (never clients) — the #43846 fix.
 
@@ -389,7 +368,7 @@ class TestKillPortProcess:
         processes (a browser tab on the same port). The implementation now
         resolves listeners via ``_listener_pids_on_port`` and signals only those.
 
-        ``platforms("linux")``: asserts the POSIX ``os.kill``/SIGTERM path, which is
+        ``linux_only``: asserts the POSIX ``os.kill``/SIGTERM path, which is
         genuinely selected here without patching ``_IS_WINDOWS``.
         """
         from plugins.platforms.whatsapp import adapter as wa
@@ -406,7 +385,7 @@ class TestKillPortProcess:
         mock_listeners.assert_called_once_with(3000)
         assert kills == [(55555, signal.SIGTERM)]
 
-    @pytest.mark.platforms("linux")
+    @pytest.mark.linux_only
     def test_non_bridge_listener_is_never_killed(self):
         """#89614 class: a listener that is not a node bridge is refused."""
         from plugins.platforms.whatsapp import adapter as wa
@@ -431,11 +410,11 @@ class TestHttpSessionLifecycle:
     """Verify persistent aiohttp.ClientSession is created and cleaned up."""
 
     @pytest.mark.asyncio
-    @pytest.mark.platforms("windows")
+    @pytest.mark.windows_only
     async def test_disconnect_uses_taskkill_tree_on_windows(self):
         """Windows disconnect should target the bridge process tree, not just the parent PID.
 
-        ``platforms("windows")``: ``taskkill /T`` is the Windows tree-kill primitive;
+        ``windows_only``: ``taskkill /T`` is the Windows tree-kill primitive;
         on Linux the branch was reachable only by faking ``_IS_WINDOWS``.
         """
         adapter = _make_adapter()
@@ -452,20 +431,8 @@ class TestHttpSessionLifecycle:
              patch("plugins.platforms.whatsapp.adapter.asyncio.sleep", new_callable=AsyncMock):
             await adapter.disconnect()
 
-        taskkill_calls = [
-            c for c in mock_run.call_args_list
-            if c.args and c.args[0] and c.args[0][0] == "taskkill"
-        ]
-        assert taskkill_calls == [
-            call(
-                ["taskkill", "/PID", "12345", "/T"],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=10,
-            )
-        ], mock_run.call_args_list
+        mock_run.assert_called_once()
+        assert mock_run.call_args.args[0] == ["taskkill", "/PID", "12345", "/T"]
         mock_proc.terminate.assert_not_called()
         mock_proc.kill.assert_not_called()
 

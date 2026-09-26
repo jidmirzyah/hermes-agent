@@ -111,7 +111,6 @@ google-auth-httplib2 = false
 psutil = false
 python-telegram-bot = false
 jinja2 = false
-hindsight-client = false
 sounddevice = false
 alibabacloud-dingtalk = false
 dingtalk-stream = false

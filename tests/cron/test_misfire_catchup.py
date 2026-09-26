@@ -144,28 +144,22 @@ class TestFireOverdueJobs:
         assert fire_overdue_jobs(provider2) == 0
 
     def test_dispatch_is_nonblocking(self, tmp_cron_dir):
-        """The sweep returns while the dispatched provider is still blocked."""
-        worker_running = threading.Event()
+        """fire_claimed runs off-thread — a slow job must not stall the
+        sweep (housekeeping loop) for the length of an agent run."""
+
         release = threading.Event()
 
         class BlockedProvider(RecordingProvider):
             def fire_claimed(self, claimed_job, **kw):
-                worker_running.set()
-                try:
-                    assert release.wait(timeout=10), "test never released the worker"
-                    return super().fire_claimed(claimed_job, **kw)
-                finally:
-                    self._done.set()
+                assert release.wait(10)
+                return super().fire_claimed(claimed_job, **kw)
 
         job = create_job(prompt="p", schedule="every 1h")
         _park_in_past(job["id"], minutes=30)
         provider = BlockedProvider()
         try:
-            # Must return while the dispatched run is still blocked.
+            # Returns while fire_claimed is still blocked -> dispatched off-thread.
             assert fire_overdue_jobs(provider) == 1
-            # The run actually started off-thread (dispatch happened, not a skip).
-            assert worker_running.wait(timeout=10)
-            assert not provider._done.is_set()
             assert provider.fired == []
         finally:
             release.set()

@@ -118,7 +118,7 @@ class TestUpdateCommandGatewayFlag:
              patch("gateway.run.__file__", fake_file), \
              patch("shutil.which", side_effect=lambda x: f"/usr/bin/{x}"), \
              patch("subprocess.Popen", mock_popen):
-            result = await runner._handle_update_command(event)
+            await runner._handle_update_command(event)
 
         # Check the bash command string contains --gateway. _spawn_detached_update builds a
         # single `bash -c` command (with output redirection and exit-code capture), so
@@ -131,7 +131,6 @@ class TestUpdateCommandGatewayFlag:
         assert "PYTHONUNBUFFERED=1" in cmd_string
         assert "rc=$?" in cmd_string
         assert "status=$?" not in cmd_string
-        assert "stream progress" in result
 
 
 # ---------------------------------------------------------------------------

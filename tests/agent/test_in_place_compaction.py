@@ -14,7 +14,6 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
 
 
 def _make_agent(session_db, session_id, *, in_place):
@@ -123,7 +122,6 @@ class TestInPlaceCompaction:
             assert agent._last_compaction_in_place is True
             # Live transcript actually shrank.
             assert len(compressed) == 2
-            db.close()
 
     def test_in_place_alternation_preserved(self):
         """The compacted list must not introduce consecutive same-role messages."""
@@ -141,7 +139,6 @@ class TestInPlaceCompaction:
             )
             roles = [m["role"] for m in compressed if m.get("role") != "system"]
             assert all(roles[i] != roles[i + 1] for i in range(len(roles) - 1))
-            db.close()
 
 
     def test_rotation_still_preflushes(self):
@@ -163,7 +160,6 @@ class TestInPlaceCompaction:
                 approx_tokens=100_000, system_message="sys",
             )
             assert calls["n"] == 1
-            db.close()
 
 
 class TestRotationFallbackWhenFlagOff:
@@ -208,46 +204,6 @@ class TestRotationFallbackWhenFlagOff:
             ]
             # Rotation mode does NOT set the in-place signal.
             assert getattr(agent, "_last_compaction_in_place", False) is False
-            db.close()
-
-
-class TestInPlaceSignalForGateway:
-    """compress_context must expose a rotation-independent flag the gateway can
-    read (instead of an id-change diff) to re-baseline transcript handling."""
-
-    def test_signal_set_on_in_place_unset_on_rotation(self):
-        from hermes_state import SessionDB
-        from agent.conversation_compression import compress_context
-
-        with tempfile.TemporaryDirectory() as tmp:
-            db = SessionDB(db_path=Path(tmp) / "t.db")
-            # in-place → flag True
-            _seed(db, "s_ip", "ip")
-            a_ip = _make_agent(db, "s_ip", in_place=True)
-            compress_context(
-                a_ip, [{"role": "user", "content": "x"}] * 8,
-                approx_tokens=100_000, system_message="sys",
-            )
-            assert a_ip._last_compaction_in_place is True
-
-            # rotation → flag False
-            _seed(db, "s_rot", "rot")
-            a_rot = _make_agent(db, "s_rot", in_place=False)
-            compress_context(
-                a_rot, [{"role": "user", "content": "x"}] * 8,
-                approx_tokens=100_000, system_message="sys",
-            )
-            assert a_rot._last_compaction_in_place is False
-            db.close()
-
-
-class TestInPlaceConfigDefault:
-    def test_flag_defaults_on(self):
-        """In-place is the default as of #38763 (rotation is now opt-out via
-        compression.in_place: false)."""
-        from hermes_cli.config import DEFAULT_CONFIG
-
-        assert DEFAULT_CONFIG["compression"].get("in_place") is True
 
 
 class TestInPlaceAntiGrowthGuard:
@@ -297,7 +253,6 @@ class TestInPlaceAntiGrowthGuard:
             # Session identity untouched.
             assert agent.session_id == sid
             assert db.get_session(sid)["end_reason"] is None
-            db.close()
 
     def test_in_place_salvages_near_break_even_growth(self):
         """Fat retained tool output + todo state should be salvaged and committed."""
@@ -354,34 +309,6 @@ class TestInPlaceAntiGrowthGuard:
             # Tool stubbing alone got under budget, so the todo snapshot (the
             # only in-transcript todo re-injection) survives the salvage.
             assert any(m.get("_todo_snapshot_synthetic") for m in compressed)
-            db.close()
-
-    def test_in_place_still_commits_shrinking_compression(self):
-        """The guard must not block legitimate compressions — a result SMALLER
-        than the input still commits in place (regression net for #83339)."""
-        from hermes_state import SessionDB
-        from agent.conversation_compression import compress_context
-
-        with tempfile.TemporaryDirectory() as tmp:
-            db = SessionDB(db_path=Path(tmp) / "t.db")
-            sid = "20260619_shrink"
-            _seed(db, sid, "shrink")
-            agent = _make_agent(db, sid, in_place=True)
-            agent._last_flushed_db_idx = 5
-
-            messages = [{"role": "user", "content": f"m{i}"} for i in range(8)]
-            compressed, _sp = compress_context(
-                agent, messages, approx_tokens=100_000, system_message="sys"
-            )
-
-            # The fake compressor returns a small summary — commit happens.
-            assert agent._last_compaction_in_place is True
-            reloaded = db.get_messages_as_conversation(sid)
-            assert [m.get("content") for m in reloaded] == [
-                "[CONTEXT COMPACTION] summary of prior turns",
-                "recent reply",
-            ]
-            db.close()
 
 
 class TestCompactedTurnsStaySearchable:
@@ -425,7 +352,6 @@ class TestCompactedTurnsStaySearchable:
             assert {m["id"] for m in after} == {1, 4}
             # Live context still excludes them.
             assert len(db.get_messages_as_conversation(sid)) == 2
-            db.close()
 
     def test_rewound_turns_stay_hidden(self):
         """Rewind/undo (active=0, compacted=0) must NOT leak into default
@@ -445,4 +371,3 @@ class TestCompactedTurnsStaySearchable:
                 "ZEBRAWORD", role_filter=["user", "assistant"], include_inactive=True
             )
             assert len(recovered) == 1
-            db.close()

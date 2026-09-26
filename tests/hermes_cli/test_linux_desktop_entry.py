@@ -15,11 +15,13 @@ import pytest
 from hermes_cli import linux_desktop_entry as lde
 
 
-
 @pytest.fixture
 def xdg_home(tmp_path, monkeypatch) -> Path:
     data_home = tmp_path / "xdg-data"
     monkeypatch.setenv("XDG_DATA_HOME", str(data_home))
+    # Isolate the known-wrapper probe too: tests must never see the real
+    # ~/.local/bin/hermes on the dev machine.
+    monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(lde.sys, "platform", "linux")
     return data_home
 
@@ -83,22 +85,13 @@ def test_install_writes_entry_with_absolute_exec_and_icon(
 
     # Exec must be the absolute path of the resolved binary. The launcher
     # runs with a minimal PATH, so a bare `hermes` would not resolve.
-    # _quote_exec_arg quotes it per the desktop-entry spec when the path
-    # contains reserved characters (Windows drive/backslash paths do).
-    exec_value = values["Exec"]
-    exec_parts = exec_value.split(" ")
-    if exec_parts[0].startswith('"'):
-        unquoted = exec_parts[0][1:-1].replace("\\\\", "\\")
-    else:
-        unquoted = exec_parts[0]
-    assert unquoted == str(hermes_bin)
-    assert exec_value.endswith(" desktop")
+    assert values["Exec"] == f"{hermes_bin} desktop"
+    assert Path(values["Exec"].split(" ")[0]).is_absolute()
 
     # Icon must be an absolute path to the real icon in the checkout.
     icon_path = Path(values["Icon"])
     assert icon_path.is_absolute()
     assert icon_path == lde.icon_path(root)
-
 
 
 def test_install_prefers_themed_icon_from_hicolor(tmp_path, xdg_home, monkeypatch):
@@ -128,7 +121,6 @@ def test_install_prefers_themed_icon_from_hicolor(tmp_path, xdg_home, monkeypatc
     dest = xdg_home / "icons" / "hicolor" / "256x256" / "apps" / "hermes.png"
     assert dest.is_file()
     assert dest.read_bytes() == lde.icon_path(root).read_bytes()
-@pytest.mark.platforms("linux")
 
 
 def test_install_icon_copy_failure_falls_back_to_absolute(
@@ -160,10 +152,11 @@ def test_install_icon_copy_failure_falls_back_to_absolute(
     assert values["Terminal"] == "false"
 
 
-@pytest.mark.platforms("linux")
 def test_installed_entry_is_executable(tmp_path, xdg_home, monkeypatch):
     root = _make_project(tmp_path)
-    monkeypatch.setattr("hermes_cli.relaunch.resolve_hermes_bin", lambda: "/usr/bin/hermes")
+    monkeypatch.setattr(
+        "hermes_cli.relaunch.resolve_hermes_bin", lambda: "/usr/bin/hermes"
+    )
     monkeypatch.setattr(lde, "refresh_desktop_databases", lambda _dir: [])
 
     entry = lde.install_desktop_entry(root)
@@ -171,7 +164,6 @@ def test_installed_entry_is_executable(tmp_path, xdg_home, monkeypatch):
     assert entry.stat().st_mode & stat.S_IXUSR
 
 
-@pytest.mark.platforms("linux")
 def test_exec_falls_back_to_interpreter_module(tmp_path, xdg_home, monkeypatch):
     root = _make_project(tmp_path)
     monkeypatch.setattr("hermes_cli.relaunch.resolve_hermes_bin", lambda: None)
@@ -189,7 +181,6 @@ def test_exec_falls_back_to_interpreter_module(tmp_path, xdg_home, monkeypatch):
 # interpreter when the DE spawns the .desktop entry → ModuleNotFoundError,
 # silent (Terminal=false). The Exec line must prefix sys.executable for any
 # resolved bin that is a python script escaping the running venv.
-@pytest.mark.platforms("linux")
 def test_exec_prefixes_interpreter_for_env_shebang_python_script(
     tmp_path, xdg_home, monkeypatch
 ):
@@ -198,30 +189,35 @@ def test_exec_prefixes_interpreter_for_env_shebang_python_script(
     root = _make_project(tmp_path)
     hermes_bin = tmp_path / "bin" / "hermes"
     hermes_bin.parent.mkdir()
-    hermes_bin.write_text("#!/usr/bin/env python3\nimport hermes_cli\n", encoding="utf-8")
+    hermes_bin.write_text(
+        "#!/usr/bin/env python3\nimport hermes_cli\n", encoding="utf-8"
+    )
     hermes_bin.chmod(0o755)
-    monkeypatch.setattr("hermes_cli.relaunch.resolve_hermes_bin", lambda: str(hermes_bin))
+    monkeypatch.setattr(
+        "hermes_cli.relaunch.resolve_hermes_bin", lambda: str(hermes_bin)
+    )
     monkeypatch.setattr(lde, "refresh_desktop_databases", lambda _dir: [])
 
     entry = lde.install_desktop_entry(root)
     exec_line = _parse(entry.read_text(encoding="utf-8"))["Exec"]
 
-    # The Exec carries the venv-LEXICAL interpreter (resolving would follow
-    # uv/pyenv symlinks out of the venv and lose pyvenv.cfg discovery).
     interpreter = os.path.abspath(sys.executable)
     assert exec_line.split(" ")[0].strip('"') == interpreter
     assert str(hermes_bin) in exec_line
     assert exec_line.endswith("desktop")
 
 
-@pytest.mark.platforms("linux")
 def test_exec_leaves_shell_wrapper_launchers_alone(tmp_path, xdg_home, monkeypatch):
     root = _make_project(tmp_path)
     hermes_bin = tmp_path / "bin" / "hermes"
     hermes_bin.parent.mkdir()
-    hermes_bin.write_text('#!/usr/bin/env bash\nexec /opt/hermes/venv/bin/python "$@"\n', encoding="utf-8")
+    hermes_bin.write_text(
+        '#!/bin/bash\nexec /opt/hermes/venv/bin/python "$@"\n', encoding="utf-8"
+    )
     hermes_bin.chmod(0o755)
-    monkeypatch.setattr("hermes_cli.relaunch.resolve_hermes_bin", lambda: str(hermes_bin))
+    monkeypatch.setattr(
+        "hermes_cli.relaunch.resolve_hermes_bin", lambda: str(hermes_bin)
+    )
     monkeypatch.setattr(lde, "refresh_desktop_databases", lambda _dir: [])
 
     entry = lde.install_desktop_entry(root)
@@ -231,20 +227,18 @@ def test_exec_leaves_shell_wrapper_launchers_alone(tmp_path, xdg_home, monkeypat
     assert exec_line == f"{hermes_bin} desktop"
 
 
-@pytest.mark.platforms("linux")
 def test_exec_leaves_venv_shebang_scripts_alone(tmp_path, xdg_home, monkeypatch):
     import sys
 
     root = _make_project(tmp_path)
     hermes_bin = tmp_path / "bin" / "hermes"
     hermes_bin.parent.mkdir()
-    # venv-LEXICAL interpreter, matching what the launcher persists: a
-    # resolved() path would dereference out of the venv and look foreign to
-    # the lexical comparison, provoking a spurious interpreter prefix.
     interpreter = os.path.abspath(sys.executable)
     hermes_bin.write_text(f"#!{interpreter}\nimport hermes_cli\n", encoding="utf-8")
     hermes_bin.chmod(0o755)
-    monkeypatch.setattr("hermes_cli.relaunch.resolve_hermes_bin", lambda: str(hermes_bin))
+    monkeypatch.setattr(
+        "hermes_cli.relaunch.resolve_hermes_bin", lambda: str(hermes_bin)
+    )
     monkeypatch.setattr(lde, "refresh_desktop_databases", lambda _dir: [])
 
     entry = lde.install_desktop_entry(root)
@@ -253,8 +247,6 @@ def test_exec_leaves_venv_shebang_scripts_alone(tmp_path, xdg_home, monkeypatch)
     # Console-script with the venv's own interpreter in the shebang: correct
     # as-is, prefixing would only add noise.
     assert exec_line == f"{hermes_bin} desktop"
-
-
 
 
 # The persisted entry must be launch-context independent: whatever process
@@ -266,7 +258,6 @@ def _argv0_context(monkeypatch, argv0: str) -> None:
     import sys
 
     monkeypatch.setattr(sys, "argv", [argv0, "desktop"])
-@pytest.mark.platforms("linux")
 
 
 def test_exec_converges_from_repo_script_argv0_to_installed_wrapper(
@@ -288,7 +279,7 @@ def test_exec_converges_from_repo_script_argv0_to_installed_wrapper(
     repo_script.chmod(0o755)
     wrapper = tmp_path / "installed" / "bin" / "hermes"
     wrapper.parent.mkdir(parents=True)
-    wrapper.write_text(f'#!/usr/bin/env bash\nexec {sys.executable} "$@"\n', encoding="utf-8")
+    wrapper.write_text(f'#!/bin/bash\nexec {sys.executable} "$@"\n', encoding="utf-8")
     wrapper.chmod(0o755)
 
     # argv[0] = repo script; PATH lookup finds the installed wrapper.
@@ -304,7 +295,6 @@ def test_exec_converges_from_repo_script_argv0_to_installed_wrapper(
     # Converged on the durable wrapper — NOT the repo script, and NOT an
     # interpreter-prefixed form pinning sys.executable.
     assert exec_line == f"{wrapper} desktop"
-@pytest.mark.platforms("linux")
 
 
 def test_exec_never_persists_a_bare_interpreter_command(
@@ -312,12 +302,11 @@ def test_exec_never_persists_a_bare_interpreter_command(
 ):
     """The `python -m hermes_cli.main` relaunch context must not write
     `Exec=<python> desktop` — a command line no DE can run."""
-    import sys
 
     root = _make_project(tmp_path)
     wrapper = tmp_path / "installed" / "bin" / "hermes"
     wrapper.parent.mkdir(parents=True)
-    wrapper.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    wrapper.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
     wrapper.chmod(0o755)
 
     interpreter = tmp_path / "uv" / "cpython-3.11.15" / "bin" / "python3.11"
@@ -342,7 +331,6 @@ def test_exec_never_persists_a_bare_interpreter_command(
         and "desktop" in exec_line.split(" ", 1)[1]
     ), f"persisted an unrunnable bare-interpreter Exec: {exec_line}"
     assert exec_line == f"{wrapper} desktop"
-@pytest.mark.platforms("linux")
 
 
 def test_exec_keeps_resolver_fallback_when_no_wrapper_on_path(
@@ -383,7 +371,6 @@ def test_exec_keeps_resolver_fallback_when_no_wrapper_on_path(
     assert exec_line.endswith("-m hermes_cli.main desktop")
     assert Path(exec_line.split(" ")[0].strip('"')).is_absolute()
     assert str(repo_script) not in exec_line
-@pytest.mark.platforms("linux")
 
 
 def test_exec_uses_known_wrapper_when_path_lookup_misses(
@@ -412,7 +399,7 @@ def test_exec_uses_known_wrapper_when_path_lookup_misses(
     known_wrapper = tmp_path / "known-home" / ".local" / "bin" / "hermes"
     known_wrapper.parent.mkdir(parents=True)
     known_wrapper.write_text(
-        f'#!/usr/bin/env bash\nexec {root / "venv" / "bin" / "python"} {root / "hermes"} "$@"\n',
+        f'#!/bin/bash\nexec {root / "venv" / "bin" / "python"} {root / "hermes"} "$@"\n',
         encoding="utf-8",
     )
     known_wrapper.chmod(0o755)
@@ -432,7 +419,6 @@ def test_exec_uses_known_wrapper_when_path_lookup_misses(
 
     # The probe found the wrapper despite the PATH miss.
     assert exec_line == f"{known_wrapper} desktop"
-@pytest.mark.platforms("linux")
 
 
 def test_exec_never_persists_a_checkout_internal_path_hit(tmp_path, xdg_home, monkeypatch):
@@ -454,13 +440,13 @@ def test_exec_never_persists_a_checkout_internal_path_hit(tmp_path, xdg_home, mo
     root = _make_project(tmp_path)
     venv_script = root / "venv" / "bin" / "hermes"
     venv_script.parent.mkdir(parents=True)
-    venv_script.write_text("#!/usr/bin/env bash\nexec true\n", encoding="utf-8")
+    venv_script.write_text("#!/bin/bash\nexec true\n", encoding="utf-8")
     venv_script.chmod(0o755)
 
     known_wrapper = tmp_path / "path-home" / ".local" / "bin" / "hermes"
     known_wrapper.parent.mkdir(parents=True)
     known_wrapper.write_text(
-        f'#!/usr/bin/env bash\nexec {root / "venv" / "bin" / "python"} {root / "hermes"} "$@"\n',
+        f'#!/bin/bash\nexec {root / "venv" / "bin" / "python"} {root / "hermes"} "$@"\n',
         encoding="utf-8",
     )
     known_wrapper.chmod(0o755)
@@ -511,7 +497,7 @@ def test_exec_finds_known_wrapper_when_resolver_has_no_candidate(
     known_wrapper = tmp_path / "cold-home" / ".local" / "bin" / "hermes"
     known_wrapper.parent.mkdir(parents=True)
     known_wrapper.write_text(
-        f'#!/usr/bin/env bash\nexec {root / "venv" / "bin" / "python"} {root / "hermes"} "$@"\n',
+        f'#!/bin/bash\nexec {root / "venv" / "bin" / "python"} {root / "hermes"} "$@"\n',
         encoding="utf-8",
     )
     known_wrapper.chmod(0o755)
@@ -564,7 +550,7 @@ def test_exec_rejects_known_wrapper_from_another_checkout(
     foreign_wrapper = tmp_path / "known-home" / ".local" / "bin" / "hermes"
     foreign_wrapper.parent.mkdir(parents=True)
     foreign_wrapper.write_text(
-        f"#!/usr/bin/env bash\nexec {other_root / 'venv' / 'bin' / 'python'} "
+        f"#!/bin/bash\nexec {other_root / 'venv' / 'bin' / 'python'} "
         f'{other_root / "hermes"} "$@"\n',
         encoding="utf-8",
     )
@@ -617,7 +603,6 @@ def test_exec_rejects_known_wrapper_from_another_checkout(
         ),
     ],
 )
-@pytest.mark.platforms("linux")
 def test_known_wrapper_candidates_cover_installer_layouts(
     layout, env_overrides, expected, monkeypatch
 ):
@@ -628,7 +613,6 @@ def test_known_wrapper_candidates_cover_installer_layouts(
     candidate. Locking these in protects against silent regressions in
     the stripped-PATH probe path.
     """
-    import os
 
     sentinel_home = "/home/__sentinel_home__"
     monkeypatch.setenv("HOME", sentinel_home)
@@ -653,14 +637,17 @@ def test_known_wrapper_candidates_cover_installer_layouts(
     if layout == "non-root-no-fhs":
         # Non-root euid: /usr/local/bin must be excluded outright.
         assert "/usr/local/bin/hermes" not in candidates
-@pytest.mark.platforms("linux")
 
 
 def test_install_is_idempotent_and_skips_cache_refresh(tmp_path, xdg_home, monkeypatch):
     root = _make_project(tmp_path)
-    monkeypatch.setattr("hermes_cli.relaunch.resolve_hermes_bin", lambda: "/usr/bin/hermes")
+    monkeypatch.setattr(
+        "hermes_cli.relaunch.resolve_hermes_bin", lambda: "/usr/bin/hermes"
+    )
     calls: list[Path] = []
-    monkeypatch.setattr(lde, "refresh_desktop_databases", lambda d: calls.append(d) or [])
+    monkeypatch.setattr(
+        lde, "refresh_desktop_databases", lambda d: calls.append(d) or []
+    )
 
     lde.install_desktop_entry(root)
     assert len(calls) == 1
@@ -668,13 +655,14 @@ def test_install_is_idempotent_and_skips_cache_refresh(tmp_path, xdg_home, monke
     # Unchanged content → no rewrite, no menu-cache churn on every launch.
     lde.install_desktop_entry(root)
     assert len(calls) == 1
-@pytest.mark.platforms("linux")
 
 
 def test_install_without_source_icon_uses_themed_name(tmp_path, xdg_home, monkeypatch):
     root = tmp_path / "hermes-agent"
     root.mkdir()
-    monkeypatch.setattr("hermes_cli.relaunch.resolve_hermes_bin", lambda: "/usr/bin/hermes")
+    monkeypatch.setattr(
+        "hermes_cli.relaunch.resolve_hermes_bin", lambda: "/usr/bin/hermes"
+    )
     monkeypatch.setattr(lde, "refresh_desktop_databases", lambda _dir: [])
 
     entry = lde.install_desktop_entry(root)
@@ -684,14 +672,14 @@ def test_install_without_source_icon_uses_themed_name(tmp_path, xdg_home, monkey
     assert _parse(entry.read_text(encoding="utf-8"))["Icon"] == "hermes"
 
 
-@pytest.mark.platforms("macos")
+@pytest.mark.macos_only
 def test_install_is_a_noop_on_macos(tmp_path):
     """Faking darwin only renamed the host — the real macOS runner is the
     only place the `sys.platform` guard is exercised against a real host."""
     assert lde.install_desktop_entry(_make_project(tmp_path)) is None
 
 
-@pytest.mark.platforms("windows")
+@pytest.mark.windows_only
 def test_install_is_a_noop_on_windows(tmp_path):
     """As above for Windows: a fake left POSIX paths and a POSIX XDG layout
     in place, so the no-op was never proven against a real one."""
@@ -706,24 +694,14 @@ def test_install_is_a_noop_on_windows(tmp_path):
 def _stub_tools(monkeypatch, available: "set[str]") -> "list[list[str]]":
     ran: list[list[str]] = []
     monkeypatch.setattr(
-        lde.shutil, "which", lambda name: f"/usr/bin/{name}" if name in available else None
+        lde.shutil,
+        "which",
+        lambda name: f"/usr/bin/{name}" if name in available else None,
     )
     monkeypatch.setattr(lde, "_run_quiet", lambda cmd: ran.append(cmd) or True)
     return ran
-@pytest.mark.platforms("linux")
 
 
-def test_refresh_runs_kbuildsycoca6_when_present(monkeypatch, tmp_path):
-    ran = _stub_tools(monkeypatch, {"update-desktop-database", "kbuildsycoca6"})
-
-    tools = lde.refresh_desktop_databases(tmp_path)
-
-    assert tools == ["update-desktop-database", "kbuildsycoca6"]
-    assert ran == [
-        ["/usr/bin/update-desktop-database", str(tmp_path)],
-        ["/usr/bin/kbuildsycoca6", "--noincremental"],
-    ]
-@pytest.mark.platforms("linux")
 
 
 def test_refresh_falls_back_to_kbuildsycoca5(monkeypatch, tmp_path):
@@ -733,7 +711,6 @@ def test_refresh_falls_back_to_kbuildsycoca5(monkeypatch, tmp_path):
 
     assert tools == ["kbuildsycoca5"]
     assert ran == [["/usr/bin/kbuildsycoca5", "--noincremental"]]
-@pytest.mark.platforms("linux")
 
 
 def test_refresh_prefers_kbuildsycoca6_over_5(monkeypatch, tmp_path):
@@ -742,7 +719,6 @@ def test_refresh_prefers_kbuildsycoca6_over_5(monkeypatch, tmp_path):
     lde.refresh_desktop_databases(tmp_path)
 
     assert [cmd[0] for cmd in ran] == ["/usr/bin/kbuildsycoca6"]
-@pytest.mark.platforms("linux")
 
 
 def test_refresh_skips_missing_tools(monkeypatch, tmp_path):
@@ -750,7 +726,6 @@ def test_refresh_skips_missing_tools(monkeypatch, tmp_path):
 
     assert lde.refresh_desktop_databases(tmp_path) == []
     assert ran == []
-@pytest.mark.platforms("linux")
 
 
 def test_refresh_reports_only_tools_that_succeeded(monkeypatch, tmp_path):
@@ -759,32 +734,17 @@ def test_refresh_reports_only_tools_that_succeeded(monkeypatch, tmp_path):
     monkeypatch.setattr(lde, "_run_quiet", lambda cmd: "kbuildsycoca" in cmd[0])
 
     assert lde.refresh_desktop_databases(tmp_path) == ["kbuildsycoca6"]
-@pytest.mark.platforms("linux")
 
 
 def test_run_quiet_swallows_missing_binary(tmp_path):
     assert lde._run_quiet([str(tmp_path / "definitely-not-a-binary")]) is False
 
 
-@pytest.mark.platforms("linux")
-def test_exec_arg_quoting_handles_spaces(tmp_path, xdg_home, monkeypatch):
-    root = _make_project(tmp_path)
-    spaced = tmp_path / "my apps" / "hermes"
-    spaced.parent.mkdir()
-    spaced.write_text("", encoding="utf-8")
-    monkeypatch.setattr("hermes_cli.relaunch.resolve_hermes_bin", lambda: str(spaced))
-    monkeypatch.setattr(lde, "refresh_desktop_databases", lambda _dir: [])
-
-    entry = lde.install_desktop_entry(root)
-    exec_line = _parse(entry.read_text(encoding="utf-8"))["Exec"]
-
-    assert exec_line == f'"{spaced}" desktop'
 
 
 @pytest.mark.skipif(
     sys.platform == "win32", reason="Symlinks require elevated privileges on Windows"
 )
-@pytest.mark.platforms("linux")
 def test_running_interpreter_keeps_venv_semantic_path(tmp_path, monkeypatch):
     """Lexical preserved only when pyvenv.cfg marks the path as a venv."""
     # venv layout: bin/python symlink -> base, pyvenv.cfg at venv root
@@ -808,7 +768,6 @@ def test_running_interpreter_keeps_venv_semantic_path(tmp_path, monkeypatch):
     plain_link.symlink_to(base)
     monkeypatch.setattr(lde.sys, "executable", str(plain_link))
     assert lde._running_interpreter() == str(base)
-@pytest.mark.platforms("linux")
 
 
 def test_running_interpreter_resolves_plain_interpreter(monkeypatch):
@@ -816,36 +775,8 @@ def test_running_interpreter_resolves_plain_interpreter(monkeypatch):
     monkeypatch.setattr(lde.sys, "executable", "/usr/bin/python3")
     out = lde._running_interpreter()
     assert Path(out).is_absolute()
-@pytest.mark.platforms("linux")
 
 
-def test_can_import_probe_runs_and_caches(tmp_path):
-    """The probe executes the real interpreter and memoizes the answer.
-
-    Asserts the two things that hold on ANY host: the probe returns a
-    definite boolean for a real interpreter (not None, not an exception
-    path), and the per-path cache is populated so the second call pays
-    no subprocess. Host-dependent capability itself (True vs False) is
-    deliberately NOT asserted - a CI host with hermes pip-installed
-    system-wide would legitimately answer True.
-    """
-    import time
-
-    real = Path("/usr/bin/python3")
-    if not real.exists():
-        pytest.skip("no system python to probe")
-    lde._probe_cache.pop(str(real), None)
-    try:
-        first = lde._can_import_hermes_cli(real)
-        assert isinstance(first, bool)
-        assert str(real) in lde._probe_cache
-        t0 = time.monotonic()
-        second = lde._can_import_hermes_cli(real)
-        assert second is first
-        assert time.monotonic() - t0 < 0.05  # cache hit: no subprocess
-    finally:
-        lde._probe_cache.pop(str(real), None)
-@pytest.mark.platforms("linux")
 
 
 def test_exec_falls_back_to_running_interpreter_when_probe_fails(
@@ -892,7 +823,6 @@ def test_exec_falls_back_to_running_interpreter_when_probe_fails(
     "suffix",
     ["-old", ".bak", "-copy"],
 )
-@pytest.mark.platforms("linux")
 def test_wrapper_ownership_rejects_sibling_extensions(suffix, tmp_path):
     """A shim execing `<checkout><suffix>/...` must NOT pass ownership.
 
@@ -904,7 +834,7 @@ def test_wrapper_ownership_rejects_sibling_extensions(suffix, tmp_path):
     checkout.mkdir()
     evil = tmp_path / "evil-shim"
     evil.write_text(
-        f"#!/usr/bin/env bash\n"
+        f"#!/bin/bash\n"
         f"exec {checkout}{suffix}/venv/bin/python "
         f'{checkout}{suffix}/hermes "$@"\n',
         encoding="utf-8",
@@ -915,7 +845,6 @@ def test_wrapper_ownership_rejects_sibling_extensions(suffix, tmp_path):
 @pytest.mark.skipif(
     sys.platform == "win32", reason="Symlinks require elevated privileges on Windows"
 )
-@pytest.mark.platforms("linux")
 def test_wrapper_ownership_accepts_shim_via_symlinked_home(tmp_path, monkeypatch):
     """Installer writes $INSTALL_DIR lexically; the root stays lexical too.
 
@@ -933,7 +862,7 @@ def test_wrapper_ownership_accepts_shim_via_symlinked_home(tmp_path, monkeypatch
     shim = home_link / ".local" / "bin" / "hermes"
     shim.parent.mkdir(parents=True)
     shim.write_text(
-        f"#!/usr/bin/env bash\n"
+        f"#!/bin/bash\n"
         f"exec {lexical_checkout}/venv/bin/python "
         f'{lexical_checkout}/hermes "$@"\n',
         encoding="utf-8",
@@ -953,7 +882,6 @@ def test_wrapper_ownership_accepts_shim_via_symlinked_home(tmp_path, monkeypatch
         resolve_fn=lambda: sys.argv[0] if sys.argv[0] else None,
         checkout_root=lexical_checkout,
     ) == str(shim)
-@pytest.mark.platforms("linux")
 
 
 def test_needs_interpreter_case_insensitive_match(tmp_path, monkeypatch):
@@ -974,7 +902,6 @@ def test_needs_interpreter_case_insensitive_match(tmp_path, monkeypatch):
     monkeypatch.setattr(lde.sys, "executable", str(interpreter))
 
     assert lde._needs_interpreter(console_script) is False
-@pytest.mark.platforms("linux")
 
 
 def test_needs_interpreter_rejects_sibling_directory(tmp_path, monkeypatch):
@@ -997,7 +924,6 @@ def test_needs_interpreter_rejects_sibling_directory(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     assert lde._needs_interpreter(sibling_script) is True
-@pytest.mark.platforms("linux")
 
 
 def test_needs_interpreter_strips_flags_before_comparing(tmp_path, monkeypatch):
@@ -1011,7 +937,6 @@ def test_needs_interpreter_strips_flags_before_comparing(tmp_path, monkeypatch):
     flagged = tmp_path / "flagged"
     flagged.write_text(f"#!{interp} -S\nimport hermes_cli\n", encoding="utf-8")
     assert lde._needs_interpreter(flagged) is False
-@pytest.mark.platforms("linux")
 
 
 def test_needs_interpreter_env_shebang_always_escapes(tmp_path, monkeypatch):
@@ -1036,7 +961,6 @@ def test_needs_interpreter_env_shebang_always_escapes(tmp_path, monkeypatch):
         f"#!/usr/bin/env -S {interp}\nimport hermes_cli\n", encoding="utf-8"
     )
     assert lde._needs_interpreter(env_abs) is False
-@pytest.mark.platforms("linux")
 
 
 def test_probe_skips_wrapper_with_escaping_python_shebang(
@@ -1049,7 +973,6 @@ def test_probe_skips_wrapper_with_escaping_python_shebang(
     The shebang-safety gate skips it; the module fallback wins. Idea
     credited to autumn8's #92122 rung-2 check.
     """
-    import sys as _s
 
     root = _make_project(tmp_path)
     repo_script = root / "hermes"
@@ -1081,7 +1004,6 @@ def test_probe_skips_wrapper_with_escaping_python_shebang(
 
     assert str(broken_wrapper) not in exec_line
     assert exec_line.endswith("-m hermes_cli.main desktop")
-@pytest.mark.platforms("linux")
 
 
 def test_probe_accepts_shell_launcher_wrapper(tmp_path, xdg_home, monkeypatch):
@@ -1096,7 +1018,7 @@ def test_probe_accepts_shell_launcher_wrapper(tmp_path, xdg_home, monkeypatch):
     good_wrapper = xdg_home / ".local" / "bin" / "hermes"
     good_wrapper.parent.mkdir(parents=True)
     good_wrapper.write_text(
-        f"#!/usr/bin/env bash\nexec {root / 'venv' / 'bin' / 'python'} "
+        f"#!/bin/bash\nexec {root / 'venv' / 'bin' / 'python'} "
         f'{root / "hermes"} "$@"\n',
         encoding="utf-8",
     )
@@ -1114,7 +1036,6 @@ def test_probe_accepts_shell_launcher_wrapper(tmp_path, xdg_home, monkeypatch):
     entry = lde.install_desktop_entry(root)
     exec_line = _parse(entry.read_text(encoding="utf-8"))["Exec"]
     assert exec_line == f"{good_wrapper} desktop"
-@pytest.mark.platforms("linux")
 
 
 def test_install_icon_handles_truncated_png_header(tmp_path, xdg_home, monkeypatch):

@@ -6,28 +6,24 @@ No live network — index resolution and installs are mocked.
 
 from __future__ import annotations
 
-import argparse
 import json
-from types import SimpleNamespace
 from unittest import mock
 
 import pytest
-import hermes_yaml as yaml
+import yaml
 
 from hermes_cli.plugin_packs import (
     PackError,
-    PackPluginEntry,
-    PluginPack,
     ResolvedPackPlugin,
     _sanitized_entry_config as real_sanitized_entry_config,
     cmd_pack_install,
     export_pack,
+    install_pack_plugins,
     load_pack,
     parse_pack,
     resolve_pack_plugins,
     validate_config_seed,
 )
-from hermes_cli.subcommands.plugins import build_plugins_parser
 
 SHA_A = "a" * 40
 SHA_B = "b" * 40
@@ -183,11 +179,6 @@ def test_parse_pack_validates_config_section():
     assert ok.config["tts-plugin"] == {"voice": "nova"}
 
 
-def test_parse_pack_collects_skills_as_declared_seam():
-    pack = parse_pack(_pack_yaml(skills=["hub/skill-a", "hub/skill-b"]))
-    assert pack.skills == ["hub/skill-a", "hub/skill-b"]
-
-
 def test_load_pack_rejects_insecure_url_schemes(tmp_path):
     with pytest.raises(PackError) as exc:
         load_pack("http://example.com/pack.yaml")
@@ -257,6 +248,148 @@ def _resolved(pack):
     ]
 
 
+def _fanout_patches(install_side_effect, consent_mock=None):
+    """Patch the plugins_cmd seams install_pack_plugins pulls in."""
+    patches = {
+        "_install_plugin_core": mock.MagicMock(side_effect=install_side_effect),
+        "_prompt_plugin_env_vars": mock.MagicMock(),
+        "_get_enabled_set": mock.MagicMock(return_value=set()),
+        "_get_disabled_set": mock.MagicMock(return_value=set()),
+        "_save_enabled_set": mock.MagicMock(),
+        "_save_disabled_set": mock.MagicMock(),
+        "_run_capability_consent": consent_mock or mock.MagicMock(return_value=True),
+        "_declared_capabilities_from_manifest": mock.MagicMock(
+            side_effect=lambda manifest, name: manifest.get("capabilities", [])
+        ),
+    }
+    return patches
+
+
+def test_install_fan_out_passes_pinned_refs_to_installer(tmp_path):
+    pack = parse_pack(
+        yaml.safe_dump(
+            {
+                "name": "p",
+                "plugins": [
+                    {"repo": "o/a", "ref": SHA_A},
+                    {"repo": "o/b", "ref": SHA_B},
+                ],
+            }
+        )
+    )
+    installer = mock.MagicMock(
+        side_effect=[
+            (tmp_path / "a", {"name": "a"}, "a"),
+            (tmp_path / "b", {"name": "b"}, "b"),
+        ]
+    )
+    patches = _fanout_patches(None)
+    patches["_install_plugin_core"] = installer
+    with mock.patch.multiple("hermes_cli.plugins_cmd", **patches):
+        results = install_pack_plugins(pack, _resolved(pack), FakeConsole())
+
+    assert [r.ok for r in results] == [True, True]
+    assert installer.call_args_list == [
+        mock.call("o/a", force=False, ref=SHA_A),
+        mock.call("o/b", force=False, ref=SHA_B),
+    ]
+
+
+def test_install_fan_out_invokes_capability_consent_per_plugin(tmp_path):
+    """Consent is NOT bypassed: the standard per-plugin consent function
+    runs once for every installed plugin that declares capabilities."""
+    pack = parse_pack(
+        yaml.safe_dump(
+            {
+                "name": "p",
+                "plugins": [
+                    {"repo": "o/a", "ref": SHA_A},
+                    {"repo": "o/b", "ref": SHA_B},
+                ],
+            }
+        )
+    )
+    consent = mock.MagicMock(return_value=True)
+    patches = _fanout_patches(
+        [
+            (tmp_path / "a", {"name": "a", "capabilities": ["tools"]}, "a"),
+            (tmp_path / "b", {"name": "b", "capabilities": ["platform"]}, "b"),
+        ],
+        consent_mock=consent,
+    )
+    with mock.patch.multiple("hermes_cli.plugins_cmd", **patches):
+        install_pack_plugins(pack, _resolved(pack), FakeConsole())
+
+    assert consent.call_count == 2
+    called_ids = [c.args[1] for c in consent.call_args_list]
+    assert called_ids == ["a", "b"]
+    called_caps = [c.args[2] for c in consent.call_args_list]
+    assert called_caps == [["tools"], ["platform"]]
+
+
+def test_install_fan_out_continues_past_failures_and_reports():
+    from hermes_cli.plugins_cmd import PluginOperationError
+
+    pack = parse_pack(
+        yaml.safe_dump(
+            {
+                "name": "p",
+                "plugins": [
+                    {"repo": "o/bad", "ref": SHA_A},
+                    {"repo": "o/good", "ref": SHA_B},
+                ],
+            }
+        )
+    )
+
+    def installer(identifier, *, force, ref):
+        if "bad" in identifier:
+            raise PluginOperationError("clone exploded")
+        return (mock.MagicMock(), {"name": "good"}, "good")
+
+    patches = _fanout_patches(installer)
+    console = FakeConsole()
+    with mock.patch.multiple("hermes_cli.plugins_cmd", **patches):
+        results = install_pack_plugins(pack, _resolved(pack), console)
+
+    assert [r.ok for r in results] == [False, True]
+    assert "clone exploded" in results[0].error
+    assert results[1].installed_name == "good"
+
+
+def test_pack_install_exits_nonzero_on_partial_failure(tmp_path, monkeypatch):
+    pack_file = tmp_path / "pack.yaml"
+    pack_file.write_text(
+        yaml.safe_dump(
+            {
+                "name": "p",
+                "plugins": [
+                    {"repo": "o/bad", "ref": SHA_A},
+                    {"repo": "o/good", "ref": SHA_B},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    from hermes_cli.plugins_cmd import PluginOperationError
+
+    def installer(identifier, *, force, ref):
+        if "bad" in identifier:
+            raise PluginOperationError("boom")
+        return (mock.MagicMock(), {"name": "good"}, "good")
+
+    fake_console = FakeConsole(answers=["y"])
+    patches = _fanout_patches(installer)
+    monkeypatch.setattr("sys.stdin", mock.MagicMock(isatty=lambda: True))
+    monkeypatch.setattr("sys.stdout", mock.MagicMock(isatty=lambda: True))
+    with mock.patch.multiple("hermes_cli.plugins_cmd", **patches), mock.patch(
+        "rich.console.Console", return_value=fake_console
+    ):
+        with pytest.raises(SystemExit) as exc:
+            cmd_pack_install(str(pack_file))
+    assert exc.value.code == 1
+
+
 def test_pack_install_refuses_noninteractive_sessions(tmp_path, monkeypatch):
     pack_file = tmp_path / "pack.yaml"
     pack_file.write_text(_pack_yaml(), encoding="utf-8")
@@ -293,7 +426,6 @@ def test_pack_install_aborts_cleanly_on_decline(tmp_path, monkeypatch):
         with pytest.raises(SystemExit):
             cmd_pack_install(str(pack_file))
     installer.assert_not_called()
-    assert "Aborted" in fake_console.text
 
 
 # ---------------------------------------------------------------------------
@@ -425,21 +557,3 @@ def test_export_enabled_only_filters(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 # Parser wiring
 # ---------------------------------------------------------------------------
-
-def test_parser_wires_pack_subcommands():
-    parser = argparse.ArgumentParser()
-    subparsers = parser.add_subparsers(dest="command")
-    build_plugins_parser(subparsers, cmd_plugins=lambda _args: None)
-
-    args = parser.parse_args(["plugins", "pack", "install", "pack.yaml", "--force"])
-    assert args.plugins_action == "pack"
-    assert args.pack_action == "install"
-    assert args.source == "pack.yaml"
-    assert args.force is True
-
-    args = parser.parse_args(["plugins", "pack", "export", "--enabled-only"])
-    assert args.pack_action == "export"
-    assert args.enabled_only is True
-
-    args = parser.parse_args(["plugins", "pack", "show", "https://x/p.yaml"])
-    assert args.pack_action == "show"

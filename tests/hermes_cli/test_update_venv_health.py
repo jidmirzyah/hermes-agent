@@ -7,7 +7,6 @@ import sys
 import types
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from hermes_cli import main as cli_main
 from hermes_cli import update_cmd_windows
@@ -214,12 +213,4 @@ def test_venv_holder_guard_force_semantics(force, force_venv, expected, capsys):
     assert result == expected, capsys.readouterr().out
 
 
-# ---------------------------------------------------------------------------
-# "Already up to date" must not hide a venv the last pull never re-synced (#97208)
-#
-# The distribution-version staleness check this used to cover
-# (``update_cmd._venv_dependency_set_stale``) is retired: ``_repair_current_checkout``
-# no longer branches on it (upstream-reconcile batch 1, 2026-09). Detection now lives
-# in pm's own ``sync_venv``/``_venv_core_imports_healthy`` path, exercised by the
-# ``_venv_core_imports_healthy`` and ``_detect_venv_python_processes`` tests above.
 # ---------------------------------------------------------------------------

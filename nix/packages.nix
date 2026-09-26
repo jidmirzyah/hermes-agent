@@ -60,7 +60,6 @@
           "fal"
           "feishu"
           "firecrawl"
-          "hindsight"
           "honcho"
           "messaging"
           "modal"

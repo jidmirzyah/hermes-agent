@@ -5,8 +5,6 @@ import json
 import sys
 from pathlib import Path
 
-import pytest
-
 
 SCRIPT_PATH = (
     Path(__file__).resolve().parents[2]
@@ -213,7 +211,7 @@ def test_readable_config_keeps_every_pre_existing_key(tmp_path: Path):
 
     migrator.migrate()
 
-    import hermes_yaml as yaml
+    import yaml
 
     merged = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     assert merged["model"] == "hermes-4-405b"
@@ -249,7 +247,6 @@ def test_absent_config_is_still_created(tmp_path: Path):
     assert "anthropic/claude-sonnet-4" in config_path.read_text(encoding="utf-8")
 
 
-@pytest.mark.require_symlinks
 def test_symlinked_config_stays_a_symlink(tmp_path: Path):
     """Managed deployments symlink ~/.hermes/config.yaml into a dotfiles repo.
 
@@ -613,56 +610,6 @@ def test_rebrand_text_replaces_openclaw_variants():
     # real filesystem path ``~/.hermes`` (Hermes home) when rebranding
     # memory entries that reference ``~/.openclaw`` or ``openclaw`` prose.
     assert mod.rebrand_text("openclaw should always respond concisely") == "hermes should always respond concisely"
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# ── migrate_model_config: alias resolution (issue #16745) ──────────────────
-
-def _run_model_migration(tmp_path: Path, openclaw_json: dict) -> dict:
-    """Helper: run just migrate_model_config on an openclaw.json and return
-    the parsed destination config.yaml."""
-    import hermes_yaml as yaml
-
-    mod = load_module()
-    source = tmp_path / ".openclaw"
-    target = tmp_path / ".hermes"
-    source.mkdir(parents=True)
-    target.mkdir(parents=True)
-    (source / "openclaw.json").write_text(json.dumps(openclaw_json), encoding="utf-8")
-
-    migrator = mod.Migrator(
-        source_root=source,
-        target_root=target,
-        execute=True,
-        workspace_target=None,
-        overwrite=True,
-        migrate_secrets=False,
-        output_dir=target / "migration-report",
-    )
-    migrator.migrate_model_config()
-
-    cfg_path = target / "config.yaml"
-    if not cfg_path.exists():
-        return {}
-    return yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
-
-
-def _extract_model(parsed: dict) -> str | None:
-    model = parsed.get("model")
-    if isinstance(model, dict):
-        return model.get("default")
-    return model
 
 
 
