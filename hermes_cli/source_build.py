@@ -19,7 +19,7 @@ def source_product_current(project_root: Path, product: str, out: Path) -> bool:
         result = subprocess.run(
             [node, str(project_root / "scripts/build/freshness.mjs"),
              "--source", str(project_root), "--product", product, "--out", str(out)],
-            cwd=project_root, env=env, capture_output=True, text=True, check=True,
+            cwd=project_root, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace", check=True,
         )
         return result.stdout.strip() == "true"
     except (OSError, subprocess.SubprocessError):
@@ -85,9 +85,8 @@ def build_source_tui(project_root: Path, *, env: dict) -> None:
 
 
 def build_source_web(project_root: Path, *, env: dict, icons: Path | None = None) -> None:
-    if icons is None:
-        icons = project_root
-        run_source_script(project_root, "scripts/generate-icons.mjs", env=env, label="Generating icons")
+    # Default-brand icons are committed; installs never render them.
+    icons = icons or project_root
     run_source_script(project_root, "scripts/build/web.mjs", "--source", str(project_root),
                       "--icons", str(icons), "--out", str(project_root / "hermes_cli/web_dist"), env=env,
                       label="Building the web UI")

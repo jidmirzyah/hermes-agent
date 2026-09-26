@@ -384,7 +384,6 @@ def cmd_install(args) -> int:
 
         # Naming a declined default is the opt-back-in: updates carry it again.
         record_declined(remove=args.names)
-    _install_defaults(defaults, verify=not trust_recorded)
     if not cross_target and (not args.names or tools_only):
         from pm.install import activate
 
@@ -393,9 +392,14 @@ def cmd_install(args) -> int:
             print(f"✗ tools not on PATH before venv sync: {'; '.join(problems)}", flush=True)
             return 1
     if tools_only:
+        _install_defaults(defaults, verify=not trust_recorded)
         return 0
     failed = _install_python_environments(extras, sync=bool(extras or not args.names),
                                           test_environment=test_environment)
+    # Defaults are optional and large (agent-browser + Chromium): fetch them
+    # only once the venv, and on Windows ARM64 its build tools, succeeded.
+    if not failed:
+        _install_defaults(defaults, verify=not trust_recorded)
     if full_closure and not failed:
         from pm.environments import activation_inputs_dir, record_activation_inputs
 

@@ -17,26 +17,17 @@ def prepare(request: dict) -> tuple[Path, dict[str, str]]:
 
     ensure_panel(root)
     publish_stage("Updating Python dependencies (PM)")
-    from pm import paths, receipt
-    from pm.client import ensure, sync_venv, venv_is_current
-    from pm.lock import Lockfile
-    from pm.registry import tool_roots
+    from pm import receipt
+    from pm.client import ensure_tools_for_sync, sync_venv, venv_is_current
     from pm.environments import activation_environment, install_state_dir, runtime_facts_path
     from hermes_cli._launchers import resolve_store_python
     from hermes_cli.venv_sync import publish_launchers
 
     correlation = request["update_id"]
     with receipt.worker_context(correlation):
-        lock = Lockfile(paths.lockfile_path())
         # A pre-PM installation has no required-tool facts. A current Python
         # generation alone does not prove its Node/Git/tool closure is ready.
-        for name in tool_roots(lock.names()):
-            ensure(name, explicit=True)
-        from pm.install import activate
-
-        problems = [problem for problem in activate(allow_incomplete=True) if not problem.startswith("venv:")]
-        if problems:
-            raise RuntimeError(f"tools not on PATH before venv sync: {'; '.join(problems)}")
+        ensure_tools_for_sync()
         from pm.extras import legacy_selection
 
         extras = legacy_selection(root) if not runtime_facts_path(root).is_file() else None
@@ -44,7 +35,9 @@ def prepare(request: dict) -> tuple[Path, dict[str, str]]:
         # Repair preserves the old stamp. Changed source inputs instead need
         # an ordinary sync, which builds and validates a fresh generation too.
         repair = repair_marker.is_file() and venv_is_current(project_root=root)
-        sync_venv(None if repair else extras, explicit=True, project_root=root, repair=repair)
+        # An update never fails because of a plugin: misfits are disabled and reported.
+        sync_venv(None if repair else extras, explicit=True, project_root=root, repair=repair,
+                  evict_incompatible_plugins=not repair)
         request["pm_receipt"] = receipt.last_for_update(correlation)
     publish_launchers(root)
     repair_marker.unlink(missing_ok=True)

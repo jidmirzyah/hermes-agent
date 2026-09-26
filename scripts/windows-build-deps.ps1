@@ -119,9 +119,13 @@ function Initialize-HermesArm64BuildTools {
     if (-not $vs -or -not $clangPath) {
         $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
         $principal = New-Object Security.Principal.WindowsPrincipal($identity)
-        if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-            throw 'ARM64 C++ or Clang build tools are missing. Run setup-hermes.ps1 once in an Administrator PowerShell to install them.'
-        }
+        $elevated = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+        # A UAC prompt needs someone at the desktop; CI, ssh and scheduled
+        # runs would block on it, so they keep the explicit instruction.
+        $canPrompt = [Environment]::UserInteractive -and -not $env:CI -and -not $env:GITHUB_ACTIONS -and
+            -not $env:SSH_CONNECTION -and -not $env:SSH_CLIENT
+        $needsAdmin = 'ARM64 C++ or Clang build tools are missing. Run setup-hermes.ps1 once in an Administrator PowerShell to install them.'
+        if (-not $elevated -and -not $canPrompt) { throw $needsAdmin }
         $installer = Join-Path $buildRoot 'vs-buildtools.exe'
         Write-Host '-> Installing Visual Studio Build Tools (ARM64 C++ and Clang) to compile dependencies that have no ARM64 Windows wheel (such as cryptography).'
         Write-Host '-> This downloads several GB and can take 20+ minutes. The Visual Studio installer shows its progress in its own window.'
@@ -139,7 +143,16 @@ function Initialize-HermesArm64BuildTools {
             '--add', 'Microsoft.VisualStudio.Component.VC.Llvm.Clang'
         )
         if ($vs) { $installArgs = @('modify', '--installPath', ('"' + $vs + '"')) + $installArgs }
-        $install = Start-Process -FilePath $installer -ArgumentList $installArgs -Wait -PassThru
+        if ($elevated) {
+            $install = Start-Process -FilePath $installer -ArgumentList $installArgs -Wait -PassThru
+        } else {
+            Write-Host '-> Windows will ask for administrator approval to install them.'
+            try {
+                $install = Start-Process -FilePath $installer -ArgumentList $installArgs -Verb RunAs -Wait -PassThru
+            } catch {
+                throw "Administrator approval was declined or unavailable. $needsAdmin"
+            }
+        }
         if ($install.ExitCode -notin @(0, 3010)) { throw "Visual Studio installation failed: $($install.ExitCode)" }
         $vs = Get-HermesArm64VisualStudio
         if (-not $vs) { throw 'ARM64 C++ build tools remain unavailable. Restart Windows if the installer requested it.' }

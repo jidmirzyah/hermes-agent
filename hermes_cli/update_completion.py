@@ -135,6 +135,7 @@ def _read_terminal_receipt(request: dict) -> dict | None:
 def _prepare(request: dict, request_path: Path, result_path: Path) -> int:
     import pm
     from pm import receipt
+    from pm.client import ensure_tools_for_sync
     from pm.environments import activation_environment, project_python
 
     root = Path(request["source"])
@@ -145,7 +146,11 @@ def _prepare(request: dict, request_path: Path, result_path: Path) -> int:
     arm_completion(root)
     with receipt.worker_context(update_id):
         try:
-            pm.sync_venv(explicit=True, project_root=root)
+            # This file runs from the new tree, so its lockfile carries the new
+            # pins; tools (incl. bumped uv/python) land before the sync uses them.
+            ensure_tools_for_sync()
+            # An update never fails because of a plugin: misfits are disabled and reported.
+            pm.sync_venv(explicit=True, project_root=root, evict_incompatible_plugins=True)
         finally:
             request["pm_receipt"] = receipt.last_for_update(update_id)
             _write_json(request_path, request)

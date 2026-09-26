@@ -71,6 +71,14 @@ run_source_installer "$2" "$3" "$3" "$6" new desktop
     assert (work / "install-current.log").read_text(encoding="utf-8").splitlines() == [
         "--skip-setup", "--include-desktop",
     ]
+    # A PM installer supports --skip-browser as a real opt-out; the leg must
+    # still install what users get by default, so the driver withholds it.
+    script.write_text('case "$1" in --help) printf "%s\\n" "--skip-browser --include-desktop"; exit 0;; esac\n'
+                      '# "$boot_py" -m pm.cli install\n' + source_body, encoding="utf-8")
+    git("commit", "-qam", "pm installer")
+    pm_installer = run('run_source_installer "$2" "$3" "$3" HEAD pm')
+    assert pm_installer.returncode == 0, pm_installer.stderr
+    assert (work / "install-pm.log").read_text(encoding="utf-8").splitlines() == ["--skip-setup"]
     script.write_text("exit 23\n", encoding="utf-8")
     git("commit", "-qam", "failed installer")
     failed = run('run_source_installer "$2" "$3" "$3" HEAD broken')
