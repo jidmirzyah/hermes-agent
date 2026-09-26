@@ -4,6 +4,7 @@ import { execFileSync } from 'node:child_process'
 import { chmodSync, existsSync, mkdirSync, renameSync, rmdirSync, rmSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { macosSysroot, xcrunClangArgv } from './macos-sysroot.mjs'
 
 const script = fileURLToPath(import.meta.url)
 const root = resolve(dirname(script), '..')
@@ -25,7 +26,8 @@ export function buildHudModifierMonitor({
   source = resolve(root, '../..'),
   distDir = resolve(source, 'apps/desktop/dist'),
   platform = process.platform,
-  arch = process.arch
+  arch = process.arch,
+  sysroot
 } = {}) {
   // Cross-packaging must not ship a host binary under the target's name. The
   // capability stays unavailable unless that target was built on its own host.
@@ -44,9 +46,7 @@ export function buildHudModifierMonitor({
       execFileSync(
         'xcrun',
         [
-          '--sdk',
-          'macosx',
-          'clang',
+          ...xcrunClangArgv(sysroot === undefined ? macosSysroot() : sysroot),
           '-arch',
           'arm64',
           '-arch',

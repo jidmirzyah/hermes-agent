@@ -216,6 +216,20 @@ function localAssistantErrorIdsToPreserve(
   currentMessages: ChatMessage[]
 ): Set<string> {
   const existingIds = new Set(mergedNextMessages.map(message => message.id))
+
+  // Renderer ids are positional, so a hydrated page can carry a local row under
+  // a new id; its durable rowId still names the same row (#119326).
+  const hydratedIdByRowId = new Map(
+    mergedNextMessages.flatMap(message => (message.rowId === undefined ? [] : [[message.rowId, message.id] as const]))
+  )
+
+  const hydratedIdFor = (message: ChatMessage): string | undefined =>
+    existingIds.has(message.id)
+      ? message.id
+      : message.rowId === undefined
+        ? undefined
+        : hydratedIdByRowId.get(message.rowId)
+
   const preserveIds = new Set<string>()
   const tailUserInNext = [...mergedNextMessages].reverse().find(message => message.role === 'user' && !message.hidden)
   const tailUserText = tailUserInNext ? normalizedMessageText(tailUserInNext) : ''
@@ -233,7 +247,12 @@ function localAssistantErrorIdsToPreserve(
       continue
     }
 
-    const hydratedAssistantIndex = tailTurnAssistantMatchIndex(mergedNextMessages, currentMessages, index)
+    const hydratedId = hydratedIdFor(message)
+
+    const hydratedAssistantIndex =
+      hydratedId === undefined
+        ? tailTurnAssistantMatchIndex(mergedNextMessages, currentMessages, index)
+        : mergedNextMessages.findIndex(candidate => candidate.id === hydratedId && candidate.role === 'assistant')
 
     if (hydratedAssistantIndex !== -1) {
       mergedNextMessages[hydratedAssistantIndex] = {
@@ -255,7 +274,7 @@ function localAssistantErrorIdsToPreserve(
         continue
       }
 
-      if (candidate.role === 'user' && !existingIds.has(candidate.id) && !matchesTailUserInNext(candidate)) {
+      if (candidate.role === 'user' && hydratedIdFor(candidate) === undefined && !matchesTailUserInNext(candidate)) {
         preserveIds.add(candidate.id)
       }
 
@@ -287,13 +306,14 @@ function insertPreservedErrorRuns(
 
   for (const message of currentMessages) {
     const open = runs.at(-1)?.after === anchor ? runs.at(-1) : undefined
+    const hydratedId = preserveIds.has(message.id) ? undefined : hydratedIdFor(message)
 
-    if (existingIds.has(message.id)) {
+    if (hydratedId !== undefined) {
       if (open) {
-        open.before = message.id
+        open.before = hydratedId
       }
 
-      anchor = message.id
+      anchor = hydratedId
     } else if (preserveIds.has(message.id)) {
       const kept = { ...message, pending: false }
 
