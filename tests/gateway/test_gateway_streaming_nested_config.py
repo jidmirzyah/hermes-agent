@@ -1,31 +1,39 @@
 """Regression test for #25676 — nested gateway.streaming config must be loaded."""
-from unittest.mock import patch
-
-import hermes_yaml as yaml
-
+from pathlib import Path
+from unittest.mock import patch, MagicMock
 
 
-def _load_with_yaml_dict(yaml_dict: dict, tmp_path):
-    """Load a real config.yaml through the gateway's shared YAML reader."""
+
+def _load_with_yaml_dict(yaml_dict: dict):
+    """Patch filesystem so load_gateway_config() sees *yaml_dict* as config.yaml."""
     from gateway.config import load_gateway_config
 
-    (tmp_path / "config.yaml").write_text(yaml.safe_dump(yaml_dict), encoding="utf-8")
-    with patch("gateway.config.get_hermes_home", return_value=tmp_path):
-        return load_gateway_config()
+    fake_home = Path("/tmp/fake_hermes_home_25676")
+
+    def fake_exists(self):
+        return str(self).endswith("config.yaml")
+
+    with patch("gateway.config.get_hermes_home", return_value=fake_home), \
+         patch.object(Path, "exists", fake_exists), \
+         patch("builtins.open", create=True) as mock_file:
+        mock_file.return_value.__enter__ = lambda s: s
+        mock_file.return_value.__exit__ = MagicMock(return_value=False)
+        with patch("utils.fast_safe_load", return_value=yaml_dict):
+            return load_gateway_config()
 
 
 class TestStreamingConfigNested:
-    def test_top_level_streaming(self, tmp_path):
-        cfg = _load_with_yaml_dict({"streaming": {"enabled": True, "transport": "draft"}}, tmp_path)
+    def test_top_level_streaming(self):
+        cfg = _load_with_yaml_dict({"streaming": {"enabled": True, "transport": "draft"}})
         assert cfg.streaming.enabled is True
         assert cfg.streaming.transport == "draft"
 
 
-    def test_top_level_takes_precedence(self, tmp_path):
+    def test_top_level_takes_precedence(self):
         cfg = _load_with_yaml_dict({
             "streaming": {"enabled": True, "transport": "edit"},
             "gateway": {"streaming": {"enabled": False, "transport": "draft"}},
-        }, tmp_path)
+        })
         assert cfg.streaming.enabled is True
         assert cfg.streaming.transport == "edit"
 
@@ -92,14 +100,10 @@ class TestStreamingYamlBooleanQuirk:
         assert sc.transport == "auto"
 
 
-    def test_loader_normalizes_bare_yaml_off(self, tmp_path):
+    def test_loader_normalizes_bare_yaml_off(self):
         """End-to-end through load_gateway_config(): unquoted ``mode: off``
         (a YAML boolean) must keep streaming disabled."""
-        from gateway.config import load_gateway_config
-
-        (tmp_path / "config.yaml").write_text("streaming:\n  mode: off\n", encoding="utf-8")
-        with patch("gateway.config.get_hermes_home", return_value=tmp_path):
-            cfg = load_gateway_config()
+        cfg = _load_with_yaml_dict({"streaming": {"mode": False}})
         assert cfg.streaming.enabled is False
         assert cfg.streaming.transport == "off"
 

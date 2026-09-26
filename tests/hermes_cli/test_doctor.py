@@ -1474,6 +1474,12 @@ class TestDoctorDeprecatedConfigAndEnv:
         assert doctor_config.collect_deprecated_env_vars(None) == []
 
 
+@pytest.mark.linux_only
+def test_macos_tcc_grant_check_is_silent_off_macos(monkeypatch, capsys, tmp_path):
+    """Off macOS the TCC check prints nothing, even with a bundle present."""
+    monkeypatch.setattr(doctor_platform, "_desktop_app_bundle", lambda: tmp_path / "Hermes.app")
+    doctor_platform.check_macos_tcc_grants()
+    assert capsys.readouterr().out == ""
 
     def test_report_does_not_count_as_blocking_issue(self, monkeypatch, tmp_path, capsys):
         """report_deprecated_config_and_env is warn-only — no issues list mutation."""
@@ -1487,6 +1493,11 @@ class TestDoctorDeprecatedConfigAndEnv:
         assert "Deprecated: HERMES_TOOL_PROGRESS_MODE" in out
         assert "⚠" in out or "Deprecated" in out
 
+@pytest.mark.macos_only
+class TestMacOSTCCGrants:
+    """macOS TCC grant persistence check (#86385): a cdhash-pinned DR (pre-#73681
+    local builds) silently resets Screen Recording/Accessibility grants on every
+    rebuild while the Settings toggle stays ON."""
 
 class TestCheckForkUpstreamDrift:
     """Coverage for E4: _check_fork_upstream_drift reports the fork picture
@@ -1805,6 +1816,10 @@ class TestMacOSTCCGrants:
         assert "could not read code-signing requirement" in out
         assert "stable" not in out
 
+    def test_silent_without_desktop_bundle(self, monkeypatch, capsys):
+        monkeypatch.setattr(doctor_platform, "_desktop_app_bundle", lambda: None)
+        doctor_platform.check_macos_tcc_grants()
+        assert capsys.readouterr().out == ""
 
 class TestStagedRuntimeVenv:
     """doctor_platform._check_python_environment distinguishes staged
@@ -1823,6 +1838,46 @@ class TestStagedRuntimeVenv:
 
     # --- _staged_venv_dir: pm authority + provisioned-venv marker ---
 
+    def test_identifier_dr_is_stable_with_upgrade_hint_and_repair_info(self, monkeypatch, capsys, tmp_path):
+        self._darwin_bundle(monkeypatch, tmp_path, 'designated => identifier "com.nousresearch.hermes"')
+        doctor_platform.check_macos_tcc_grants()
+        out = capsys.readouterr().out
+        assert "TCC signing identity is stable" in out
+        assert "--setup-tcc-identity" in out
+        assert "tccutil reset ScreenCapture com.nousresearch.hermes" in out
+
+    def test_certificate_anchored_dr_is_stable_without_upgrade_hint(self, monkeypatch, capsys, tmp_path):
+        self._darwin_bundle(
+            monkeypatch, tmp_path,
+            'designated => identifier "com.nousresearch.hermes" and certificate root = H"aabbcc"',
+        )
+        doctor_platform.check_macos_tcc_grants()
+        out = capsys.readouterr().out
+        assert "TCC signing identity is stable" in out
+        assert "--setup-tcc-identity" not in out
+        assert "tccutil reset ScreenCapture com.nousresearch.hermes" in out
+
+    @pytest.mark.parametrize("failure", ["none", "empty", "timeout", "no_codesign"])
+    def test_unreadable_dr_warns_and_never_claims_stable(self, monkeypatch, capsys, tmp_path, failure):
+        """codesign failing, hanging, missing or printing nothing degrades to a
+        warning; an empty DR must not false-positive as a stable identity."""
+        if failure in ("none", "empty"):
+            self._darwin_bundle(monkeypatch, tmp_path, None if failure == "none" else "")
+        else:
+            self._darwin_bundle(monkeypatch, tmp_path, ...)
+            if failure == "timeout":
+                monkeypatch.setattr(shutil, "which", lambda _name: "/usr/bin/codesign")
+
+                def _timeout(*args, **kwargs):
+                    raise subprocess.TimeoutExpired(cmd=["codesign"], timeout=15)
+
+                monkeypatch.setattr(subprocess, "run", _timeout)
+            else:
+                monkeypatch.setattr(shutil, "which", lambda _name: None)
+        doctor_platform.check_macos_tcc_grants()
+        out = capsys.readouterr().out
+        assert "could not read code-signing requirement" in out
+        assert "stable" not in out
 
     def test_resolved_path_without_venv_marker_is_not_staged(self, tmp_path, monkeypatch):
         empty = tmp_path / "venv"

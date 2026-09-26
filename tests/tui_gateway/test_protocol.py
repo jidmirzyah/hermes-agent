@@ -1365,6 +1365,48 @@ def test_dispatch_runs_short_handlers_inline(server):
     assert resp == {"jsonrpc": "2.0", "id": "r1", "result": {"pong": True}}
 
 
+@pytest.mark.parametrize(
+    "slow_method",
+    ["complete.path", "complete.slash", "voice.toggle", "voice.record", "voice.tts", "wake.start", "wake.status"],
+)
+def test_slow_handlers_run_off_the_reader_thread(slow_method, server, monkeypatch):
+    """dispatch() must hand these RPCs to the pool and return at once, so a stalled handler never blocks
+    the stdin/WS reader behind it. Completion (#21123: git ls-files / skill scan froze prompt.submit for
+    the 120s RPC timeout) and voice/wake (synchronous faster-whisper lazy install, up to 300s: sent
+    messages never reached the agent) are the same bug class as #50005."""
+    release = threading.Event()
+    written = []
+
+    class _Transport:
+        def write(self, obj):
+            written.append(obj)
+            return True
+
+        def close(self):
+            pass
+
+    ran_on = []
+
+    def _stalled(rid, params):
+        ran_on.append(threading.get_ident())
+        release.wait(timeout=10)
+        return server._ok(rid, {})
+
+    monkeypatch.setitem(server._methods, slow_method, _stalled)
+
+    t0 = time.monotonic()
+    resp = server.dispatch({"id": "slow", "method": slow_method, "params": {}}, _Transport())
+    elapsed = time.monotonic() - t0
+    release.set()
+
+    assert resp is None, f"{slow_method} ran inline on the reader thread"
+    assert elapsed < 5
+    deadline = time.monotonic() + 10
+    while not written and time.monotonic() < deadline:
+        time.sleep(0.01)
+    # The pool worker, not the reader, ran the handler and wrote its response frame.
+    assert written and written[0]["id"] == "slow", written
+    assert ran_on and ran_on[0] != threading.get_ident()
 
 
 @pytest.mark.parametrize(
@@ -1405,6 +1447,7 @@ def test_skin_live_switch_end_to_end(server, tmp_path, monkeypatch):
     server._cfg_cache = server._cfg_sig = server._cfg_path = None
 
     emitted = []
+    monkeypatch.setattr(server, "_stdio_is_rpc_channel", True)  # stdio TUI: no WS peers, stdout is the client
     monkeypatch.setattr(server, "_emit", lambda ev, sid, payload=None: emitted.append((ev, payload)))
 
     # Baseline (default) — seeds the signature.
@@ -1429,6 +1472,7 @@ def test_broadcast_skin_if_changed_on_any_signature_move(server, monkeypatch):
     emitted = []
     # switch, no-op, switch, then a color edit (same name, bumped mtime).
     sigs = iter([("neon", 1.0), ("neon", 1.0), ("forest", 1.0), ("forest", 2.0)])
+    monkeypatch.setattr(server, "_stdio_is_rpc_channel", True)  # stdio TUI: no WS peers, stdout is the client
     monkeypatch.setattr(server, "_emit", lambda ev, sid, payload=None: emitted.append((ev, payload)))
     monkeypatch.setattr(server, "_last_skin_sig", None, raising=False)
     monkeypatch.setattr(server, "_skin_sig", lambda: next(sigs))
@@ -1457,10 +1501,11 @@ class _RecordingTransport:
         pass
 
 
-def test_unregister_live_transport_stops_delivery(capture):
+def test_unregister_live_transport_stops_delivery(capture, monkeypatch):
     """A disconnected peer (unregistered in the ws finally block) receives nothing
     — and a stale write is never attempted against its closed socket."""
     server, buf = capture
+    monkeypatch.setattr(server, "_stdio_is_rpc_channel", True)  # stdio TUI process
     a = _RecordingTransport()
     server.register_live_transport(a)
     server.unregister_live_transport(a)
@@ -1468,7 +1513,7 @@ def test_unregister_live_transport_stops_delivery(capture):
     server._broadcast_global_event("skin.changed", {"name": "x"})
 
     assert a.frames == []
-    # No live transports left → fell back to stdio.
+    # No live transports left → fell back to stdio (the stdio TUI's JSON-RPC channel).
     assert json.loads(buf.getvalue())["params"]["type"] == "skin.changed"
 
 
@@ -1497,3 +1542,21 @@ def test_approval_for_a_ws_client_that_never_advertised_settles_the_queue_entry(
     assert decision["choice"] is None and decision["cancelled"]
     assert peer.frames == []
     assert "ws-old-approval" not in approval_mod._gateway_queues
+
+
+def test_peerless_global_broadcast_never_reaches_stdout_in_ws_backend(capture, monkeypatch):
+    """`hermes serve` / dashboard speak JSON-RPC over WS only; Desktop captures their stdout
+    into desktop.log. After the last WS client leaves, the change watcher keeps ticking —
+    its sessions.changed / setup.ready / session.reclaimed frames must be dropped, not
+    printed (~1100 `[hermes] {"jsonrpc": ...}` lines in desktop.log)."""
+    server, buf = capture
+    monkeypatch.setattr(server, "_stdio_is_rpc_channel", False, raising=False)
+    a = _RecordingTransport()
+    server.register_live_transport(a)
+    server._broadcast_global_event("sessions.changed", {})
+    server.unregister_live_transport(a)
+
+    server._broadcast_global_event("sessions.changed", {})
+
+    assert len(a.frames) == 1
+    assert buf.getvalue() == ""
