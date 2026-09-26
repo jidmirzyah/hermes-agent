@@ -3,12 +3,8 @@ import { FIELD_DESCRIPTIONS, FIELD_LABELS } from '@/app/settings/constants'
 import type { Translations } from './types'
 
 export const en: Translations = {
-  externalOpenFailed: {
-    title: 'Couldn’t open this link',
-    message: 'No browser is registered to open this address. Copy the link and open it manually.',
-    copyUrl: 'Copy link',
-    close: 'Close'
-  },
+  // English editorial copy stays in the shipped JSONL; other locales override it.
+  intro: { stock: {}, custom: () => [] },
   connectors: {
     title: 'Connect your apps',
     connect: 'Connect',
@@ -437,9 +433,6 @@ export const en: Translations = {
       back: 'Back',
       openLogs: 'Open logs',
       repairHint: 'Repair re-runs the installer and can take a few minutes on a fresh machine.',
-      bundledReinstallHint:
-        'This bundled install can’t repair itself from inside the app — reinstall the app to restore its backend.',
-      reinstallApp: 'Reinstall the app',
       remoteSignInHint: signInLabel =>
         `Signs out of the saved remote browser session, then opens ${signInLabel}. Use local gateway to switch to the bundled backend instead.`,
       signOutAndSignIn: 'Sign out & sign in',
@@ -465,8 +458,6 @@ export const en: Translations = {
   },
 
   notifications: {
-    sharedProfileWarning:
-      'Another Hermes installation is using this profile. Both installations share its settings and data, so changes can conflict. You can continue, or close the other installation before making changes.',
     region: 'Notifications',
     hide: 'Hide',
     show: 'Show',
@@ -484,7 +475,6 @@ export const en: Translations = {
     updateReadyTitle: 'Update ready',
     updateReadyMessage: count => `${count} new change${count === 1 ? '' : 's'} available.`,
     updateReadyMessageUnknown: 'A new update is available.',
-    updateReadyMessageAppInstaller: 'A new version of Hermes is ready. Update now and Windows will finish it for you.',
     seeWhatsNew: "See what's new",
     mcp: {
       needsAuthTitle: 'MCP server needs re-authentication',
@@ -671,6 +661,7 @@ export const en: Translations = {
       'composer.focus': 'Focus composer',
       'composer.modelPicker': 'Open model picker',
       'composer.voice': 'Start / stop voice conversation',
+      'composer.dictate': 'Start / stop dictation',
       'view.toggleSidebar': 'Toggle sessions sidebar',
       'view.cycleSidebarGrouping': 'Cycle session grouping',
       'view.toggleRightSidebar': 'Toggle file browser',
@@ -821,6 +812,7 @@ export const en: Translations = {
       keysSettings: 'Settings',
       mcp: 'MCP',
       archivedChats: 'Archived Chats',
+      sessions: 'Sessions',
       about: 'About',
       billing: 'Billing',
       notifications: 'Notifications',
@@ -1109,6 +1101,10 @@ export const en: Translations = {
       backdropDesc: 'The faint statue image behind the conversation.',
       userBubbleTitle: 'Message Bubble',
       userBubbleDesc: 'How see-through your own messages are. Solid at 0; only the outline remains at 100.',
+      textDirectionTitle: 'Text direction',
+      textDirectionDesc:
+        'How chat messages and the composer choose their direction. Auto follows the first letter of each paragraph; pick a direction when mixed text lines up the wrong way. Code always stays left-to-right.',
+      textDirection: { auto: 'Auto', rtl: 'Right-to-left', ltr: 'Left-to-right' },
       introSplashTitle: 'Intro Splash',
       introSplashDesc: 'The wordmark and prompt shown on an empty chat.',
       reactionsTitle: 'Message Reactions',
@@ -1159,8 +1155,6 @@ export const en: Translations = {
           'Adopt an animated petdex mascot that floats over the app and reacts to what Hermes is doing — running while tools execute, celebrating on success, sulking on errors.',
         restartHint:
           'Pets need a quick restart — the running app started before this feature was added. Quit and reopen Hermes, then come back here.',
-        on: 'On',
-        off: 'Off',
         scaleTitle: 'Size',
         scaleDesc: 'Resize the floating mascot. Applies everywhere instantly.',
         roamTitle: 'Roam',
@@ -1279,7 +1273,41 @@ export const en: Translations = {
       driverHealth: 'Driver health'
     },
     about: {
-      updates: 'Updates'
+      heading: 'Hermes Desktop',
+      version: value => `Version ${value}`,
+      versionUnavailable: 'Version unavailable',
+      bundleOutOfSync: 'App build out of date',
+      bundleOutOfSyncDesc:
+        'The Hermes runtime was updated, but the desktop app itself is still an older build — new interface features (like Bot Mode) will be missing until it updates. Run the update below to rebuild the app. If that doesn\u2019t clear this warning, reinstall from the latest desktop installer.',
+      bundleOutOfSyncAction: 'Get the installer',
+      bundleSwapPending: 'Restart to finish the update',
+      bundleSwapPendingDesc:
+        'The updated app is already installed — Hermes only needs to restart to load it. Chats and settings are untouched.',
+      bundleSwapPendingAction: 'Restart Hermes',
+      updates: 'Updates',
+      checkNow: 'Check now',
+      checking: 'Checking…',
+      seeWhatsNew: "See what's new",
+      updateNow: 'Update now',
+      releaseNotes: 'Release notes',
+      onLatest: "You're on the latest version.",
+      installing: 'An update is currently installing.',
+      cantUpdate: "This build can't update itself from inside the app.",
+      cantReach: "We couldn't reach the update server.",
+      tapCheck: 'Tap "Check now" to look for updates.',
+      updateReady: count => `A new update is ready (${count} change${count === 1 ? '' : 's'} included).`,
+      updateReadyUnknown: 'A new update is ready.',
+      lastChecked: age => `Last checked ${age}`,
+      justNowSuffix: ' · just now',
+      automaticUpdates: 'Automatic updates',
+      automaticUpdatesDesc:
+        'Hermes checks for updates automatically in the background and lets you know when one is ready.',
+      branchCommit: (branch, commit) => `Branch ${branch} · Commit ${commit}`,
+      never: 'never',
+      justNow: 'just now',
+      minAgo: count => `${count} min ago`,
+      hoursAgo: count => `${count} hours ago`,
+      daysAgo: count => `${count} days ago`
     },
     config: {
       minimizeToTrayTitle: 'Minimize to tray',
@@ -1308,11 +1336,17 @@ export const en: Translations = {
       keepAwakeDesc: 'Stop this machine from sleeping so long or overnight runs keep going. The display can still dim.',
       disableF12Title: 'Disable F12 DevTools',
       disableF12Desc: 'Block F12 from opening Developer Tools. Ctrl+Shift+I (or Cmd+Opt+I on Mac) still works.',
+      alwaysExternalLinksTitle: 'Always open links in external browser',
+      alwaysExternalLinksDesc:
+        'Open every link you click in your system browser instead of the in-app browser. "Open in in-app browser" in the right-click menu still works.',
       attachmentSizeTitle: 'Max preview / image load size',
       attachmentSizeDesc:
         'How big a local file Desktop will load for previews and image attach, in MB. Default is 16. Remote non-image attach uses a separate 256 MB cap. Setting this very high loads the whole file into memory and can freeze or crash the app.',
       attachmentSizeUnit: 'MB',
       attachmentSizeLabel: 'Max preview / image load size in megabytes',
+      voiceShortcutHintTitle: 'Voice recording shortcut',
+      voiceShortcutHintDesc:
+        'Set the voice recording shortcut in Settings → Keyboard Shortcuts ("Start / stop dictation"). The voice.record_key config value only applies to the CLI and TUI.',
       showOptions: 'Show options'
     },
     hudModifier: {
@@ -1678,6 +1712,9 @@ export const en: Translations = {
       moaSetDefault: 'Set default',
       moaNewPresetPlaceholder: 'new preset',
       moaAddPreset: 'Add preset',
+      customModel: 'Custom model…',
+      customModelPlaceholder: 'Model id',
+      chooseFromList: 'Choose from list',
       moaDefault: 'Default:',
       moaReferenceToggle: (enabled, index) => `${enabled ? 'Disable' : 'Enable'} reference ${index}`,
       moaReferenceTitle: index => `Reference ${index}`,
@@ -1766,16 +1803,7 @@ export const en: Translations = {
       noRecommendationAction: 'Browse models',
       downloaded: 'Downloaded',
       downloadAction: size => `Download · ${size}`,
-      downloadProgress: (done, total) => `${done} of ${total}`,
-      downloadStatusRunning: 'Downloading',
-      downloadSpeed: rate => `${rate}`,
-      downloadEta: time => `~${time} left`,
-      downloadEtaSeconds: count => `${count} sec`,
-      downloadEtaMinutes: count => `${count} min`,
-      downloadEtaHours: (hours, minutes) => (minutes ? `${hours} h ${minutes} min` : `${hours} h`),
-      downloadPausedLabel: 'Paused',
-      downloadPauseAction: 'Pause',
-      downloadResumeAction: 'Resume',
+      downloadProgress: (done, total) => `Downloading ${done} of ${total}`,
       downloadDoneToast: model => `${model} is ready.`,
       installDoneToast: 'Local runtime installed and ready.',
       quickstartTitle: 'Run a model on this machine',
@@ -1798,7 +1826,7 @@ export const en: Translations = {
       updateAction: 'Update engine',
       updating: 'Updating engine…',
       upToDateTitle: 'Engine up to date',
-      upToDateDetail: (tag, backend) => `Running llama.cpp ${tag} (${backend}).`,
+      upToDateDetail: (tag, backend) => `Running llama.cpp ${tag} (${backend}) — the configured build.`,
       activeDetail: 'New chats use this model — it loads when you send your first message',
       activeNotLoaded: 'Loads on your first message',
       loadedPill: 'In memory',
@@ -1823,8 +1851,6 @@ export const en: Translations = {
       activateFailed: model => `Could not switch to ${model}`,
       activateDoneToast: model => `New chats use ${model}.`,
       downloadFailed: model => `Download of ${model} failed`,
-      downloadPauseFailed: model => `Couldn’t pause the download of ${model}`,
-      downloadResumeFailed: model => `Couldn’t resume the download of ${model}`,
       pillFitsGpu: 'Fits your GPU',
       pillUsesRam: 'Uses system RAM',
       pillTooBig: 'Too big for this machine',
@@ -1980,9 +2006,10 @@ export const en: Translations = {
         notice: {
           loggedOut: {
             title: 'Connect your Nous account',
-            message: 'Run /portal in the TUI or open the Nous portal to connect your account.',
-            action: 'Open portal ↗'
+            message: 'Sign in with your Nous account to see your balance, plan and usage here.',
+            action: 'Sign in'
           },
+          openPortal: 'Open portal ↗',
           noCard: {
             title: 'No payment method on file',
             message:
@@ -3380,6 +3407,37 @@ export const en: Translations = {
   },
 
   sidebar: {
+    filter: {
+      grouping: 'Grouping',
+      ordering: 'Ordering',
+      show: 'Show',
+      filters: 'Filters',
+      status: 'Status',
+      pullRequest: 'Pull request',
+      profile: 'Profile',
+      project: 'Project',
+      archived: 'Archived',
+      resetToDefaults: 'Reset to defaults',
+      expandAll: 'Expand all',
+      collapseAll: 'Collapse all',
+      inboxStyle: 'Inbox style',
+      updated: 'Updated',
+      created: 'Created',
+      tokens: 'Tokens',
+      cost: 'Cost',
+      manual: 'Manual',
+      preview: 'Preview',
+      pr: 'PR',
+      needsInput: 'Needs input',
+      working: 'Working',
+      unread: 'Unread',
+      draft: 'Draft',
+      idle: 'Idle',
+      open: 'Open',
+      merged: 'Merged',
+      closed: 'Closed',
+      noPR: 'No PR'
+    },
     gatewayGroups: {
       grouping: 'Gateway & profile',
       rename: 'Rename group',
@@ -3981,14 +4039,6 @@ export const en: Translations = {
   },
 
   updates: {
-    discontinuedTitle: 'This build of Hermes is no longer supported',
-    discontinuedBody:
-      'This build of Hermes is no longer supported and may break — uninstall it. Your data stays on disk.',
-    channels: { stable: 'Stable', canary: 'Canary' },
-    bundleSwapPending: 'Restart to finish the update',
-    bundleSwapPendingDesc:
-      'The updated app is already installed — Hermes only needs to restart to load it. Chats and settings are untouched.',
-    bundleSwapPendingAction: 'Restart Hermes',
     stages: {
       idle: 'Getting ready…',
       prepare: 'Getting ready…',
@@ -4021,8 +4071,6 @@ export const en: Translations = {
     availableTitleBackend: 'Backend update available',
     availableBodyBackend: 'A newer version of the connected Hermes backend is ready to install.',
     availableBodyNoChangelog: 'A newer version is ready. Release notes aren’t available for this install type.',
-    availableBodyAppInstaller:
-      'A new version of Hermes is ready. Hermes will close, Windows will finish the update, and Hermes will reopen on its own.',
     updateNow: 'Update now',
     maybeLater: 'Maybe later',
     moreChanges: count => `+ ${count} more change${count === 1 ? '' : 's'} included.`,
@@ -4040,12 +4088,6 @@ export const en: Translations = {
     applyingBodyBackend:
       'The remote backend is applying the update and will restart. Hermes reconnects automatically when it’s back.',
     applyingClose: 'This window will close while the update runs, then Hermes reopens on its own.',
-    applyingBodyAppInstaller:
-      'Hermes will close and Windows will finish the update. Hermes will reopen when it’s done — you don’t need to do anything.',
-    applyingCloseAppInstaller: 'This window will close, Windows finishes the update, and Hermes reopens on its own.',
-    checkUnknownTitleAppInstaller: 'Couldn’t check for updates',
-    checkUnknownBodyAppInstaller:
-      'Windows couldn’t check for updates right now. Updates also install automatically when you restart Hermes.',
     errorTitle: 'Update didn’t finish',
     errorBody: 'No worries — nothing was lost. You can try again now.',
     blockerTitle: 'Close local previews to update Hermes?',
@@ -4085,51 +4127,7 @@ export const en: Translations = {
       notAvailable: 'Update not available for this backend.',
       failed: 'Backend update failed.',
       noReturn: 'Backend didn’t come back online. The update may not have completed — check the backend host.'
-    },
-    // Update-status overlay + version-details (mechanism-aware update UI).
-    appName: 'Hermes',
-    version: (value: string) => `Version ${value}`,
-    versionUnavailable: 'Version unavailable',
-    checkNow: 'Check now',
-    seeWhatsNew: "See what's new",
-    releaseNotes: 'Release notes',
-    onLatest: "You're on the latest version.",
-    installing: 'An update is currently installing.',
-    cantReach: "We couldn't reach the update server.",
-    tapCheck: 'Tap "Check now" to look for updates.',
-    updateReady: count => `A new update is ready (${count} change${count === 1 ? '' : 's'} included).`,
-    updateReadyUnknown: 'A new update is ready.',
-    availableBodyRelease: tag => `Version ${tag} is ready to install.`,
-    lastChecked: age => `Last checked ${age}`,
-    never: 'never',
-    justNow: 'just now',
-    minAgo: count => `${count} min ago`,
-    hoursAgo: count => `${count}h ago`,
-    daysAgo: count => `${count}d ago`,
-    justNowSuffix: ' · just now',
-    bundleOutOfSync: 'App build out of date',
-    bundleOutOfSyncDesc:
-      'The Hermes runtime was updated, but the desktop app itself is still an older build. Update it to pick up the latest fixes.',
-    bundleOutOfSyncAction: 'Get the installer',
-    checkingShort: 'Checking…',
-    releaseAvailable: tag => `Version ${tag} is available.`,
-    versionDetailsTitle: 'Version details',
-    versionDetailsBody: 'This install is managed outside the app. Update it the same way you installed it.',
-    versionDetailsVersion: 'Version',
-    versionDetailsCommit: 'Commit',
-    versionDetailsBuildOrigin: 'Build Origin',
-    versionDetailsDistribution: 'Distribution',
-    versionDetailsDistributionDesktop: 'Desktop app',
-    versionDetailsDistributionDesktopMsix: 'Desktop app (MSIX)',
-    versionDetailsDistributionDesktopInstaller: 'Desktop app (installer)',
-    versionDetailsDistributionSourceInstaller: 'Source (install script)',
-    versionDetailsDistributionSource: 'Source',
-    versionDetailsDistributionStore: 'Microsoft Store',
-    versionDetailsRuntime: 'Runtime',
-    versionDetailsRuntimeEmbedded: 'Embedded runtime',
-    versionDetailsRuntimeExternal: 'External (uses the machine runtime)',
-    versionDetailsInstallId: 'Install ID',
-    versionDetailsUncommittedChanges: 'uncommitted changes'
+    }
   },
 
   handoffTour: {
@@ -4165,15 +4163,11 @@ export const en: Translations = {
     setupChoiceTitle: 'Set up Hermes Desktop',
     setupChoiceDesc:
       'Connect this app to a Hermes gateway you already run, or install Hermes locally on this computer.',
-    setupChoiceDescLocal: 'Install Hermes on this computer, or connect to a Hermes gateway you already run.',
     connectExistingTitle: 'Connect to existing Hermes',
     connectExistingShort: 'Connect existing',
     connectExistingDesc: 'Use a remote backend with a session token or browser sign-in. No local install will start.',
     installLocalTitle: 'Install Hermes locally',
     installLocalDesc: 'Download Hermes, create its Python environment, and run the backend on this computer.',
-    useLocalTitle: 'Use Hermes on this computer',
-    useLocalDesc: 'A Hermes runtime is already installed here — start it with one click. Nothing downloads.',
-    bundledLocalDesc: 'Use the Hermes runtime included with this app — the bundled backend is the local install.',
     localStartUnavailable: 'Local installation could not start. Restart Hermes Desktop and try again.',
     remoteSetupTitle: 'Connect to existing Hermes',
     remoteSetupDesc: 'Enter your gateway URL. Hermes Desktop will detect whether it needs a token or browser sign-in.',
@@ -4397,14 +4391,19 @@ export const en: Translations = {
     free: 'Free',
     freeTier: 'Free tier',
     priceTitle: 'Input / Output price per million tokens',
-    wasPrice: 'was'
+    wasPrice: 'was',
+    customModel: 'Custom model',
+    addCustomModelAction: 'Add custom model…',
+    customModelPlaceholder: 'Type a model id, e.g. openai/gpt-5'
   },
 
   modelVisibility: {
     title: 'Models',
     search: 'Search models',
     noAuthenticatedProviders: 'No authenticated providers.',
-    addProvider: 'Add provider…'
+    addProvider: 'Add provider…',
+    addCustomModel: 'Add custom model',
+    removeCustomModel: 'Remove custom model'
   },
 
   shell: {
@@ -4467,7 +4466,6 @@ export const en: Translations = {
       update: 'update',
       updateInProgress: 'Update in progress',
       commitsBehind: (count, branch) => `${count} commit${count === 1 ? '' : 's'} behind ${branch}`,
-      releaseAvailable: (tag: string) => `Version ${tag} is available.`,
       desktopVersion: version => `Hermes Desktop v${version}`,
       backendVersion: version => `Backend v${version}`,
       clientLabel: version => `client v${version}`,
@@ -4573,6 +4571,11 @@ export const en: Translations = {
     remotePickerTitle: 'Choose remote folder',
     remotePickerDescription: 'Browse folders on the connected backend.',
     remotePickerSelect: 'Select folder',
+    remotePickerNewFolder: 'New folder',
+    remotePickerFolderName: 'Folder name',
+    remotePickerCreateFolder: 'Create folder',
+    remotePickerInvalidFolderName: 'Enter a single folder name, without slashes.',
+    remotePickerCreateFolderFailed: error => `Could not create the folder (${error}).`,
     folderTip: cwd => cwd,
     openFolder: 'Open folder',
     refreshTree: 'Refresh tree',

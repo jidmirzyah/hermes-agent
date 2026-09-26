@@ -106,7 +106,13 @@ import {
 import { runGatewayRestart } from '@/store/system-actions'
 import type { PaginatedSessions, UsageStats } from '@/types/hermes'
 
+import { pluginDecisions, profiles, skills, toolsets } from './bridge'
+import { composerHost } from './composer'
 import { planPluginOpenSession } from './plugin-open-session-plan'
+import { sessionsHost } from './sessions'
+import { desktopSettings } from './settings'
+
+export type { DesktopSettingKey, DesktopSettingValues } from './settings'
 
 // -- state: readonly views over the app's live atoms -------------------------
 
@@ -692,6 +698,9 @@ export const host = {
     viewport: readonlyAtom<ViewportRect>($viewport)
   },
 
+  /** Read, update, and observe the allowlisted Desktop appearance preferences. */
+  settings: desktopSettings,
+
   /** Toast into the app's notification stack. */
   notify,
   notifyError,
@@ -910,6 +919,16 @@ export const host = {
    *  against older behavior unchanged. */
   ensureAgent: async (connectionId: null | string | undefined, profile: string): Promise<void> =>
     ensureGatewayAgent(connectionId ?? null, (profile ?? '').trim() || 'default'),
+
+  /** Session-list mutations (pin, reorder, colour) — see `./sessions`. */
+  sessions: sessionsHost,
+
+  /** Typed capabilities bridge — see `./bridge.ts`. `pluginDecisions` is
+   *  read-only: plugin toggling stays in the app's Plugins tab. */
+  skills,
+  toolsets,
+  profiles,
+  pluginDecisions,
 
   /** Open a stored session the way core surfaces do. A plugin/Bot Mode open
    *  is navigation, not a workspace or chrome API-home switch —
@@ -1553,7 +1572,9 @@ export const host = {
    *  components that take a `HermesGateway` prop directly (e.g. `ConnectorsTab`),
    *  which need the instance, not just a JSON-RPC door. Re-read per use — the
    *  active instance changes on a profile swap. */
-  getGateway: (): HermesGateway | null => $gateway.get()
+  getGateway: (): HermesGateway | null => $gateway.get(),
+
+  composer: composerHost
 }
 
 // -- react bridge -------------------------------------------------------------
@@ -1585,7 +1606,9 @@ export {
   type ComposerAtCompletionItem,
   type ComposerAtCompletionSource,
   type ComposerAttachmentProvider,
-  type ComposerMiddleware
+  type ComposerMiddleware,
+  type ComposerModelPillContext,
+  type ComposerModelPillProvider
 } from '@/app/chat/composer/contrib'
 /** THE session status dot — the one primitive the sidebar row, the pane tabs
  *  and the session switcher render, so a session's status can never disagree
@@ -1648,6 +1671,11 @@ export {
   WORKSPACE_PAGE_HEADER_AREA
 } from '@/app/routes'
 
+/** THE settings rows: `ListRow` is label + description with the control beside
+ *  it (wide) or under it (narrow); `ToggleRow` is the one on/off row — a Switch,
+ *  never an Off/On pill pair. Use them for preference rows in plugin panes and
+ *  dialogs so they line up with core Settings. */
+export { ListRow, ToggleRow } from '@/app/settings/primitives'
 /** THE full per-toolset config panel core Settings renders — provider picker,
  *  env vars / API keys, model catalog picker, and post-setup runners. Route-
  *  decoupled (the "manage keys" deep link is a no-op outside the router); pass
@@ -1859,6 +1887,10 @@ export const TITLEBAR_AREAS = { center: 'titleBar.center', left: 'titleBar.left'
  *  setup.runtime_check, reconciled) — pass `host.request`. Don't hand-roll
  *  readiness from raw RPC shapes. */
 export { evaluateRuntimeReadiness, type RuntimeReadinessResult } from '@/lib/runtime-readiness'
+/** Row-decoration slots: register a `data` contribution with a `render` for
+ *  `SESSION_ROW_AREAS.leading` / `.trailing` to decorate sidebar session rows
+ *  (the props carry the row's stored session id). */
+export { SESSION_ROW_AREAS, type SessionRowSlotContribution, type SessionRowSlotProps } from '@/lib/session-row-slots'
 /** A sibling WebSocket beside the route's `/api/ws` (voice PCM, Bot Screen RFB):
  *  same origin, same auth resolution as chat. */
 export { resolveSiblingWsUrl, type SiblingWsRoute } from '@/lib/sibling-ws-url'
@@ -1890,6 +1922,12 @@ export { cn } from '@/lib/utils'
  *  is gone. Pass the owning profile — a hidden session has no row to read it
  *  from, and the persisted half is bucketed per profile. */
 export { ackStoredSessionId, forgetSessionUnread, markSessionUnreadFinished } from '@/store/session-unread'
+/** `sidebarNav.prefs`: hide / re-order the sidebar's nav rows by CONTRIBUTING a
+ *  preference (union of hides, `capabilities` never hidden; the first order
+ *  in registry area order — lowest `order`, then registration — wins). A
+ *  contribution, not a `host.sidebar` verb, so it is attributed and dropped
+ *  on disable. */
+export { SIDEBAR_NAV_PREFS_AREA, type SidebarNavPrefsContribution } from '@/store/sidebar-nav'
 /** Live accent override — set a hex and the ACTIVE theme repaints with its
  *  accent family re-seeded from it (see `retintTheme`); `null` restores the
  *  authored palette. Deliberately not persisted: it is an authoring knob, not
