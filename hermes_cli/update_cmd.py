@@ -76,7 +76,7 @@ from hermes_cli.update_cmd_stash import (  # noqa: F401
     _stash_local_changes_if_needed, _warn_orphaned_update_autostashes)
 from hermes_cli.update_cmd_config import (  # noqa: F401
     _LAST_SIBLING_SNAPSHOTS, _check_and_apply_config_migration, _migrate_sibling_profile_configs,
-    _print_items, _run_config_check_fresh, _run_migrate_config_fresh)
+    _print_items, _reload_config_modules, _run_config_check_fresh, _run_migrate_config_fresh)
 from hermes_cli.update_cmd_deps import (  # noqa: F401
     _INSTALL_DEFINING_FILES, _UPDATE_CRITICAL_MODULES,
     _abort_dependency_sync_if_self_locked, _capture_active_lazy_features,
@@ -105,7 +105,7 @@ from hermes_cli.update_cmd_git import (  # noqa: F401
     _sync_with_upstream_if_needed)
 from hermes_cli.update_cmd_maint import (  # noqa: F401
     _PRE_UPDATE_SNAPSHOT_KEEP, _PRE_UPDATE_SNAPSHOT_MAX_FILE_SIZE, _clear_stale_sqlite_sidecars,
-    _ensure_acp_launcher, _ensure_fhs_path_guard, _finish_dashboard_update_cleanup,
+    _checkout_version, _ensure_acp_launcher, _ensure_fhs_path_guard, _finish_dashboard_update_cleanup,
     _format_time_ago, _post_update_sqlite_runtime_status, _print_bundled_skills_sync_report,
     _print_curator_first_run_notice, _print_curator_recent_run_notice,
     _print_fts_optimize_available_notice, _print_update_completion, _print_update_summary,
@@ -748,7 +748,9 @@ def _pull_updates(
     # of any entry point finds this marker and puts the old tree back (_early_recovery). The target is
     # the resolved commit, so a later `git fetch` cannot widen what that restore considers.
     pull_marker = interrupted_pull_marker(_m().PROJECT_ROOT)
-    target_sha = (_git_run(git_cmd, ["rev-parse", f"origin/{branch}^{{commit}}"]).stdout or "").strip()
+    # A release update moves the tree to its tag, not the branch tip: the marker names what git writes.
+    merge_ref = target_ref if target_ref is not None else f"origin/{branch}"
+    target_sha = (_git_run(git_cmd, ["rev-parse", f"{merge_ref}^{{commit}}"]).stdout or "").strip()
     with _best_effort('Could not write the interrupted-pull marker: %s'):
         pull_marker.write_text(
             f"pid={os.getpid()}\npre={pre_pull_sha}\ntarget={target_sha}\nstash={auto_stash_ref or ''}\n",
@@ -766,24 +768,24 @@ def _pull_updates(
                 _git_run(git_cmd, ["checkout", "--detach", merge_ref], check=True)
             elif _git_run(git_cmd, ["merge", "--ff-only", merge_ref]).returncode != 0:
                 _reconcile_diverged_checkout(git_cmd, branch, pre_pull_sha, target_ref=merge_ref)
-            if sync_upstream:
-                # Do not let a second mutation hide a failed origin merge or move an
-                # unexpected branch. Keep local edits parked through the final check.
-                _verify_head_after_pull(
-                    git_cmd, branch, pre_sync_sha or pre_pull_sha, in_place_update=in_place_update,
-                    _windows_gateway_resume=_windows_gateway_resume)
-                _m()._sync_with_upstream_if_needed(
-                    git_cmd, _m().PROJECT_ROOT, assume_yes=assume_yes, input_fn=gw_input_fn)
-            # Refuse an unexpected branch before syntax rollback can reset its ref.
-            _verify_head_after_pull(
-                git_cmd, branch, pre_sync_sha or pre_pull_sha, in_place_update=in_place_update,
-                _windows_gateway_resume=_windows_gateway_resume)
         except KeyboardInterrupt:
             raise  # Ctrl-C reached git too (same process group): the tree may be torn, keep the marker
         except BaseException:
             pull_marker.unlink(missing_ok=True)  # git exited on its own (sys.exit on conflict/reset failure)
             raise
         pull_marker.unlink(missing_ok=True)  # git is done: the tree is whole again
+        if sync_upstream:
+            # Do not let a second mutation hide a failed origin merge or move an
+            # unexpected branch. Keep local edits parked through the final check.
+            _verify_head_after_pull(
+                git_cmd, branch, pre_sync_sha or pre_pull_sha, in_place_update=in_place_update,
+                _windows_gateway_resume=_windows_gateway_resume)
+            _m()._sync_with_upstream_if_needed(
+                git_cmd, _m().PROJECT_ROOT, assume_yes=assume_yes, input_fn=gw_input_fn)
+        # Refuse an unexpected branch before syntax rollback can reset its ref.
+        _verify_head_after_pull(
+            git_cmd, branch, pre_sync_sha or pre_pull_sha, in_place_update=in_place_update,
+            _windows_gateway_resume=_windows_gateway_resume)
         _rollback_if_pulled_syntax_error(git_cmd, pre_sync_sha or pre_pull_sha)
         update_succeeded = True
     finally:
@@ -971,12 +973,8 @@ class _UpdateOptions:
 def _resolve_update_options(args, gateway_mode: bool) -> _UpdateOptions:
     """Snapshot pre-update state and resolve the flags/config ``_cmd_update_impl`` runs on."""
 
-    # Captured before any pull so the completion line can report the transition.
-    # Snapshot the pre-update version before files are replaced so the completion line can report the
-    # transition (prime-agent#630 port).
-    # Snapshot the pre-update version before any code is pulled so the completion line can report the
-    # transition (prime-agent#630 port).
-    pre_update_version = _read_project_version()
+    # Captured before any pull so the completion line can report the transition (prime-agent#630 port).
+    pre_update_version = _checkout_version()
     gw_input_fn = (
         (lambda prompt, default="": _gateway_prompt(prompt, default)) if gateway_mode else None)
     assume_yes = bool(getattr(args, "yes", False))

@@ -489,8 +489,8 @@ def get_git_banner_state(repo_dir: Optional[Path] = None) -> Optional[dict]:
 def _baked_banner_state() -> Optional[dict]:
     """Banner state from the baked build SHA (Docker image path), or None."""
     def _baked():
-        from hermes_cli.build_info import get_build_sha
-        return get_build_sha(short=8)
+        from hermes_cli.version_info import get_code_identity
+        return get_code_identity().get("short_sha")
     baked = _quiet(_baked)
     return {"upstream": baked, "local": baked, "ahead": 0} if baked else None
 

@@ -31,7 +31,7 @@ sleep() {{ :; }}
 git() {{
     if [ "$1" = clone ]; then
         printf '%s\\n' "$*" >> {shlex.quote(attempts.as_posix())}
-        case " $* " in *" --filter=blob:none "*) ;; *) return 1 ;; esac
+        case " $* " in *" --filter=tree:0 --no-checkout "*) ;; *) return 1 ;; esac
     fi
     if [ "{int(materialize_fails)}" = 1 ] && [ "${{3:-}}" = reset ]; then return 1; fi
     command git "$@"
@@ -40,7 +40,7 @@ stage_repository
 '''
     result = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True, timeout=30)
     calls = attempts.read_text().splitlines()
-    assert len([x for x in calls if "--filter=blob:none" not in x]) > 1
+    assert len(calls) > 1
     assert "--no-checkout" in calls[-1]
     if materialize_fails:
         assert result.returncode != 0

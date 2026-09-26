@@ -1,9 +1,9 @@
 # Stable release admission and promotion
 
 `Stable Release` is the release gate. A successful builder alone is not a
-stable release. Stable releases use claim tags as locks and final tags as green
-receipts; neither tag is a workflow trigger. Canary builds retain their separate
-push-driven workflow.
+stable release. Stable releases use attempt refs as locks and final tags as
+publish receipts; neither tag is a workflow trigger. Canary builds have their
+own scheduled workflow.
 
 The committed project version is always `0.0.0`. Release jobs derive the payload
 version from the admitted ref and stamp isolated build trees. Do not bump version
@@ -11,31 +11,44 @@ files on `main`.
 
 ## Order
 
-1. Refresh `origin/main` and remote `v*-rc` claims. Derive the next SemVer from
-   the published release family seeded at `0.21.4` and every spent claim.
-2. Push an annotated `vMAJOR.MINOR.PATCH-rc` claim atomically, create one
-   non-prerelease GitHub draft for it, and dispatch `Stable Release` on that exact
-   claim ref. The claim message binds its commit, autopublish policy, and one
-   monotonically allocated epoch. That epoch is the release date and native
-   packaging clock for every matrix leg and retry.
+1. Refresh `origin/main` and the remote attempt and marker refs (`rc.*` and
+   `abandoned-rc.*`). Derive the next SemVer from the published release family
+   seeded at `0.21.4` alone: the newer of the protected R2 stable head and the
+   newest published non-prerelease GitHub release with a `vX.Y.Z` tag. A
+   release that skipped bundles moves only the second. Attempts do not move the
+   version line. A cut whose next version already has a final `vX.Y.Z` tag is
+   refused until that publication finishes.
+2. Push an annotated `rc.<N>-vX.Y.Z` attempt ref atomically, create one
+   non-prerelease GitHub draft on it, and dispatch `Stable Release` on that exact
+   ref. The attempt number comes from the existing attempt refs of that version.
+   The claim message binds its commit, attempt number, autopublish policy,
+   `skipBundles` and `skipTests` flags, and
+   one monotonically allocated epoch. That epoch is the release date and native
+   packaging clock for every matrix leg and retry. One outstanding attempt, of
+   any version, blocks a new `release`.
 3. Admit the exact remote annotated tag-object SHA, peeled commit, `GITHUB_REF`,
    `GITHUB_SHA`, checked-out `HEAD`, and ancestry on `origin/main`.
 4. Run the whole source, Docker, Nix, PM bundle, install/update, Termux, Windows,
    signed-package, and native-upgrade acceptance graph.
-5. Publish immutable versioned Docker and R2 artifacts from the tested bytes.
-   Do not move `stable` or `latest` aliases yet and do not rebuild for publication.
-6. Create the annotated final `vMAJOR.MINOR.PATCH` receipt. It binds the original
-   claim object, commit, candidate-manifest SHA256, Docker manifest digest, and
-   autopublish policy. Retarget the existing draft to this final tag.
-7. The stable publication controller resolves releases oldest first. It publishes
-   the GitHub draft, verifies and promotes the receipt-bound Docker digest, then
-   advances App Installer, macOS, APT, downloads-page, and protected R2 heads.
+5. Push immutable versioned Docker and R2 artifacts from the tested bytes. The
+   Docker image is pushed as soon as its own tests pass, tagged by the attempt
+   ref. Do not move `stable` or `latest` aliases yet and do not rebuild for
+   publication.
+6. Create the annotated final `vMAJOR.MINOR.PATCH` receipt at publish, not at
+   green. It binds the winning attempt's ref, object, commit, archive prefix,
+   candidate-manifest SHA256 (`null` when the claim skipped bundles), Docker
+   manifest digest, and autopublish policy.
+7. The stable publication controller resolves releases oldest first. It creates
+   `vX.Y.Z`, retargets the still-draft release onto it, strips the warning
+   blocks, makes the release public as the last call, then verifies and promotes
+   the receipt-bound Docker digest and advances App Installer, macOS, APT,
+   downloads-page, and protected R2 heads.
 
 A sole green draft waits unless its claim selected autopublish. A later green
 claim flushes all contiguous earlier green drafts in order. An older running claim
-blocks newer publication. Burned claims are skipped but their version numbers are
-never reused. Failed, cancelled, missing, and unexpectedly skipped requirements
-remain red.
+blocks newer publication. A burned attempt is skipped, and its version is cut
+again after `abandon`. Failed, cancelled, missing, and unexpectedly skipped
+requirements remain red.
 
 Docker Hub, R2, APT, GitHub, and the Store do not support one cross-service
 transaction. The controller is therefore idempotent: after a partial failure,
@@ -57,13 +70,83 @@ python scripts/release.py release --commit "$(git rev-parse origin/main)" --bump
 ```
 
 `--bump` defaults to `patch`; pass `minor` or `major` only when that change is
-intentional. The selected commit must descend from or equal the highest claim's
-source. Equality lets a burned release be superseded without an unrelated code
-change; an ancestor or unrelated sibling is refused.
+intentional. The selected commit must descend from the newest published
+`vX.Y.Z`. With no published tag, any commit already on remote `main` is
+accepted. An abandoned attempt puts no constraint on the next cut; it was often
+abandoned because its commit is bad. `release` also refuses while any attempt,
+of any version, is outstanding. The refusal prints the attempt's workflow run
+URL, the `abandon` command, and the rerun command before it raises.
+
+The attempt ref is a public lock, not a SemVer prerelease. It reads
+`rc.1-v0.21.5`, not `v0.21.5-rc.1`. The package version stays plain `0.21.5`.
+`parse_attempt_ref` in `scripts/releases/versioning.py` is the one grammar for
+the shape.
+
+The draft body carries a fenced warning block at the top and at the bottom: do
+not publish the release from the GitHub UI. Publishing it by hand skips the
+`vX.Y.Z` receipt tag, the update feeds, the Docker aliases, and the Store
+check. Published releases are immutable, so a hand-published release cannot
+be fixed afterwards, and it blocks the pipeline: the attempt then has neither a
+marker ref nor a final tag, so `release` refuses it as outstanding and
+`abandon` refuses it because it is published. The publication pass strips both
+fenced blocks while the release is still a draft.
 
 Add `--autopublish` to publish immediately when the claim becomes the oldest
 green release. Without it, the release stays a draft until an explicit publish
 or a later green claim forces ordered resolution.
+
+### Skip bundles or tests
+
+Two `release` flags remove parts of the pipeline. They can be used together,
+and they combine with `--autopublish`.
+
+```sh
+# Tag, GitHub release and Docker image only
+python scripts/release.py release --commit "$(git rev-parse origin/main)" --skip-bundles --remote origin
+# Emergency release: build and publish everything, run no tests
+python scripts/release.py release --commit "$(git rev-parse origin/main)" --skip-tests --remote origin
+```
+
+| | `--skip-bundles` | `--skip-tests` |
+|---|---|---|
+| Source CI (`ci.yaml`), Nix, Termux, Windows live, install/update E2E, bootstrap identity | run | skipped |
+| Docker image | built, tested, published | built and published, `tests/docker` skipped |
+| Native PM bundle check | skipped | skipped |
+| Desktop and Termux candidates | skipped | built, signed and staged, with no native smokes or in-build test suites |
+| Signed-package upgrade acceptance (`transitions-*`, `*-packaged`) | skipped | skipped |
+| Publication | final tag, GitHub release, Docker `stable`/`latest` aliases | everything, as a normal release |
+
+The flags are written into the claim message, never passed as workflow
+inputs. `admit` reads them from the claim and emits `skip-bundles` and
+`skip-tests`. Every job condition and every gate reads those outputs. A
+recovery rerun cannot change them. To change a flag, `abandon` the attempt and
+cut again.
+
+The gates stay strict. `scripts.releases.stable gate` reads the flags and
+requires each job the flags remove to report `skipped`, and every other gated
+job to report `success`. A job that ran although a flag removes it also
+blocks the release. `SKIPPED_BY` in `scripts/releases/stable.py` is the one
+table of which flag removes which job.
+
+**`--skip-bundles`.** The draft, Docker image, final tag and GitHub release are
+the whole release. No candidate manifest exists, so the final tag records
+`candidateManifestSha256: null`. Publication moves only the Docker aliases. The
+protected R2 stable head, App Installer and macOS feeds, APT channel,
+downloads page, `releases/stable/release-candidates.json`, signed-package
+baseline, and Store submission all stay on the previous bundle release. Source
+checkouts on the official repository follow
+`releases/stable/release-candidates.json`, so they also stay on the previous
+bundle release. Such a release is complete when the Docker `stable` alias
+carries the digest its final tag binds. The sequencer uses that alias, next to
+the R2 head, to decide which releases still need their publication pass.
+
+**`--skip-tests`.** Every artifact is built, signed, staged and published the
+same way as a normal release. The candidate manifest records each native smoke
+as `skipped`, never as passed. The next release uses that manifest as its
+upgrade baseline like any other. Every reader that knows the claim (`complete`
+and the protected R2 advance) refuses a manifest whose smoke results disagree
+with the claim's `skipTests` flag. Use it only for an emergency fix, and cut a
+normal release after it.
 
 The claim push is the atomic version lock. Two callers may derive the same next
 version, but only one push wins; the loser reports the winning tagger, time, and
@@ -76,40 +159,51 @@ python scripts/release.py abandon --version 0.21.5 --remote origin
 
 `publish` performs a synchronous supersession preflight, then dispatches the same
 ordered controller used by automatic recovery. It refuses a known burned version
-below a newer published release. `abandon` deletes only the draft; it deliberately
-keeps the `-rc` and any final receipt so derivation cannot reuse that version.
-The sequencer derives that missing-draft state as burned rather than recording a
-separate abandonment flag.
+below a newer published release. `abandon` deletes the draft when one exists,
+writes an `abandoned-rc.<N>-vX.Y.Z` marker ref, and keeps the attempt ref. The
+marker is the record of abandonment; the attempt ref is never deleted. The
+version is not spent, so the next cut is `rc.<N+1>-vX.Y.Z`.
 
 Do not manually dispatch `Stable Release` from a final tag. Recovery keeps the
-original claim ref, object SHA, commit, draft database ID, and autopublish policy.
+original claim ref, object SHA, commit, draft database ID, autopublish policy,
+and skip flags.
 
 ## Failure and recovery
 
-A failed stable run becomes retry-eligible after 15 minutes, then reruns only
-failed jobs in the same GitHub Actions run. The quarter-hour reconciler applies
-only the oldest unresolved eligible retry, because GitHub keeps only one pending
-run in the shared stable-release concurrency group. It does not occupy a runner
-during the backoff. At most two retries are admitted (run attempts 2 and 3).
-After attempt 3 fails, the claim is burned and the sequencer may resolve later
-claims. The same controller recovers a lost retry request or a crash between any
-publication mutations.
+When a stable run fails, its completion event starts `Stable Release
+Publication`, which at once reruns only the failed jobs in the same GitHub
+Actions run. There is no backoff and no schedule. The pass applies only the
+oldest unresolved retry, because GitHub keeps only one pending run in the shared
+stable-release concurrency group. The rerun waits in that group until the pass
+ends. At most two retries are admitted (run attempts 2 and 3). After attempt 3
+fails, the claim is burned and the sequencer may resolve later claims. A lost
+retry request, or a crash between publication mutations, is recovered by the
+next failure event or by dispatching `Stable Release Publication` by hand.
 
 A newly pushed claim with no observed workflow run remains unresolved for one
 hour. This grace window covers the non-atomic draft and dispatch steps. After the
 hour, a still-unstarted claim is derived as burned. No claim is burned during the
 normal creation window.
 
-Desktop and Termux handoffs live in the immutable R2 tag archive. Each producer
-writes a `handoff-<target>.json` receipt containing the tag, commit, paths, sizes,
-and SHA256 digests. Candidate assembly emits one pinned
-`release-candidates.json`; consumers verify its digest and do not re-upload the
-packages. Docker publication pushes one immutable versioned manifest and records
-its registry digest in the final tag. Delayed publication promotes that digest
-registry-side, so it does not depend on expiring Actions artifacts.
+Desktop and Termux handoffs live in the immutable R2 tag archive. The archive
+key is the attempt ref: `releases/tag/rc.<N>-vX.Y.Z/`. `releases/tag/vX.Y.Z/`
+is never written. Each producer writes a `handoff-<target>.json` receipt
+containing the tag, commit, paths, sizes, and SHA256 digests. Per-arch receipts
+live beside the candidate manifest under that prefix. Candidate assembly emits
+one pinned `release-candidates.json`; consumers verify its digest and do not
+re-upload the packages. Its digest is recorded nowhere before publish: the
+publication pass hashes the archive copy and writes that hash into the final
+tag. Docker publication pushes one immutable versioned manifest tagged by the
+attempt ref and records its registry digest in the final tag. Delayed
+publication promotes that digest registry-side, so it does not depend on
+expiring Actions artifacts.
 
 Windows, macOS, and Termux candidate jobs stage packages and metadata under
-`releases/tag/<tag>/` before acceptance. No stable feed is written at this stage.
+`releases/tag/<attempt ref>/` before acceptance. No stable feed is written at
+this stage. The stable APT pool path also carries the attempt ref:
+`releases/termux/stable/pool/<attempt ref>/<c>/<name>.deb`. The pool upload is
+immutable with a one-year cache header, so a recut of the same version writes a
+different pool key.
 Immutable uploads accept an existing object only when its bytes match. If an
 archive object, final-tag digest, versioned Docker tag, or read-back differs, stop
 recovery rather than replacing the accepted candidate.
@@ -123,19 +217,50 @@ the resulting Tauri package version, builds and inspects Python wheel/sdist
 metadata and filenames, and checks the Nix and Docker runtime identities. Any
 consumer-facing `0.0.0` or mismatched version fails the gate.
 
-The annotated final tag binds the GitHub release database ID admitted with the
-claim. Deleting that release burns the transaction: a replacement draft with the
-same tag name cannot be retargeted or published by reconciliation.
+The draft stays on the attempt ref until publish. Deleting it is `abandon`, and
+it does not burn the version. The annotated final tag binds the GitHub release
+database ID admitted with the claim. Publish edits the release only while it is
+still a draft: it creates `vX.Y.Z`, retargets the release onto it, strips the
+warning blocks from the body, and reads the tag and body back. Making the
+release public is the last call. Published releases are immutable, so nothing
+can retarget or re-tag one afterwards.
+
+Nothing points a client at an attempt until publish. The updater compares
+versions, not URLs, and that is safe only because of this. The diagnostic page
+at `releases/tag/<attempt ref>/index.html` is not an update feed, and an
+attempt installed from it is not upgrade-safe: every attempt of a version has
+the same package version, so the published build never replaces it. The Docker
+image is pushed early under the attempt ref; the `stable` and `latest` aliases
+move with the feed in the publication pass. The Store submission is held: the
+green run submits with auto-publish off. The submission API cannot release a
+held submission, so the publication pass only checks it and prints a GitHub
+warning; once certification passes, click Publish now for that submission in
+Partner Center. A failed submission leaves the publication run red. Stable channel
+records carry an optional `archiveRef` naming the attempt ref; `releaseTag`
+stays `vX.Y.Z` and the protected prefix falls back to it when `archiveRef` is
+absent.
 
 The desktop workflow's optional `termux_upgrade_from_tag` input names an exact
 published release with a Termux R2 handoff. Explicit non-publishing desktop builds
 retain no downloadable job artifacts.
 
+The desktop workflow takes a `jobs` input with the groups `darwin-arm64`,
+`darwin-x64`, `win32-arm64`, `win32-x64`, `win32-bundle`, `linux-x64`,
+`linux-arm64`, and `termux`. Stable calls it once per group, except the linux
+groups, which wait for a real Linux build. Each Mac arch and the Windows bundle
+stage a receipt, and each install arm starts from its own receipt as soon as
+its own bytes are staged. `acceptance` is the one join that blocks publication.
+The `smoke-win32-universal` job is gone; the per-arch MSIX smokes cover each
+arch, and the Windows install arms install the `.msixbundle` on both arches.
+
 ## Tag namespaces and receipts
 
-Before relying on claim tags as locks, apply a repository ruleset for
-`refs/tags/v*` that restricts creation, update, and deletion to organization
-administrators and the release integration. Claim and final tags are immutable.
+Before relying on attempt refs as locks, apply a repository ruleset for
+`refs/tags/v*`, `refs/tags/rc.*`, and `refs/tags/abandoned-rc.*` that restricts
+creation to organization administrators and the release integration and blocks
+update and deletion. The ruleset is not applied yet; until an admin applies it,
+these locks are honor-system — anyone with push access can delete a marker ref
+or move a receipt tag. Attempt refs, marker refs, and final tags are immutable.
 Channel and commit builds write annotated post-build receipts such as
 `v0.0.7+channel.<YYYYMMDDTHHMMSSZ>.<run-id>` and
 `v0.0.0+commit.<YYYYMMDDTHHMMSSZ>.<run-id>` only after publication succeeds.
@@ -146,8 +271,11 @@ Canary source identity is only
 SemVer-equal to its stable core; the protected channel record and embedded UTC
 timestamp decide progression. Desktop clients treat that validated channel
 sequence as the update authority rather than asking SemVer to order build
-metadata. Every `main` push queues a canary run with
-`cancel-in-progress: false`. Historical `-canary.` identities are unsupported.
+metadata. `Canary Release` runs once a day at 06:41 UTC from the default
+branch, and a manual dispatch starts one at any time. Runs queue with
+`cancel-in-progress: false`. If `main` has no new commits, the run resumes an
+unpublished canary or does nothing. Historical `-canary.` identities are
+unsupported.
 If a process stops after pushing the canary tag, rerunning the command verifies
 the exact remote tag object, repairs the missing draft, and redispatches until the
 protected canary head receipts that tag.
@@ -266,8 +394,9 @@ local helper suite. Never store the bootstrap output as a repo channel list.
 
 ## Signed-package baseline
 
-The last successful stable release records
+The last successful stable release that shipped bundles records
 `releases/stable/release-candidates.json` on the configured R2 public origin.
+A release that skipped bundles does not replace it.
 It identifies actual Windows universal MSIX bundles, macOS ZIPs and package
 provenance. The next run combines those records with its candidate manifest
 and uses the existing native bundled-update drivers.
@@ -292,6 +421,8 @@ See [the bundled update contract](https://github.com/NousResearch/hermes-agent/b
   because it is flaky. It is reported as deferred, not passed. Stabilize it
   and prove repeatable CI runs before adding it to this gate.
 - Install/update E2E and native signed-package acceptance are **not** deferred.
+  Only a claim cut with `--skip-tests` removes them, and the gate then requires
+  them to be skipped.
 - PR-only history, label and diff review checks do not apply to a stable tag.
   All applicable source CI jobs still run, regardless of changed paths.
 - OSV vulnerability findings retain their existing advisory policy. Required

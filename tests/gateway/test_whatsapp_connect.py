@@ -277,7 +277,7 @@ class TestKillPortProcess:
 
     @pytest.mark.windows_only
     def test_uses_netstat_and_taskkill_on_windows(self):
-        """``windows_only``: netstat/taskkill are Windows binaries. The old
+        """``platforms("windows")``: netstat/taskkill are Windows binaries. The old
         ``_IS_WINDOWS`` patch selected this branch on Linux, where neither
         exists, so the mocked argv was the only thing under test."""
         from plugins.platforms.whatsapp.adapter import _kill_port_process
@@ -347,7 +347,7 @@ class TestKillPortProcess:
         processes (a browser tab on the same port). The implementation now
         resolves listeners via ``_listener_pids_on_port`` and signals only those.
 
-        ``linux_only``: asserts the POSIX ``os.kill``/SIGTERM path, which is
+        ``platforms("linux")``: asserts the POSIX ``os.kill``/SIGTERM path, which is
         genuinely selected here without patching ``_IS_WINDOWS``.
         """
         from plugins.platforms.whatsapp import adapter as wa
@@ -393,7 +393,7 @@ class TestHttpSessionLifecycle:
     async def test_disconnect_uses_taskkill_tree_on_windows(self):
         """Windows disconnect should target the bridge process tree, not just the parent PID.
 
-        ``windows_only``: ``taskkill /T`` is the Windows tree-kill primitive;
+        ``platforms("windows")``: ``taskkill /T`` is the Windows tree-kill primitive;
         on Linux the branch was reachable only by faking ``_IS_WINDOWS``.
         """
         adapter = _make_adapter()

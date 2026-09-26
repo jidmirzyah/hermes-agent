@@ -135,7 +135,7 @@ def _worker_memory_max_bytes() -> int:
                 override, _MIN_WORKER_MEMORY_MAX_BYTES // (1024 * 1024))
     candidates: List[int] = []
     try:
-        for line in Path("/proc/self/cgroup").read_text(encoding="utf-8-sig").splitlines():
+        for line in Path("/proc/self/cgroup").read_text(encoding="utf-8").splitlines():
             if line.startswith("0::"):
                 relative = line.partition("::")[2].lstrip("/")
                 raw_limit = (

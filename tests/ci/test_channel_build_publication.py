@@ -18,6 +18,10 @@ import pytest
 from hermes_cli.release_channels import canonical_json
 from scripts.releases import channel_publish, handoff, r2
 from scripts.releases.channels import preview_identity
+from tests.ci.desktop_release_roles import (
+    DOWNLOADABLE_DISPATCHES, admitted, channel_publisher, commit_summary, gate, native_builds, needs_of, stage_step,
+    universal_assembler,
+)
 from tests.ci.test_desktop_release_tag_admission import _seed_repo, _git, _workflow
 from tests.scripts.test_release_r2 import r2_server  # noqa: F401
 
@@ -28,7 +32,7 @@ def request_for(base):
     return {"schema": 1, "buildId": "a" * 32, "channel": "unknown-at-build-time", "sequence": 7,
             "repository": "fixture/repo", "commit": "b" * 40, "sourceVersion": "1.2.3",
             "version": "0.0.7", "windowsVersion": "0.0.7.0", "identity": preview_identity("unknown-at-build-time", "c" * 16),
-            "bundleEnv": {"FEATURE": "different from the prior request"}, "publicBase": base}
+            "bundleEnv": {"HERMES_GUEST_ONBOARDING": "different from the prior request"}, "publicBase": base}
 
 
 @pytest.fixture
@@ -110,7 +114,7 @@ def test_channel_handoff_binds_full_request_and_feed_bytes(tmp_path, r2_server, 
         filename = file["url"].rsplit("/", 1)[-1]
         assert file["size"] == (build / filename).stat().st_size
     changed = copy.deepcopy(request)
-    changed["bundleEnv"]["FEATURE"] = "other packaging input"
+    changed["bundleEnv"]["HERMES_GUEST_ONBOARDING"] = "other packaging input"
     with pytest.raises(ValueError, match="identity"):
         handoff.fetch_channel_build(changed, ["win32-x64"], tmp_path / "wrong", public_base=request["publicBase"])
     assert not (tmp_path / "wrong").exists()
@@ -214,7 +218,7 @@ def test_real_workflow_admission_and_public_smoke_fetch(tmp_path, r2_server, sta
     result = run_shell(tmp_path, r2_server, script, env, cwd=clone)
     assert result.returncode == 0, result.stdout + result.stderr
     assert f"sha={request['commit']}" in (tmp_path / "outputs").read_text(encoding="utf-8")
-    for overrides in ({"GITHUB_REF": "refs/heads/feature"}, {"TAG": "v0.1.2"}, {"TERMUX_ONLY": "true"},
+    for overrides in ({"GITHUB_REF": "refs/heads/feature"}, {"TAG": "v0.1.2"}, {"JOBS": "termux"},
                       {"CHANNEL_REQUEST_SHA256": "f" * 64}):
         failed = run_shell(tmp_path, r2_server, script, {**env, **overrides}, cwd=clone)
         assert failed.returncode != 0
@@ -244,7 +248,8 @@ def test_real_workflow_admission_and_public_smoke_fetch(tmp_path, r2_server, sta
 @pytest.mark.platforms("posix")
 def test_workflow_promotion_missing_native_gate_does_not_write(tmp_path, r2_server, staged_channel):
     request, _ = staged_channel
-    script = workflow_step("desktop-bundled-release.yml", "publish-channel", "Publish immutable feeds and manifest, then CAS channel head")
+    script = workflow_step("desktop-bundled-release.yml", channel_publisher(_workflow()["jobs"]),
+                           "Publish immutable feeds and manifest, then CAS channel head")
     env = {"CHANNEL_BUILD": request["buildId"], "CHANNEL_REQUEST_SHA256": hashlib.sha256(canonical_json(request)).hexdigest(),
            "CLOUDFLARE_R2_PUBLIC_URL": request["publicBase"], "GITHUB_REPOSITORY": request["repository"],
            "RUNNER_TEMP": str(tmp_path), "RELEASE_NEEDS": "{}"}
@@ -265,7 +270,8 @@ def test_real_publication_cas_and_manifest_summary(tmp_path, r2_server, staged_c
               "policy": "preview", "state": "active", "revision": 1, "nextSequence": 8,
               "identity": request["identity"], "head": None}
     r2_server.store[channel_key] = (canonical_json(record), '"record"')
-    script = workflow_step("desktop-bundled-release.yml", "publish-channel", "Publish immutable feeds and manifest, then CAS channel head")
+    script = workflow_step("desktop-bundled-release.yml", channel_publisher(_workflow()["jobs"]),
+                           "Publish immutable feeds and manifest, then CAS channel head")
     env = {"CHANNEL_BUILD": request["buildId"], "CHANNEL_REQUEST_SHA256": hashlib.sha256(canonical_json(request)).hexdigest(),
            "CLOUDFLARE_R2_PUBLIC_URL": request["publicBase"], "GITHUB_REPOSITORY": request["repository"],
            "RUNNER_TEMP": str(tmp_path), "GITHUB_STEP_SUMMARY": str(tmp_path / "summary.md"),
@@ -350,7 +356,8 @@ def test_channel_windows_record_stage_and_assembly_handoff_shell(tmp_path, r2_se
     prefix = handoff.channel_prefix(request)
     for key in ("metadata-windows-x64.json", "handoff-win32-x64.json"):
         r2_server.store.pop(prefix + key)
-    script = workflow_step("desktop-bundled-release.yml", "build-win32-commit", "Record and stage channel windows packages")
+    jobs = _workflow()["jobs"]
+    script = stage_step(jobs[native_builds(jobs)[("win32-x64", "commit")]], channel=True)["run"]
     result = run_shell(tmp_path, r2_server, script, env)
     assert result.returncode == 0, result.stdout + result.stderr
     # One-dispatch: the env-default commit equals the request's own, which is
@@ -368,7 +375,7 @@ def test_channel_windows_record_stage_and_assembly_handoff_shell(tmp_path, r2_se
     metadata = json.loads((release / "metadata-windows-x64.json").read_text(encoding="utf-8"))
     assert metadata["identity"] == request["identity"]["msixAppIdWithOrg"]
     assert metadata["applicationId"] == request["identity"]["appNamePascal"]
-    fetch = workflow_step("desktop-bundled-release.yml", "assemble-win32-bundle", "Retrieve Windows packages from R2")
+    fetch = workflow_step("desktop-bundled-release.yml", universal_assembler(jobs), "Retrieve Windows packages from R2")
     result = run_shell(tmp_path, r2_server, fetch, env)
     assert result.returncode == 0, result.stdout + result.stderr
     assert sorted(p.name for p in release.glob("*.msix")) == sorted(p.name for p in build.glob("*.msix"))
@@ -493,34 +500,40 @@ def test_tag_and_commit_staging_never_runs_for_a_pinned_channel_build():
     alone, so every other handoff staging step must be gated off whenever a
     channel build is pinned.
     """
-    workflow = _workflow()
-    seen = set()
-    for job in ("build-win32-commit", "build-darwin-commit"):
-        for step in workflow["jobs"][job]["steps"]:
-            run = step.get("run", "") if isinstance(step, dict) else ""
-            if "scripts.releases.handoff stage" not in run:
-                continue
-            if "--channel-request" in run:
-                continue
-            seen.add(step["name"])
-            assert "needs.validate.outputs.channel-build == ''" in (step.get("if") or ""), (
-                f"{step['name']!r} stages tag/commit receipts without excluding channel builds")
-    assert seen, "walk broken: no non-channel handoff staging steps found"
+    jobs = _workflow()["jobs"]
+    channel = admitted(["validate"], channel=True)
+    for name in native_builds(jobs).values():
+        step = stage_step(jobs[name])
+        # Every trust branch stages tag/commit receipts through this step, so
+        # it must stand down for a pinned channel build and run otherwise.
+        assert not gate(step.get("if", "true"), DOWNLOADABLE_DISPATCHES["channel"], channel, job_if=False), (
+            f"{name}: {step['name']!r} stages tag/commit receipts for a channel build")
+        for dispatch in ("tag", "candidate", "commit"):
+            assert gate(step.get("if", "true"), DOWNLOADABLE_DISPATCHES[dispatch], admitted(["validate"]),
+                        job_if=False), (name, dispatch)
+        # The pinned-request stage is the one that runs instead.
+        pinned = stage_step(jobs[name], channel=True)
+        assert gate(pinned["if"], DOWNLOADABLE_DISPATCHES["channel"], channel, job_if=False), name
 
 
 def test_commit_only_status_page_is_not_published_for_a_channel_build():
     """Two renderers exist; only the channel one may run for a channel build.
 
-    ``publish-channel`` renders the channel matrix from the pinned request.
+    The channel publisher renders the channel matrix from the pinned request.
     Letting the commit-only summary run too would fetch commit-namespace
     receipts that a channel build never wrote and publish a page claiming the
     commit's binaries were not built.
     """
-    workflow = _workflow()
-    channel = next(step for step in workflow["jobs"]["publish-channel"]["steps"]
-                   if "render-builds-table.py" in step.get("run", ""))
-    assert "--channel-build" in channel["run"]
-    summary = workflow["jobs"]["commit-builds-summary"]
-    assert "inputs.channel == ''" in summary["if"], (
+    jobs = _workflow()["jobs"]
+    channel_publisher(jobs)  # the channel renderer exists; it fails loudly otherwise
+    summary = jobs[commit_summary(jobs)]
+
+    def runs(inputs, *, channel=False):
+        needs = admitted(needs_of(summary), channel=channel)
+        needs["validate"]["outputs"]["all-jobs"] = "true"
+        return gate(summary["if"], inputs, needs)
+
+    assert runs(DOWNLOADABLE_DISPATCHES["commit"])
+    assert not runs(DOWNLOADABLE_DISPATCHES["channel"], channel=True), (
         "the commit-only status page must not run for a channel dispatch")
-    assert "inputs.disposable_channel == ''" in summary["if"]
+    assert not runs({**DOWNLOADABLE_DISPATCHES["commit"], "disposable_channel": "native-preview"})

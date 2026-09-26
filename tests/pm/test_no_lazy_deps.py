@@ -1,9 +1,9 @@
 """Contract tests for scripts/ci/check_lazy_deps_imports.py.
 
-``tools/lazy_deps.py`` was deleted by the pm migration; pm.extras
+``tools/lazy_deps.py`` survives only as an old-updater stub; pm.extras
 (available / ensure_import / ensure_and_bind) is the only lazy-install
-surface. A ``tools.lazy_deps`` import left in production code is an
-ImportError at call time.
+surface. A ``tools.lazy_deps`` import left in production code never gets
+its dependencies.
 
 Each test drives the real checker CLI (subprocess) against a fresh
 per-test git fixture repo, so the tests are order-independent: the guard

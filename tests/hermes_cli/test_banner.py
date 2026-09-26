@@ -83,3 +83,10 @@ def test_build_welcome_banner_does_not_center_pad_hero_art():
 
     hero_line = next(line for line in buf.getvalue().splitlines() if "\u2800X" in line)
     assert hero_line.startswith("\u2502  \u2800X"), repr(hero_line)
+
+
+def test_baked_banner_uses_live_identity(monkeypatch):
+    from hermes_cli import banner, version_info
+
+    monkeypatch.setattr(version_info, "get_code_identity", lambda: {"short_sha": "a1b2c3d4"})
+    assert banner._baked_banner_state() == {"upstream": "a1b2c3d4", "local": "a1b2c3d4", "ahead": 0}

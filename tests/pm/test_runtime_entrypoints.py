@@ -55,6 +55,22 @@ def test_ci_dependency_phase_uses_isolated_runtime(tmp_path, monkeypatch):
     assert all(arguments["explicit"] for _, arguments in calls)
 
 
+def test_store_root_reads_executing_trees_canonical_install_stamp(tmp_path, monkeypatch):
+    from pm import environments, paths
+
+    project = tmp_path / "source"
+    project.mkdir()
+    package = tmp_path / "package"
+    package.mkdir()
+    runtime = tmp_path / "packaged-tools"
+    (package / "install-stamp.json").write_text(json.dumps({"runtimeDir": str(runtime)}))
+    monkeypatch.setattr(paths, "repo_root", lambda: project)
+    monkeypatch.setenv("HERMES_INSTALL_ROOT", str(package))
+    monkeypatch.delenv("HERMES_RUNTIME_DIR", raising=False)
+
+    assert environments.store_root(project) == runtime
+
+
 @pytest.mark.parametrize("distribution", ["nix", "docker"])
 def test_packaged_runtime_uses_explicit_stamp_without_tool_downloads(tmp_path, monkeypatch, distribution):
     from pm import runtime, paths

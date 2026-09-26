@@ -8,6 +8,7 @@ import type { DesktopUpdateStatus, DesktopVersionInfo } from '@/global'
 import { type Translations, useI18n } from '@/i18n'
 import { AlertTriangle, CheckCircle2, ExternalLink, Loader2, RefreshCw } from '@/lib/icons'
 import { cn } from '@/lib/utils'
+import { shortVersion } from '@/lib/version-label'
 import {
   $backendUpdateApply,
   $backendUpdateChecking,
@@ -94,14 +95,10 @@ function ordinaryUpdateStatus({ apply, checking, status, target, u }: UpdateStat
   }
 
   if (status?.error) {
-    // A git that never ran is a local problem; leading with "couldn't reach
-    // the update server" would misdiagnose it as a network failure.
-    const prefix = status.error === 'git-unusable' ? '' : u.cantReach
-
     return {
       applying,
       error: [status.message, status.error].filter(l => !!l).join('\n'),
-      line: [prefix, status.message].filter(Boolean).join(' '),
+      line: u.cantReach,
       supported,
       tone: 'error',
       updateAvailable
@@ -183,7 +180,7 @@ export function VersionHero({
           <h2 className="text-lg font-semibold tracking-tight">{u.appName}</h2>
         )}
         <p className="mt-1 text-xs text-muted-foreground">
-          {version?.appVersion ? u.version(version.appVersion) : u.versionUnavailable}
+          {version?.appVersion ? u.version(shortVersion(version.appVersion)) : u.versionUnavailable}
           {version?.channel
             ? ` · ${Object.entries(u.channels).find(([name]: [string, string]): boolean => name === version.channel)?.[1] ?? version.channel}`
             : ''}

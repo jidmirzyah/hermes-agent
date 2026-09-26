@@ -74,6 +74,13 @@ let
           cffi = [ ];
         };
       });
+      # [kittentts] locks misaki as a git source. uv.lock records no build
+      # backend for it, so supply the hatchling its pyproject declares.
+      misaki = prev.misaki.overrideAttrs (old: {
+        nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ final.resolveBuildSystem {
+          hatchling = [ ];
+        };
+      });
     };
 
   pythonPackageOverrides =
@@ -164,11 +171,6 @@ let
 in
 {
   inherit python;
-
-  # Equivalent to uv's --only-group: use the lock-derived dependency spec,
-  # without installing Hermes or its runtime dependencies in the build env.
-  iconBuildVenv = pythonSet.mkVirtualEnv "hermes-icon-build-env"
-    pythonSet.hermes-agent.dependency-groups.icon-build;
 
   venv = pythonSet.mkVirtualEnv "hermes-agent-env" {
     hermes-agent = dependency-groups;

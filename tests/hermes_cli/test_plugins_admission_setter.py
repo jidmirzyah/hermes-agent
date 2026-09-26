@@ -30,12 +30,12 @@ def test_failed_publication_preserves_selection_and_imports(plugin_world, monkey
     if failure == "config":
         prelude = (
             "from pm import publication\n"
-            "atomic_bytes = publication._atomic_bytes\n"
+            "atomic_bytes = publication.durable_write_bytes\n"
             "def fail(path, data):\n"
             f"    if path == Path({str(config)!r}) and b'publication-candidate' in data:\n"
             "        raise OSError('fixture config disk full')\n"
             "    return atomic_bytes(path, data)\n"
-            "publication._atomic_bytes = fail\n"
+            "publication.durable_write_bytes = fail\n"
         )
     else:
         # Config and facts now publish in the worker; the failed command must
@@ -96,3 +96,22 @@ def test_ui_conflict_is_reported_without_changing_selection(plugin_world, surfac
             plugins_cmd._persist_plugin_selection(["plugin-worker-proof", "conflicting-ui-plugin"], {0, 1}, set())
     assert {path: path.read_bytes() for path in watched} == before
     world.imports()
+
+def test_core_conflict_names_the_plugin_and_keeps_selection(plugin_world, capsys):
+    from hermes_cli.plugins_admission import AdmissionRefused
+    from pm import paths
+
+    world = plugin_world
+    # Core pins plugin-core-dep==1.0; this plugin demands 2.0, so no union can resolve.
+    origin, sha = world.origin(name="core-conflict-plugin", dependency="plugin-core-dep", pin="2.0")
+    world.command("install", identifier=origin.as_uri(), ref=sha, no_enable=True, allow_removed=True)
+    watched = [world.home / "config.yaml", paths.runtime_facts_path()]
+    before = {path: path.read_bytes() for path in watched if path.exists()}
+    capsys.readouterr()
+    with pytest.raises(AdmissionRefused, match="Plugin 'core-conflict-plugin' conflicts with") as refused:
+        world.command("enable", name="core-conflict-plugin", no_allow_tool_override=True)
+    assert "plugin-core-dep" in str(refused.value)  # the resolver's own cause stays visible
+    printed = " ".join(capsys.readouterr().out.split())
+    assert "Plugin 'core-conflict-plugin' conflicts with" in printed and "plugin-core-dep" in printed
+    assert {path: path.read_bytes() for path in watched if path.exists()} == before
+    assert world.enabled() == []

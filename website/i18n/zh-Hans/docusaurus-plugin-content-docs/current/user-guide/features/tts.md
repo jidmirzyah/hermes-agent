@@ -98,6 +98,8 @@ tts:
     # normalize_audio: true
 ```
 
+KittenTTS 不支持 Intel macOS 和 Windows ARM64：其依赖没有为这些平台发布 `onnxruntime` 或 PyTorch wheel。在这些平台上选择它会报告该提供商不可用。
+
 **速度控制**：全局 `tts.speed` 值默认应用于所有提供商。每个提供商可用自身的 `speed` 设置覆盖它（例如 `tts.openai.speed: 1.5`）。提供商级别的速度优先于全局值。默认值为 `1.0`（正常速度）。
 
 

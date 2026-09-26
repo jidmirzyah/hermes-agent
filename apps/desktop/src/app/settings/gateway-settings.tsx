@@ -1,3 +1,4 @@
+import { isGatewayReauthRequired } from '@hermes/shared'
 import { useStore } from '@nanostores/react'
 import { useEffect, useRef, useState } from 'react'
 
@@ -15,6 +16,7 @@ import type {
   DesktopRegistryConnection
 } from '@/global'
 import { useI18n } from '@/i18n'
+import { reestablishCloudAgentSession } from '@/lib/cloud-agent-session'
 import { ExternalLink } from '@/lib/external-link'
 import {
   AlertCircle,
@@ -426,11 +428,50 @@ function GatewayConnectionSettings({ embedded, standalone }: { embedded: boolean
   const isConnectedAgent = (agent: DesktopCloudAgent) =>
     savedAgent(agent)?.id === activeConnectionId && !cloudTeamChanged(savedAgent(agent), cloudOrg)
 
-  const activateSavedCloud = async (id: string) => {
+  // A saved cloud connection's gateway session can lapse while the app sits
+  // on a local-primary device — the dial then rejects with a reauth-shaped
+  // error whose copy points here ("Open Settings → Gateway and sign in
+  // again"), yet nothing else in Settings re-authenticates a cloud row. Run
+  // the one recovery that exists for this state — drop the lapsed cookies,
+  // ensure the portal session, silent-cascade the agent — then retry the
+  // switch once. Everything else stays a plain failed switch.
+  const selectSavedCloudWithReauth = async (id: string, dashboardUrl?: string) => {
+    try {
+      await selectConnection(id)
+    } catch (error) {
+      if (!isGatewayReauthRequired(error)) {
+        throw error
+      }
+
+      const desktop = window.hermesDesktop
+
+      // Cloud registry URLs are the persisted agent dashboardUrl. Keep saved
+      // rows usable without discovery, but never run the cascade against ''.
+      if (!desktop?.cloud || !dashboardUrl) {
+        throw error
+      }
+
+      const outcome = await reestablishCloudAgentSession(desktop, dashboardUrl)
+
+      if (outcome !== 'connected') {
+        notify({
+          kind: 'warning',
+          title: t.boot.failure.signInIncompleteTitle,
+          message: t.boot.failure.signInIncompleteMessage
+        })
+
+        throw error
+      }
+
+      await selectConnection(id)
+    }
+  }
+
+  const activateSavedCloud = async (id: string, dashboardUrl?: string) => {
     setCloudConnectingId(id)
 
     try {
-      await selectConnection(id)
+      await selectSavedCloudWithReauth(id, dashboardUrl)
     } catch (err) {
       notifyError(err, g.cloudConnectFailed)
     } finally {
@@ -856,7 +897,7 @@ function GatewayConnectionSettings({ embedded, standalone }: { embedded: boolean
           await refreshConnectionsRegistry()
         }
 
-        await selectConnection(saved.id)
+        await selectSavedCloudWithReauth(saved.id, agent.dashboardUrl)
 
         return
       }
@@ -1095,7 +1136,7 @@ function GatewayConnectionSettings({ embedded, standalone }: { embedded: boolean
                       ) : (
                         <Button
                           disabled={cloudConnectingId !== null}
-                          onClick={() => void activateSavedCloud(connection.id)}
+                          onClick={() => void activateSavedCloud(connection.id, connection.url)}
                           size="sm"
                           variant="outline"
                         >

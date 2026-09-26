@@ -68,12 +68,26 @@ The desktop/server scripts are not the Termux installation path.
 The scripts clone the source, bootstrap uv, and delegate dependency preparation
 to PM. PM provides pinned Python, Node.js, npm, ripgrep, and FFmpeg. The source
 installation selects the `all` Python extra, not every optional extra.
-Browsers and other optional tools use their feature-specific installation paths.
+PM also installs the browser tools (`agent-browser` and its pinned Chromium) by
+default. If that download fails, the install still completes and prints the
+command to retry. Other optional tools use their feature-specific installation
+paths.
+
+To leave the browser tools out, pass `--skip-browser` on POSIX or `-SkipBrowser`
+on Windows. Hermes remembers this choice: later installs and `hermes update` do
+not add them back. Run `hermes pm install agent-browser` to install them and
+undo the choice.
 
 The scripts create a launcher and prepare the data directory. Interactive runs
 also invoke setup and gateway configuration. `--non-interactive` on POSIX, or
 `-NonInteractive` on Windows, skips stages that need input. The optional
 `--include-desktop` / `-IncludeDesktop` stage builds the desktop from source.
+
+On a terminal the scripts show one status line per step and write the output
+of git, uv and the builds to `logs/install.log` under the Hermes data
+directory; a failed step prints its last lines and the log path. CI (`CI` or
+`GITHUB_ACTIONS` set), redirected output, `--verbose` / `-Verbose` or
+`HERMES_INSTALL_VERBOSE=1` stream everything instead.
 
 #### Install layout
 
@@ -136,9 +150,12 @@ For the POSIX source script, provide Git, curl, tar, and SHA-256 utilities.
 Windows can bootstrap its pinned Git for Windows archive when Git is absent.
 An existing uv can bootstrap PM; otherwise the script downloads its verified pin.
 
-Hermes requires **Python 3.14** (`>=3.14,<3.15`). PM selects the managed tool
-versions from `pm/lock.json`; it does not adopt arbitrary system Node versions
-as the installed runtime.
+Current first-party installations run on **Python 3.14**. The broader
+`>=3.11,<3.15` range in `pyproject.toml` lets older Python installations
+run the updater before PM switches them to 3.14; it does not promise current
+runtime support on 3.11–3.13. PM selects the managed tool versions from
+`pm/lock.json`; it does not adopt arbitrary system Node versions as the
+installed runtime.
 
 Source builds can require a native compiler and platform development libraries.
 Building Electron from source adds Node native-module requirements. These

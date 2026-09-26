@@ -44,7 +44,7 @@ from pathlib import Path
 
 _VALID_PLATFORMS = ("linux", "macos", "windows")
 
-# Mirrors tests/conftest.py::_PLATFORM_ALIASES, keyed by lane name rather than
+# Mirrors tests/_fixtures/platform_gating.py::_PLATFORM_ALIASES, keyed by lane name rather than
 # sys.platform value: this side never runs on the host it is asking about.
 _SPEC_HOSTS = {
     "linux": frozenset({"linux"}),

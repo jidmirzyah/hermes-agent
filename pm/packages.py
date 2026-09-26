@@ -8,6 +8,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -398,6 +399,11 @@ class Venv(StatePackage):
         candidate = generation / "venv"
         environment = managed_environment(candidate, env=source_build_environment(project),
                                           explicit=explicit or repair, output=sys.stderr)
+        if not repair:
+            # Inspection may skip a broken secondary profile, but publishing a replacement
+            # graph must not silently evict its recorded members (including passed candidates).
+            from pm.plugins_state import enabled_plugins_ordered
+            enabled_plugins_ordered()
         members = [] if repair else (enabled_member_dirs() if plugin_dirs is None else plugin_dirs)
         try:
             generation.mkdir(parents=True)
@@ -562,20 +568,24 @@ class Npm(BinaryPackage):
         if not bundled_cli.is_file():
             raise InstallError(self.name, "node's entry is missing its bundled npm-cli.js")
 
-        env = npm_env(archive.parent / ".npm-cache")
-
         staged.mkdir(parents=True, exist_ok=True)
-        proc = subprocess.run(
-            [
-                str(node_bin), str(bundled_cli), "install", "--global",
-                "--prefix", str(staged), "--offline", "--ignore-scripts",
-                "--no-audit", "--no-fund", str(archive),
-            ],
-            capture_output=True,
-            text=True,
-            timeout=900,
-            env=env,
-        )
+        # npm caches the tarball it installs. The archive's directory is the
+        # store's download entry, which must hold only the archive: a cache
+        # there turns its removal into a tree delete that fails on Windows
+        # while Defender still holds the fresh copy (WinError 145). Cleanup
+        # of this throwaway cache must never fail the install.
+        with tempfile.TemporaryDirectory(prefix="hermes-npm-cache-", ignore_cleanup_errors=True) as cache:
+            proc = subprocess.run(
+                [
+                    str(node_bin), str(bundled_cli), "install", "--global",
+                    "--prefix", str(staged), "--offline", "--ignore-scripts",
+                    "--no-audit", "--no-fund", str(archive),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=900,
+                env=npm_env(Path(cache)),
+            )
         if proc.returncode != 0:
             raise InstallError(
                 self.name, f"self-install exited {proc.returncode}: {proc.stderr[-400:]}"
@@ -621,18 +631,9 @@ class Git(BinaryPackage):
         return out
 
     def unpack(self, archive: Path, staged: Path, target: str) -> None:
-        """stdlib tar extract, but skip members the data filter refuses —
-        the MSYS tree ships dev/fd → /proc/self/fd style links that mean
-        nothing on Windows and must not fail the install."""
-        import tarfile
+        from pm.store import extract_tar
 
-        staged.mkdir(parents=True, exist_ok=True)
-        with tarfile.open(archive) as tf:
-            for member in tf:
-                try:
-                    tf.extract(member, staged, filter="data")
-                except (tarfile.FilterError, OSError):
-                    continue
+        extract_tar(archive, staged, git_msys=True)
 
     def env(self, entry: Path, target: str) -> dict:
         return {"PATH": [str(entry / "cmd"), str(entry / "usr" / "bin")]}
@@ -729,6 +730,29 @@ class Ffmpeg(_BionicDebArm, BinaryPackage, DebPackage):
 class Ripgrep(BinaryPackage):
     name = "ripgrep"
     binary_rel = {"win32": "rg.exe", "posix": "rg"}
+    # The ARM64 Windows release links the VC++ runtime dynamically (the x64
+    # one embeds it), and a fresh Windows has no vcruntime140.dll: rg.exe
+    # dies with STATUS_DLL_NOT_FOUND. Our pinned Python ships the ARM64 DLL.
+    deps = ("python",)
+
+    def stage(self, store: Store, staged: Path, version: str, target: str) -> None:
+        super().stage(store, staged, version, target)
+        if target != "win32-arm64":
+            return
+        from pm.install import _installed_location, _lockfile
+        from pm.registry import get_package
+
+        python = get_package("python")
+        location = _installed_location(python, _lockfile(), target)
+        fact = location[0].get("python") if location is not None else None
+        if fact is None:
+            raise InstallError(self.name, "ARM64 rg.exe needs vcruntime140.dll from python, which is not installed")
+        runtime = location[1].entry(fact["entry"]) / "vcruntime140.dll"
+        if not runtime.is_file():
+            raise InstallError(self.name, f"python's entry has no {runtime.name}")
+        # App-local copy: the loader searches the exe's own folder first, and
+        # the entry digest is recorded over it.
+        shutil.copy2(runtime, staged / runtime.name)
 
     def verify(self, entry: Path, target: str) -> str:
         if target == "linux-arm64-bionic":
@@ -802,7 +826,15 @@ class CuaDriver(BinaryPackage):
 class AgentBrowser(BinaryPackage):
     name = "agent-browser"
     optional = True
+    # Browser tools find agent-browser only in PM's store or on PATH (no npx
+    # fallback), and their readiness check never installs it, so an install
+    # without it silently loses every browser_* tool.
+    # Default-install it; `install.sh --skip-browser` declines it.
+    default = True
     deps = ("chromium",)
+    # Termux owns its browser stack (`npm install -g agent-browser`; see
+    # tools/browser_tool_install.py), and PM has no bionic Chromium to drive.
+    gaps = {"linux-arm64-bionic": "Termux installs agent-browser through npm"}
     flatten = True
     probe_version = False
     url = "https://registry.npmjs.org/agent-browser/-/agent-browser-{version}.tgz"
@@ -858,6 +890,8 @@ class Chromium(Package):
     name = "chromium"
     optional = True
     on_path = False
+    # Neither Chrome-for-Testing nor Playwright's mirror builds for Android.
+    gaps = {"linux-arm64-bionic": "no Chromium build for Android/Termux"}
     emulated_arch_targets = frozenset({"win32-arm64"})
     _CDN = "https://cdn.playwright.dev"
 

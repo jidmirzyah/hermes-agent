@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import atexit
-import errno
 import base64
 from collections.abc import Callable
 from contextlib import contextmanager, suppress
@@ -12,11 +11,19 @@ import logging
 import os
 from pathlib import Path
 import shutil
-import tempfile
 import time
 import uuid
 
 from pm.environments import dependency_home_root, install_state_dir, runtime_facts_path
+# Private aliases: this module calls them through its globals (tests patch ``_atomic_bytes``
+# here) and updaters shipped before PM import them by these names mid-swap
+# (tests/compat/old_updater_surface.json). New code imports the pm.filesystem names.
+from pm.filesystem import (
+    durable_write_bytes as _atomic_bytes,
+    file_digest as _digest,
+    lock_fd as _lock,
+    read_bytes_or_none as _bytes,
+)
 
 LOG = logging.getLogger(__name__)
 
@@ -26,37 +33,6 @@ LOG = logging.getLogger(__name__)
 # binds its port is worse than one that binds against the previous generation. Losers skip — the
 # same rule boot_bootstrap._RecordLock states for home maintenance.
 INSTALL_LOCK_TIMEOUT_SECONDS = 10.0
-_LOCK_POLL_SECONDS = 0.05
-
-
-def _lock(fd: int, *, wait: bool, timeout: float | None = None) -> bool:
-    """Take the byte lock; ``timeout`` bounds the retry loop (None waits forever, 0 tries once)."""
-    deadline = None if timeout is None else time.monotonic() + timeout
-    if os.name == "nt":
-        import msvcrt
-        while True:
-            try:
-                os.lseek(fd, 0, os.SEEK_SET)
-                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
-                return True
-            except OSError as exc:
-                if exc.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
-                    raise
-            if not wait or (deadline is not None and time.monotonic() >= deadline):
-                return False
-            time.sleep(_LOCK_POLL_SECONDS)
-    else:
-        import fcntl
-        while True:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                return True
-            except BlockingIOError:
-                pass
-            if not wait or (deadline is not None and time.monotonic() >= deadline):
-                return False
-            time.sleep(_LOCK_POLL_SECONDS)
-
 
 @contextmanager
 def runtime_lock(project: Path, *, timeout: float | None = INSTALL_LOCK_TIMEOUT_SECONDS):
@@ -79,37 +55,6 @@ def runtime_lock(project: Path, *, timeout: float | None = INSTALL_LOCK_TIMEOUT_
         yield True
     finally:
         os.close(fd)
-
-
-def _bytes(path: Path) -> bytes | None:
-    try:
-        return path.read_bytes()
-    except FileNotFoundError:
-        return None
-
-
-def _digest(path: Path) -> str | None:
-    data = _bytes(path)
-    return hashlib.sha256(data).hexdigest() if data is not None else None
-
-
-def _atomic_bytes(path: Path, data: bytes):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=".publish-")
-    try:
-        with os.fdopen(fd, "wb") as stream:
-            stream.write(data)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-        if os.name != "nt":
-            directory = os.open(path.parent, os.O_RDONLY)
-            try:
-                os.fsync(directory)
-            finally:
-                os.close(directory)
-    finally:
-        Path(temporary).unlink(missing_ok=True)
 
 
 def _recover_plugin_publication(project: Path, row: dict, journal: Path) -> None:

@@ -59,7 +59,7 @@ def test_malformed_sibling_does_not_hide_the_good_job(tmp_path):
         jobs = main_dashboard._loaded_launchd_backend_jobs([("agent", tmp_path)])
     assert jobs == [
         (
-            f"gui/{os.getuid()}",  # windows-footgun: ok — macos_only file
+            f"gui/{os.getuid()}",  # windows-footgun: ok — platforms("macos") file
             "ai.hermes.dashboard.test",
             ["/usr/local/bin/hermes", "dashboard", "--port", "9119"],
             4321,

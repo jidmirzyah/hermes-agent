@@ -18,6 +18,22 @@ def install_root() -> Path:
     return Path(env) if env else repo_root()
 
 
+def install_stamp_path(project_root: Path) -> Path:
+    """THE stamp location for ``project_root``, shared by every stamp reader.
+
+    Beside the code in checkouts, Docker and desktop payloads. A Nix package
+    bakes the stamp outside the store's package dir and its wrapper carries
+    ``HERMES_INSTALL_ROOT`` for the executing tree only — so the executing
+    tree resolves through install_root, any other tree is taken literally.
+    PM reads it in sealed stages (the Docker runtime base) before hermes_cli
+    ships, so it lives here rather than beside the stewards.
+    """
+    root = Path(project_root)
+    if root.resolve() == repo_root():
+        root = install_root()
+    return root / "install-stamp.json"
+
+
 def lockfile_path() -> Path:
     return Path(__file__).resolve().parent / "lock.json"
 

@@ -121,7 +121,7 @@ def zip_update(tmp_path, monkeypatch, isolated_source_completion):
 @pytest.mark.parametrize("route", ["direct", "git-failure"])
 @pytest.mark.parametrize("gateway_mode", [False, True])
 def test_zip_command_migrates_profiles_recovers_snapshot_and_verifies_fleet(
-    zip_update, monkeypatch, route, gateway_mode, capsys,
+    zip_update, monkeypatch, route, gateway_mode,
 ):
     state = zip_update
     monkeypatch.setattr(update_cmd, "_prepare_git_command", lambda: (route == "direct", ["git"], False))
@@ -145,7 +145,6 @@ def test_zip_command_migrates_profiles_recovers_snapshot_and_verifies_fleet(
         assert (state.root / name).read_text(encoding="utf-8") == "new"
     for name in ("apps/desktop/release/Hermes.exe", "venv/keep", "node_modules/keep", ".env"):
         assert (state.root / name).read_text(encoding="utf-8") == "retained"
-    assert "v1.0 → v2.0" in capsys.readouterr().out
     assert state.events == ["prepare", *([("marker", True)] if gateway_mode else []),
                             "restart", "resume", "finalize"]
     receipt = json.loads((state.active / "logs/update_receipts/latest.json").read_text())

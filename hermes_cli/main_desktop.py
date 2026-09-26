@@ -84,6 +84,22 @@ def _renderer_bundle_torn(dist_dir: Path) -> bool:
     return False
 
 
+def _packaged_node_pty_missing(dist_dir: Path) -> bool:
+    """True when the packaged node-pty has no native binary for this OS.
+
+    The main process requires node-pty at startup, so such a package dies
+    before any window opens while the source stamp still matches (#62462).
+    Same places node-pty's loader and stage-native-deps.mjs look. Conservative:
+    a package without node-pty at all is not judged here.
+    """
+    root = dist_dir / "node_modules" / "node-pty"
+    if not (root / "package.json").is_file():
+        return False
+
+    native_dirs = [root / "build" / "Release", *(root / "prebuilds").glob(f"{sys.platform}-*")]
+    return not any(next(d.rglob("*.node"), None) for d in native_dirs if d.is_dir())
+
+
 def _desktop_build_needed(desktop_dir: Path, project_root: Path, *, source_mode: bool) -> bool:
     """True when the desktop build output is stale, missing, torn, or built in the other mode."""
     if source_mode:
@@ -97,6 +113,10 @@ def _desktop_build_needed(desktop_dir: Path, project_root: Path, *, source_mode:
     dist_dir = _renderer_bundle_dir(desktop_dir, source_mode=source_mode)
     if dist_dir is not None and _renderer_bundle_torn(dist_dir):
         print(f"  ⚠ A previous update left the desktop bundle incomplete ({dist_dir}); rebuilding it")
+        return True
+
+    if not source_mode and dist_dir is not None and _packaged_node_pty_missing(dist_dir):
+        print("  ⚠ The packaged desktop app has no node-pty native binary; rebuilding it")
         return True
 
     from hermes_cli.source_build import source_product_current
@@ -408,6 +428,38 @@ def _stop_desktop_processes_locking_build(desktop_dir: Path, *, also_posix: bool
         return []
 
     me = os.getpid()
+    # On POSIX, never stop a Desktop that is one of OUR ancestors. A
+    # historical Desktop (v2026.7.1 Linux in-app update) runs `hermes update`
+    # as a child with piped stdout/stderr and owns the post-update rebuild and
+    # relaunch. Killing it breaks those pipes (EPIPE fails the update) and
+    # leaves nobody to relaunch. It also outlives the swap safely because it
+    # relaunches itself afterwards. Windows keeps stopping it: there, the exe
+    # lock would make the rename fail anyway.
+    #
+    # Spare that Desktop's whole process tree, not just its main process. Its
+    # zygote, renderer, GPU and network-service helpers run the same release
+    # exe but are siblings of us, not ancestors. Stopping them leaves a main
+    # process with no renderer. It cannot draw its update overlay, relaunch, or
+    # quit, so it outlives the update forever. (That is the v2026.7.1 Linux
+    # in-app update E2E: the receipt succeeds and then the app hangs.)
+    spared: set[int] = set()
+    if sys.platform != "win32":
+        try:
+            ancestors = list(psutil.Process(me).parents())
+        except Exception:
+            ancestors = []
+        for parent in ancestors:
+            spared.add(parent.pid)
+            try:
+                parent_exe = Path(parent.exe()).resolve()
+            except Exception:
+                continue
+            # Only a Desktop ancestor's descendants. Every process descends from
+            # init, so sparing all ancestors' trees would spare everything.
+            if release_dir not in parent_exe.parents:
+                continue
+            with contextlib.suppress(Exception):
+                spared.update(child.pid for child in parent.children(recursive=True))
     victims = []
     try:
         proc_iter = psutil.process_iter(["pid", "exe"])
@@ -418,7 +470,7 @@ def _stop_desktop_processes_locking_build(desktop_dir: Path, *, also_posix: bool
             info = proc.info
             pid = info.get("pid")
             exe = info.get("exe")
-            if not exe or pid is None or pid == me:
+            if not exe or pid is None or pid == me or pid in spared:
                 continue
             exe_path = Path(exe).resolve()
         except Exception:
@@ -959,7 +1011,7 @@ def _desktop_linux_needs_no_sandbox() -> bool:
     if hasattr(os, "geteuid") and os.geteuid() == 0:
         return False
     try:
-        with open("/proc/sys/kernel/apparmor_restrict_unprivileged_userns", encoding="utf-8-sig") as f:
+        with open("/proc/sys/kernel/apparmor_restrict_unprivileged_userns", encoding="utf-8") as f:
             return f.read().strip() == "1"
     except OSError:
         return False
@@ -1177,15 +1229,22 @@ def _promote_staged_desktop_app(
 
 
 def build_prepared_desktop(desktop_dir: Path, *, source_mode: bool, npm: str, env: dict,
-                           icons: Path | None = None, explicit: bool = False) -> Optional[Path]:
+                           icons: Path | None = None) -> Optional[Path]:
     """Build prepared desktop sources, then publish the verified staged app."""
+    from pm.progress import run_contained
+
     build_label = "source build" if source_mode else "packaged app"
-    print(f"→ Building desktop {build_label}...")
     build_env = dict(env)
+    if sys.platform == "win32":
+        # The installer stages pinned Git in its own PowerShell process. Product
+        # builds run later, often with every system git removed from PATH; the
+        # desktop stamp must still resolve this checkout's real HEAD.
+        import pm
+        build_env = pm.ensure("git", base_env=build_env).env
     if _force_adhoc_macos_signing(build_env, source_mode=source_mode):
         print("  → No Developer ID configured; ad-hoc signing this local rebuild "
               "(CSC_IDENTITY_AUTO_DISCOVERY=false)")
-    build_args = (["--icons", str(icons)] if icons else []) + ([] if explicit else ["--on-demand"])
+    build_args = ["--icons", str(icons)] if icons else []
     build_cmd = [npm, "run", "build", "--", *build_args]
     staging_dir = None if source_mode else _desktop_staging_dir(desktop_dir)
     if staging_dir is not None:
@@ -1196,10 +1255,11 @@ def build_prepared_desktop(desktop_dir: Path, *, source_mode: bool, npm: str, en
         if stopped:
             print(f"  ⚠ Stopped running desktop app to free the build output (pid {', '.join(map(str, stopped))})")
     try:
-        subprocess.run(build_cmd, cwd=desktop_dir, env=build_env, check=True)
+        run_contained(build_cmd, f"Building desktop {build_label}", cwd=desktop_dir, env=build_env)
         if staging_dir is not None:
-            subprocess.run([npm, "run", "builder", "--", "--dir", "--publish", "never",
-                            f"-c.directories.output={staging_dir}"], cwd=desktop_dir, env=build_env, check=True)
+            run_contained([npm, "run", "builder", "--", "--dir", "--publish", "never",
+                           f"-c.directories.output={staging_dir}"], "Packaging the desktop app",
+                          cwd=desktop_dir, env=build_env)
         packaged_executable = (
             _promote_staged_desktop_app(desktop_dir, staging_dir) if staging_dir is not None else None
         )
@@ -1357,8 +1417,7 @@ def cmd_gui(args: argparse.Namespace):
         elif needs_build:
             prepare_source_dependencies(PROJECT_ROOT, ("ui-tui", "web", "apps/desktop"), env=build_env,
                                         explicit=force_build or getattr(args, "build_only", False))
-            built = build_prepared_desktop(desktop_dir, source_mode=source_mode, npm=npm, env=build_env,
-                                           explicit=force_build or getattr(args, "build_only", False))
+            built = build_prepared_desktop(desktop_dir, source_mode=source_mode, npm=npm, env=build_env)
             if not source_mode:
                 packaged_executable = built
         else:

@@ -9,6 +9,7 @@
  */
 
 import type { UpdateTarget } from '@/lib/update-copy'
+import { shortVersion } from '@/lib/version-label'
 
 export interface VersionStatusCopy {
   backendLabel: (version: string) => string
@@ -57,8 +58,6 @@ export interface VersionStatusInput {
 }
 
 export interface VersionStatusResult {
-  /** Secondary text beside the label — the commit sha, when it adds anything. */
-  detail?: string
   /** An update is waiting: callers tint the row with it. */
   hasUpdate: boolean
   label: string
@@ -80,8 +79,11 @@ export function resolveVersionStatus({
   sha = null,
   target,
   updateAvailable,
-  version = null
+  version: rawVersion = null
 }: VersionStatusInput): VersionStatusResult {
+  // The label names the distance past the release; the commit stays in the
+  // tooltip and the expanded version details.
+  const version: null | string = rawVersion && shortVersion(rawVersion)
   const client = target === 'client'
   const busy = applying || restarting
   // updateAvailable covers every "behind but uncountable" shape: shallow
@@ -122,7 +124,6 @@ export function resolveVersionStatus({
     .join(' · ')
 
   return {
-    detail: client && version && sha && !busy && !remote ? sha : undefined,
     hasUpdate: !busy && available,
     label: busy ? `${base} · ${restarting ? copy.restart : copy.update}` : `${base}${hint}`,
     tooltip: tooltip || undefined,

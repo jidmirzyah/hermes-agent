@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from pm.plugin_inputs import Candidates, Selection, StagedUpdate
+
 from tests.pm.test_worker import client, isolated_python, _current_environment  # noqa: F401
 from tests.pm._fixtures import worker_toolchain
 
@@ -25,9 +27,9 @@ def test_worker_publishes_selection_even_when_dependencies_are_current(client, t
     repo = _current_environment(tmp_path, monkeypatch, [])
     facts = (install_state_dir(repo) / "facts.json").read_bytes()
     with receipt.worker_context("selection-publication"):
-        client.sync_venv(explicit=True, selection={
+        client.sync_venv(explicit=True, plugins=Selection({
             "home": str(home), "enabled": ["plain"], "disabled": ["old"], "extra_dirs": [],
-        })
+        }))
         result = receipt.last_for_update("selection-publication", consume=True)
     from utils import fast_safe_load
     assert fast_safe_load(config.read_text())["plugins"] == {"enabled": ["plain"], "disabled": ["old"]}
@@ -80,11 +82,11 @@ def test_staged_plugin_publication_uses_installed_identity_and_local_dependencie
     with metadata_path.open("a", encoding="utf-8") as stream:
         stream.write(f'no-index=true\nfind-links=[{json.dumps(wheel.parent.as_posix())}]\n')
     (staged / "code.py").write_text('new code')
-    client.sync_venv(explicit=True, staged_plugin={
+    client.sync_venv(explicit=True, plugins=StagedUpdate({
         "staged": str(staged), "target": str(target), "target_digest": tree_digest(target) if target.exists() else None,
         "old_metadata": {"example": {"revision": "old"}},
         "new_metadata": {"example": {"revision": "new"}},
-    })
+    }))
     assert (target / "code.py").read_text() == "new code"
     assert not staged.exists()
     assert json.loads(metadata.read_text())["example"]["revision"] == "new"
@@ -124,7 +126,7 @@ def test_selection_refuses_config_edits_during_preparation(client, tmp_path, mon
     )
     worker_toolchain(client, monkeypatch, isolated_python, injection)
     with pytest.raises(ValueError, match="changed"):
-        client.sync_venv(explicit=True, selection={"home": str(home), "enabled": ["new"], "disabled": []})
+        client.sync_venv(explicit=True, plugins=Selection({"home": str(home), "enabled": ["new"], "disabled": []}))
     assert edited.read_text() == expected
     assert (install_state_dir(repo) / "facts.json").read_bytes() == facts
     assert not (install_state_dir(repo) / "publication.json").exists()
@@ -148,10 +150,10 @@ def test_worker_rejects_unloadable_staged_plugin_without_app_dependencies(client
     (staged / "plugin.yaml").write_text(invalid)
     previous = tree_digest(target)
     with pytest.raises(ValueError):
-        client.sync_venv(explicit=True, staged_plugin={
+        client.sync_venv(explicit=True, plugins=StagedUpdate({
             "target": str(target), "staged": str(staged), "target_digest": previous,
             "old_metadata": {}, "new_metadata": {"example": {"revision": "new"}},
-        })
+        }))
     assert tree_digest(target) == previous
     assert staged.exists()
 
@@ -161,10 +163,10 @@ def test_additional_candidates_are_discovered_by_sync_and_passive_probe(client, 
     candidate.mkdir()
     (candidate / "plugin.yaml").write_text("name: candidate\npython_dependencies: [fixture-dep==1]\n")
     _current_environment(tmp_path, monkeypatch, [candidate])
-    assert client.venv_is_current(extra_plugin_dirs=[candidate])
+    assert client.venv_is_current(plugins=Candidates([candidate]))
     assert not client.venv_is_current()
-    client.sync_venv(explicit=True, extra_plugin_dirs=[candidate])
-    assert client.venv_is_current(extra_plugin_dirs=[candidate])
+    client.sync_venv(explicit=True, plugins=Candidates([candidate]))
+    assert client.venv_is_current(plugins=Candidates([candidate]))
 
 
 def test_memory_setup_sends_candidate_paths_instead_of_discovery_callbacks(tmp_path, monkeypatch):
@@ -174,7 +176,7 @@ def test_memory_setup_sends_candidate_paths_instead_of_discovery_callbacks(tmp_p
     (candidate / "plugin.yaml").write_text("name: provider\npython_dependencies: [fixture-dep==1]\n")
     monkeypatch.setattr("plugins.memory.find_provider_dir", lambda name: candidate)
     _, inputs = memory_provider_dependency_inputs("provider")
-    assert inputs == {"extras": [], "extra_plugin_dirs": [candidate]}
+    assert inputs == {"extras": [], "plugins": Candidates([candidate])}
 
 
 @pytest.mark.parametrize(("kind", "rebuild", "phase"), [
@@ -214,7 +216,7 @@ def test_worker_death_recovers_at_each_durable_publication_boundary(
     if kind == "selection":
         if rebuild:
             (target / "pyproject.toml").write_text(core.replace("death-proof", "example"))
-        arguments = {"selection": {"home": str(home), "enabled": ["example"], "disabled": []}}
+        arguments = {"plugins": Selection({"home": str(home), "enabled": ["example"], "disabled": []})}
         payload = config
     else:
         staged = tmp_path / "staged"
@@ -222,8 +224,9 @@ def test_worker_death_recovers_at_each_durable_publication_boundary(
         (staged / "code.py").write_text("new")
         if rebuild:
             (staged / "pyproject.toml").write_text(core.replace("death-proof", "example"))
-        arguments = {"staged_plugin": {"target": str(target), "staged": str(staged), "target_digest": before_tree,
-                     "old_metadata": {"example": {"revision": "old"}}, "new_metadata": {"example": {"revision": "new"}}}}
+        arguments = {"plugins": StagedUpdate({
+            "target": str(target), "staged": str(staged), "target_digest": before_tree,
+            "old_metadata": {"example": {"revision": "old"}}, "new_metadata": {"example": {"revision": "new"}}})}
         payload = metadata
     # Exit immediately after the real durable write, not a simulated publication.
     injection = (
@@ -233,7 +236,7 @@ def test_worker_death_recovers_at_each_durable_publication_boundary(
         f"    if {phase!r} == 'journal' and path.name == 'publication.json': os._exit(17)\n"
         f"    if {phase!r} == 'payload' and path == Path({str(payload)!r}): os._exit(17)\n"
         f"    if {phase!r} == 'commit' and path.name == 'publication.json' and json.loads(data).get('committed'): os._exit(17)\n"
-        "publication._atomic_bytes = state._atomic_bytes = write\n"
+        "publication.durable_write_bytes = state._atomic_bytes = write\n"
         "original_replace = os.replace\ndef replace(source, target):\n    original_replace(source, target)\n"
         f"    if {phase!r} == 'backup' and Path(target).name.startswith('.previous-'): os._exit(17)\n"
         f"    if {phase!r} == 'tree' and Path(target) == Path({str(target)!r}): os._exit(17)\n"
@@ -300,10 +303,10 @@ def test_staged_publication_refuses_concurrent_input_edits(client, tmp_path, mon
         "Venv.apply = apply\n")
     facts = (install_state_dir(repo) / "facts.json").read_bytes()
     with pytest.raises(ValueError, match="changed"):
-        client.sync_venv(explicit=True, staged_plugin={
+        client.sync_venv(explicit=True, plugins=StagedUpdate({
             "target": str(target), "staged": str(staged), "target_digest": tree_digest(target),
             "old_metadata": {}, "new_metadata": {"example": {"revision": "new"}},
-        })
+        }))
     assert edited.read_text() == proposed
     assert (target / "code.py").read_text() == (proposed if mutation == "target" else "old code")
     assert (install_state_dir(repo) / "facts.json").read_bytes() == facts
@@ -340,11 +343,11 @@ def test_staged_publication_preserves_a_concurrent_sibling_install_record(
         "Venv.apply = apply\n",
     )
 
-    client.sync_venv(explicit=True, staged_plugin={
+    client.sync_venv(explicit=True, plugins=StagedUpdate({
         "target": str(target), "staged": str(staged), "target_digest": tree_digest(target),
         "old_metadata": {"example": {"revision": "old"}},
         "new_metadata": {"example": {"revision": "new"}},
-    })
+    }))
 
     assert json.loads(metadata.read_text()) == {
         "example": {"revision": "new"},
@@ -367,10 +370,10 @@ def test_inactive_portable_publication_does_not_inspect_unrelated_dependency_man
     staged.mkdir()
     from hermes_cli.agent_plugins import PLUGIN_SCHEMA_V1
     (staged / "plugin.json").write_text(json.dumps({"$schema": PLUGIN_SCHEMA_V1, "name": "inactive", "version": "1.0.0"}))
-    client.sync_venv(explicit=True, staged_plugin={
+    client.sync_venv(explicit=True, plugins=StagedUpdate({
         "target": str(target), "staged": str(staged), "target_digest": tree_digest(target),
         "old_metadata": {}, "new_metadata": {"inactive": {"revision": "new"}},
-    })
+    }))
     assert json.loads((target / "plugin.json").read_text())["name"] == "inactive"
     assert (sibling / "plugin.yaml").read_bytes() == b"\xff"
 
@@ -382,7 +385,7 @@ def test_selection_preserves_yaml11_values_and_quotes_plugin_names(client, tmp_p
     config = home / "config.yaml"
     config.write_text('feature: yes\nother: no\nlabel: "on"\nplugins: {enabled: []}\n')
     before = hermes_yaml.safe_load(config.read_bytes())
-    client.sync_venv(explicit=True, selection={"home": str(home), "enabled": ["on", "yes", "no"], "disabled": []})
+    client.sync_venv(explicit=True, plugins=Selection({"home": str(home), "enabled": ["on", "yes", "no"], "disabled": []}))
     after = hermes_yaml.safe_load(config.read_bytes())
     assert {key: after[key] for key in ("feature", "other", "label")} == {key: before[key] for key in ("feature", "other", "label")}
     assert set(after["plugins"]["enabled"]) == {"on", "yes", "no"}
@@ -404,7 +407,7 @@ def test_explicit_publication_keeps_its_intent_through_tool_acquisition(client, 
         "def acquire(*, explicit=False, **kwargs):\n"
         "    if not explicit: raise InstallError('tools', 'explicit intent was lost')\n"
         "    return tools(explicit=explicit, **kwargs)\npm._uv._toolchain = acquire\n")
-    client.sync_venv(explicit=True, selection={"home": str(tmp_path / "home"), "enabled": [], "disabled": []})
+    client.sync_venv(explicit=True, plugins=Selection({"home": str(tmp_path / "home"), "enabled": [], "disabled": []}))
     assert (selected_venv(project) / "pyvenv.cfg").is_file()
 
 

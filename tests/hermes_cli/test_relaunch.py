@@ -108,7 +108,7 @@ class TestRelaunch:
         hermes).  relaunch() must detect win32 and use subprocess.run +
         sys.exit instead.
 
-        ``windows_only``: the bug is that ``os.execvp`` cannot exec a Windows
+        ``platforms("windows")``: the bug is that ``os.execvp`` cannot exec a Windows
         console-script shim. On Linux ``execvp`` works fine, so a patched
         platform only re-asserted the branch we wrote, never the constraint
         that motivated it.
@@ -116,7 +116,7 @@ class TestRelaunch:
         monkeypatch.setattr(relaunch_mod, "resolve_hermes_bin", lambda: r"C:\Users\test\hermes.exe")
         # Pin sys.argv: relaunch() preserves inherited flags from the LIVE
         # argv, so under pytest it happily inherited the runner's own
-        # "-m 'windows_only and not integration'" and the assertion below saw
+        # "-m 'platforms and not integration'" and the assertion below saw
         # them in the child argv. Nothing to do with Windows — it only showed
         # up here because this is the first lane that actually executes the
         # test, and -m is how that lane selects it.
@@ -177,7 +177,7 @@ class TestResolveHermesBinWindowsPyGuard:
     subprocess.run can't actually exec a .py directly, so the relaunch
     would fail with the cryptic "%1 is not a valid Win32 application" error.
 
-    The Windows cases are ``windows_only``: the PATHEXT-driven ``os.access``
+    The Windows cases are ``platforms("windows")``: the PATHEXT-driven ``os.access``
     result the guard defends against simply does not occur on POSIX, so a
     faked ``sys.platform`` could never reproduce the hazard.
     """

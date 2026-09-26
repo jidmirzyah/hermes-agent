@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import time
+import types
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1090,6 +1091,61 @@ def test_stop_desktop_processes_locking_build_posix_swap_bypasses_early_return(t
 
     assert main_desktop._stop_desktop_processes_locking_build(desktop_dir) == []
     assert main_desktop._stop_desktop_processes_locking_build(desktop_dir, also_posix=True) == [100]
+
+
+@pytest.mark.platforms("posix")  # Windows must stop the exe-locking ancestor too
+def test_posix_swap_spares_the_desktop_driving_this_update(tmp_path, monkeypatch):
+    """A historical Desktop runs `hermes update` as a piped child and relaunches
+    itself afterwards; stopping it breaks the update's stdout (EPIPE). Its
+    renderer/GPU/zygote helpers run the same exe but are not our ancestors;
+    stopping them leaves a main process that can neither draw nor quit. Only an
+    unrelated Desktop from the same release tree is stopped."""
+    root = _make_desktop_tree(tmp_path)
+    desktop_dir = root / "apps" / "desktop"
+    live_exe = desktop_dir / "release" / _packaged_exe_rel()
+    live_exe.parent.mkdir(parents=True)
+    live_exe.write_text("old", encoding="utf-8")
+
+    class _FakeProc:
+        def __init__(self, pid, exe, children=()):
+            self.info = {"pid": pid, "exe": exe}
+            self.pid = pid
+            self._children = list(children)
+
+        def exe(self):
+            return self.info["exe"]
+
+        def children(self, recursive=False):
+            assert recursive
+            return self._children
+
+        def terminate(self):
+            return None
+
+    renderer = _FakeProc(101, str(live_exe))
+    gpu = _FakeProc(102, str(live_exe))
+    driver = _FakeProc(100, str(live_exe), children=[renderer, gpu])
+    # A non-Desktop ancestor's tree (think init) must not spare everything.
+    shell = _FakeProc(1, "/usr/bin/bash", children=[driver, renderer, gpu, _FakeProc(300, str(live_exe))])
+    other = shell._children[-1]
+
+    class _FakePsutil:
+        @staticmethod
+        def Process(pid):
+            assert pid == os.getpid()
+            return types.SimpleNamespace(parents=lambda: [driver, shell])
+
+        @staticmethod
+        def process_iter(attrs):
+            return [driver, renderer, gpu, other]
+
+        @staticmethod
+        def wait_procs(victims, timeout=5):
+            return [], []
+
+    monkeypatch.setitem(sys.modules, "psutil", _FakePsutil)
+
+    assert main_desktop._stop_desktop_processes_locking_build(desktop_dir, also_posix=True) == [300]
 
 
 def test_gui_failed_pack_leaves_previous_app_untouched(tmp_path, monkeypatch, capsys):

@@ -116,7 +116,8 @@ async def get_ssh_ownership(request: Request):
 @router.get("/api/health")
 async def get_health():
     """Lightweight process liveness for desktop/backend readiness probes."""
-    return {"ok": True, "version": get_version_info().base_version,
+    info = get_version_info()
+    return {"ok": True, "version": info.base_version, "displayVersion": info.display_version,
             "auth_required": bool(getattr(app.state, "auth_required", False))}
 
 

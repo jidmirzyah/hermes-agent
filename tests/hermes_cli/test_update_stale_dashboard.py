@@ -253,7 +253,7 @@ class TestKillStaleDashboardWindows:
 
     @pytest.mark.platforms("windows")
     def test_taskkill_invoked_for_each_pid(self, capsys):
-        """``windows_only``: ``taskkill.exe`` only exists on Windows, and the
+        """``platforms("windows")``: ``taskkill.exe`` only exists on Windows, and the
         faked platform also silently skipped the POSIX-only cgroup/argv
         snapshot the real Windows path must not take.
         """
@@ -716,7 +716,7 @@ class TestCmdlineCapture:
 
     @pytest.mark.platforms("windows")
     def test_returns_none_on_windows(self):
-        """``windows_only``: the contract is "no graceful-argv capture on a
+        """``platforms("windows")``: the contract is "no graceful-argv capture on a
         real Windows host" — asserting it against a faked platform only
         restated the branch condition.
         """

@@ -30,6 +30,20 @@ def bundle_env(raw: object) -> dict[str, str | None]:
     return decode(text)
 
 
+def _all_jobs(raw: object) -> bool:
+    """True when the dispatch builds every job group; a subset has no release.py replay.
+
+    An unreadable value is reported, not raised: this log must not fail the
+    build, and the admission step that follows refuses the input.
+    """
+    from scripts.releases.job_groups import selects_all
+
+    try:
+        return selects_all(raw if isinstance(raw, str) else None)
+    except ValueError:
+        return False
+
+
 def describe(env: Mapping[str, str]) -> dict[str, object]:
     """Classify one workflow dispatch without reading git or the network."""
     tag = _text(env.get("TAG"))
@@ -65,7 +79,8 @@ def describe(env: Mapping[str, str]) -> dict[str, object]:
         "disposable_channel": disposable,
         "release_phase": phase,
         "upload_release": _flag(env.get("UPLOAD_RELEASE")),
-        "termux_only": _flag(env.get("TERMUX_ONLY")),
+        "jobs": _text(env.get("JOBS")),
+        "all_jobs": _all_jobs(env.get("JOBS")),
         "termux_upgrade_from_tag": _text(env.get("TERMUX_UPGRADE_FROM_TAG")),
         "disposable_receivers": _flag(env.get("DISPOSABLE_RECEIVERS")),
         "disposable_run": _text(env.get("R2_DISPOSABLE_RUN")),
@@ -86,7 +101,7 @@ def release_command(env: Mapping[str, str]) -> list[str] | None:
         return None
     if facts["disposable_channel"] or facts["disposable_run"] or facts["disposable_receivers"]:
         return None
-    if facts["termux_only"] or facts["termux_upgrade_from_tag"] or facts["upload_release"]:
+    if not facts["all_jobs"] or facts["termux_upgrade_from_tag"] or facts["upload_release"]:
         return None
     commit = facts["build_commit"]
     if not isinstance(commit, str) or not commit:

@@ -276,19 +276,26 @@ docker run -d \
 
 
 - 按提交的 `uv.lock` 同步的 Python 3.14 环境，然后无依赖地安装 Hermes 源码。
-- 选定的 extras：`all`、`messaging`、`otlp`、`anthropic`、`bedrock`、`azure-identity`、`hindsight` 和 `matrix`，不是 `--all-extras`。
+- 选定的 extras：`all`、`messaging`、`otlp`、`anthropic`、`bedrock`、`azure-identity` 和 `matrix`，不是 `--all-extras`。
 - 从摘要固定的 Node 镜像提供的 Node.js 26 和 npm。
-- PM 固定版本的 uv、Chromium 和 headless shell，位于 `/opt/hermes/tools`。
-- 系统 Git、ripgrep、FFmpeg、OpenSSH、Docker CLI 和 Chromium 所需共享库。
+- PM 固定版本的 uv、完整 Chromium、FFmpeg 和 ripgrep，位于 `/opt/hermes/tools`。
+- 系统 Git、OpenSSH、Docker CLI 和 Chromium 所需共享库。
 - 预构建的 TUI/dashboard 和 Photon sidecar 依赖，以及 s6-overlay。
 
 Chromium 由 PM 准备，不使用 `npx playwright install`。
 实际可执行路径记录在 `/etc/hermes/agent-browser-executable-path`。
 `PLAYWRIGHT_BROWSERS_PATH` 指向 `/opt/hermes/tools`，不在数据卷内。
 
-镜像通过内部 `HERMES_DISABLE_LAZY_INSTALLS` 策略关闭按需安装。
-仅修改 `security.allow_lazy_installs` 不能覆盖它。新增所需依赖应烘焙进派生镜像，
-或作为独立工具放在单独环境或服务中。旧 `lazy-packages` overlay 不再使用。
+所有镜像（包括不带 `-desktop` 后缀的标签）都携带完整 Chromium，而不是 Playwright
+更轻量的 headless shell：同一个固定且校验过的浏览器同时服务无头浏览和有界面的
+Bot Screen 会话。代价是镜像体积：完整版比早期镜像附带的 headless shell 更大。
+
+可选后端 SDK（Edge TTS、Firecrawl、Exa、平台适配器、插件依赖）在首次使用时安装到
+`/opt/data/installs` 下的 PM 依赖代，容器重建和镜像更新后仍然保留；镜像自带的
+`/opt/hermes/.venv` 永不修改。每次启动时，容器在服务启动前按新镜像的锁文件重新解析
+已记录的选择；若失败（例如离线），则使用镜像自带环境启动，并保留已记录的 extras，
+留待下次启动或安装时重建。设置 `security.allow_lazy_installs: false` 可拒绝按需安装。
+旧 `lazy-packages` overlay 不再使用。
 
 构建来源记录在 `/etc/hermes/image-provenance.json`，构建戳记位于 `/opt/hermes/install-stamp.json`。
 没有戳记的本地构建报告未知版本，不猜测提交。`hermes update` 不修改镜像所有的代码，应用更新需替换镜像。

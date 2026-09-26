@@ -13,11 +13,11 @@ const backend = (over: Partial<Parameters<typeof resolveVersionStatus>[0]> = {})
   resolveVersionStatus({ applying: false, copy, remote: true, restarting: false, target: 'backend', ...over })
 
 describe('resolveVersionStatus', () => {
-  it('labels a current local client with its version and sha detail', () => {
-    const status = client({ sha: 'abc1234', version: '0.4.2' })
+  it('labels a current local client with its distance, keeping the commit for the tooltip', () => {
+    const status = client({ sha: 'abc1234', version: '0.4.2+1913.gabc1234' })
 
-    expect(status.label).toBe('v0.4.2')
-    expect(status.detail).toBe('abc1234')
+    expect(status.label).toBe('v0.4.2+1913')
+    expect(status.tooltip).toContain('abc1234')
     expect(status.hasUpdate).toBe(false)
     expect(status.unknown).toBe(false)
   })
@@ -49,11 +49,10 @@ describe('resolveVersionStatus', () => {
     expect(client().unknown).toBe(true)
   })
 
-  it('drops the diff and the sha detail while an apply is in flight', () => {
+  it('drops the diff while an apply is in flight', () => {
     const applying = client({ applying: true, behind: 3, sha: 'abc1234', version: '0.4.2' })
 
     expect(applying.label).toBe('v0.4.2 · update')
-    expect(applying.detail).toBeUndefined()
     expect(applying.hasUpdate).toBe(false)
 
     expect(client({ applying: true, restarting: true, version: '0.4.2' }).label).toBe('v0.4.2 · restart')
@@ -63,7 +62,6 @@ describe('resolveVersionStatus', () => {
     const status = backend({ sha: 'abc1234', version: '0.4.2' })
 
     expect(status.label).toBe('backend v0.4.2')
-    expect(status.detail).toBeUndefined()
     expect(status.tooltip).toBe('Backend v0.4.2')
   })
 

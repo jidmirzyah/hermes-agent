@@ -23,9 +23,12 @@ def test_script_termination_reaps_descendants(tmp_path, monkeypatch, trigger, to
     scripts = tmp_path / "scripts"
     scripts.mkdir()
     ready = tmp_path / "child.pid"
+    # Publish atomically: the parent polls for existence, and write_text
+    # creates the file before it writes the pid.
     child = ("import os, signal, time; from pathlib import Path; "
              + ("signal.signal(signal.SIGTERM, signal.SIG_IGN); " if topology == "stubborn-pipe" else "")
-             + f"Path({str(ready)!r}).write_text(str(os.getpid())); time.sleep(60)")
+             + f"Path({str(ready) + '.tmp'!r}).write_text(str(os.getpid())); "
+             + f"os.replace({str(ready) + '.tmp'!r}, {str(ready)!r}); time.sleep(60)")
     script = scripts / "blocking.py"
     script.write_text("import subprocess, sys, time\n"
                       + f"subprocess.Popen([sys.executable, '-c', {child!r}], start_new_session={topology == 'detached'})\n"

@@ -139,6 +139,10 @@ def _prepare(request: dict, request_path: Path, result_path: Path) -> int:
 
     root = Path(request["source"])
     update_id = request["receipt"]["update_id"]
+    from hermes_cli.venv_sync import arm_completion, refuse_foreign_owned_venv
+
+    refuse_foreign_owned_venv(root)
+    arm_completion(root)
     with receipt.worker_context(update_id):
         try:
             pm.sync_venv(explicit=True, project_root=root)
@@ -177,6 +181,9 @@ def _complete_selected(request: dict) -> None:
         pre_update_version=request["pre_update_version"],
         completion_message=request.get("completion_message"),
         announce=None if request.get("completion_message") else "\n✓ Code updated!")
+    if complete:
+        from hermes_cli.venv_sync import clear_completion
+        clear_completion(root)
     # systemctl's KillMode=mixed fallback can kill this whole cgroup. Publish the
     # gateway watcher's status BEFORE that operation, and demote on later failure.
     if request["gateway_mode"]:

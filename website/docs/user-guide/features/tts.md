@@ -113,6 +113,8 @@ tts:
     # normalize_audio: true
 ```
 
+KittenTTS is not available on Intel macOS or Windows ARM64: its dependencies publish no `onnxruntime` or PyTorch wheels for those platforms. Selecting it there reports the provider unavailable.
+
 MiniMax TTS selects its region, endpoint, and credential together:
 
 - `region: "global"` uses `https://api.minimax.io/v1/t2a_v2` with `MINIMAX_API_KEY`.

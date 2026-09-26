@@ -186,7 +186,8 @@ def step_adopt_blessed_checkout(project_root: Path | None = None) -> dict:
 
     if not (root / ".git").exists():
         return {"ok": True, "skipped": "not-a-checkout"}
-    stamp_path = root / "install-stamp.json"
+    from pm.paths import install_stamp_path
+    stamp_path = install_stamp_path(root)
     if stamp_path.exists():
         return {"ok": True, "skipped": "already-stamped"}
 

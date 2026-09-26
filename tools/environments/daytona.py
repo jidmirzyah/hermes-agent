@@ -37,16 +37,6 @@ class DaytonaEnvironment(BaseEnvironment):
         ensure_lazy_dep("daytona")
         from daytona import Daytona, CreateSandboxFromImageParams, DaytonaError, Resources, SandboxState
 
-        try:
-            from pm import ensure_import as _lazy_ensure
-        except ImportError:
-            pass  # pm unavailable — the sdk import above decides
-        else:
-            try:
-                _lazy_ensure("daytona")
-            except Exception as e:
-                raise ImportError(str(e))
-
         self._persistent, self._task_id, self._SandboxState = persistent_filesystem, task_id, SandboxState
         self._daytona = Daytona()
         self._sandbox = None

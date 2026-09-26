@@ -33,6 +33,11 @@ on:
         required: false
         type: string
         default: refs/heads/main
+      update-ref:
+        description: 'What to update TO: HEAD (the commit under test), or NEXT -- a synthetic child of install-ref that the driver mints, so a leg that installs HEAD still has an update to take (HEAD''s own updater).'
+        required: false
+        type: string
+        default: HEAD
       tag-has-desktop:
         description: "Whether install-ref ships the desktop app (apps/desktop). The caller annotates this from the tag's own tree; desktop-method legs from pre-desktop releases natively skip."
         required: false
@@ -84,6 +89,7 @@ jobs:
       install-method: ${{ inputs.install-method }}
       update-method: ${{ inputs.update-method }}
       install-ref: ${{ inputs.install-ref }}
+      update-ref: ${{ inputs.update-ref }}
       tag-has-desktop: ${{ inputs.tag-has-desktop }}
       leg-id: ${{ inputs.leg-id }}
       runner: macos-latest
@@ -133,6 +139,7 @@ jobs:
           tests/install/macos-desktop-e2e.sh --phase stage \
             --update-method '${{ inputs.update-method }}' \
             --install-ref '${{ inputs.install-ref }}' \
+            --update-ref '${{ inputs.update-ref }}' \
             --dmg-url '${{ inputs.dmg-url }}'
         env:
           HERMES_E2E_LOG_DIR: ${{ runner.temp }}/e2e-logs
@@ -147,7 +154,7 @@ jobs:
         env:
           HERMES_E2E_LOG_DIR: ${{ runner.temp }}/e2e-logs
 
-      - name: Update ${{ inputs.install-ref }} -> HEAD (${{ inputs.update-method }})
+      - name: Update ${{ inputs.install-ref }} -> ${{ inputs.update-ref }} (${{ inputs.update-method }})
         run: |
           set -euo pipefail
           tests/install/macos-desktop-e2e.sh --phase update \

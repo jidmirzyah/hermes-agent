@@ -47,6 +47,31 @@ if source_hermes "$INSTALL_DIR"; then exit 92; fi
     assert result.stdout.splitlines() == ["published:literal argument", "legacy"]
 
 
+@pytest.mark.platforms("posix")
+def test_installer_marker_is_the_only_dirty_state_a_driver_accepts(tmp_path):
+    root = tmp_path / "installed source"
+    root.mkdir()
+    git = ["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@t"]
+    subprocess.run([*git, "init", "-q"], check=True)
+    (root / "tracked").write_text("v1\n", encoding="utf-8")
+    subprocess.run([*git, "add", "tracked"], check=True)
+    subprocess.run([*git, "commit", "-qm", "base"], check=True)
+    (root / ".install_method").write_text("git\n", encoding="utf-8")
+    env = dict(os.environ, INSTALL_DIR=str(root), ASSETS=str(ASSETS), HOME=str(tmp_path))
+
+    def accept():
+        return subprocess.run(["bash", "-euc", 'source "$ASSETS/source-driver.sh"; accept_installer_marker "$INSTALL_DIR"'],
+                              env=env, capture_output=True, text=True, timeout=30)
+
+    assert accept().returncode == 0
+    assert (root / ".install_method").read_text(encoding="utf-8") == "git\n"
+    assert subprocess.run([*git, "status", "--porcelain", "--untracked-files=all"],
+                          capture_output=True, text=True, check=True).stdout == ""
+    (root / "tracked").write_text("edited\n", encoding="utf-8")
+    refused = accept()
+    assert refused.returncode != 0 and "M tracked" in refused.stderr
+
+
 @pytest.mark.platforms("windows", "posix")
 def test_powershell_selects_exact_exe_or_cmd_and_legacy_fallback(tmp_path):
     # These are file-selection rules, not Windows execution emulation. Run

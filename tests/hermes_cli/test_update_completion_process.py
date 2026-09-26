@@ -72,6 +72,15 @@ def transition(tmp_path):
     (package / "venv_sync.py").write_text(
         "from hermes_cli.probe import event\n"
         "publish_launchers = lambda root: event('launchers')\n"
+        "refuse_foreign_owned_venv = lambda root: None\n"
+        "from pathlib import Path\n"
+        "import os\n"
+        "def arm_completion(root):\n"
+        "    path = Path(os.environ['HERMES_HOME']) / 'completion-pending'\n"
+        "    path.write_text('owed')\n"
+        "    return path\n"
+        "def clear_completion(root):\n"
+        "    (Path(os.environ['HERMES_HOME']) / 'completion-pending').unlink()\n"
     )
     (package / "source_build.py").write_text(
         "from hermes_cli.probe import event\n"
@@ -184,6 +193,7 @@ def test_old_process_new_git_tree_completes_in_fresh_python(transition, tmp_path
     assert response["exit_code"] == 0
     assert response["receipt"]["update_id"] == request["receipt"]["update_id"]
     assert response["windows_resume"]["resume_needed"] is False
+    assert not (Path(request["home"]) / "completion-pending").exists()
     events = [json.loads(line) for line in (root / "events.jsonl").read_text().splitlines()]
     by_name = {event["name"]: event for event in events}
     assert by_name["activate"]["pid"] == by_name["build"]["pid"]
@@ -342,6 +352,7 @@ def test_failed_build_preserves_exit_status_without_maintenance(transition):
     result = update_completion.run_completion(request)
     assert result["exit_code"] == 23
     assert result["receipt"]["outcome"] == "failed"
+    assert (Path(request["home"]) / "completion-pending").read_text() == "owed"
     events = [json.loads(line)["name"] for line in (root / "events.jsonl").read_text().splitlines()]
     assert "maintenance" not in events
     assert "restart" not in events

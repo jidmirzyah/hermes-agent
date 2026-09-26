@@ -103,10 +103,12 @@ explícitamente solo ese entorno desechable. PM no elimina destinos existentes.
 No modifiques los entornos de Hermes con comandos directos de pip o uv.
 En Windows, ejecuta el script de pruebas mediante Bash.
 
-Si cambias `pyproject.toml`, regenera el lock con:
+Si cambias `pyproject.toml`, regenera el lock, vuelve a cargar la activación y
+confirma `pyproject.toml` junto con `uv.lock`:
 
 ```bash
-python -m pm.build_env --source . --lock-only
+hermes pm lock
+source ./activate
 ```
 
 Para JavaScript, ejecuta `npm ci` en el workspace correspondiente. Consulta

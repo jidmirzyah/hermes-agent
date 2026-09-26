@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 import time
 
-from hermes_cli.runtime_state import _lock
+from pm.filesystem import lock_fd
 
 
 @contextmanager
@@ -17,7 +17,7 @@ def partial_lock(root: Path, key: str, *, cancelled=None, wait: bool = True):
     locks.mkdir(parents=True, exist_ok=True)
     fd = os.open(locks / key, os.O_CREAT | os.O_RDWR, 0o600)
     try:
-        while not _lock(fd, wait=False):
+        while not lock_fd(fd, wait=False):
             if not wait:
                 yield False
                 return

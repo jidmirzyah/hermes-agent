@@ -1,4 +1,4 @@
-"""DebPackage._safe_untar containment regressions.
+"""DebPackage.unpack containment regressions (via pm.store.extract_tar).
 
 A safe extractor must forbid ANY write or chmod outside the staged tree.
 The malicious .deb fixtures are real ar+tars built in a temp sandbox and
@@ -57,7 +57,7 @@ def test_chained_aliases_survive_without_symlink_support(tmp_path, monkeypatch):
     def unavailable(*args, **kwargs):
         raise OSError("symlinks unavailable")
 
-    monkeypatch.setattr(Path, "symlink_to", unavailable)
+    monkeypatch.setattr(os, "symlink", unavailable)
     deb = tmp_path / "aliases.deb"
     lib = "data/data/com.termux/files/usr/lib"
     _build_deb(deb, [

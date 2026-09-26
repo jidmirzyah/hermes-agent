@@ -20,8 +20,7 @@ from pathlib import Path
 if __name__ == "__main__":
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from hermes_constants import get_hermes_home
-from pm.environments import dependency_home_root, store_root
+from pm.environments import store_root
 
 
 def runtime_command(repo_root: Path, args=(), *, module: str = "hermes_cli.main",
@@ -37,12 +36,14 @@ def runtime_command(repo_root: Path, args=(), *, module: str = "hermes_cli.main"
     python = python or resolve_store_python(root) or Path(sys.executable)
     entry = f"exec({code!r})" if code is not None else (
         f"runpy.run_module({module!r}, run_name='__main__', alter_sys=True)")
+    default_home = (f"{str(home)!r}" if home is not None else
+                    "str(__import__('hermes_constants').get_default_hermes_root())")
     bootstrap = (
         "import os, sys, runpy; "
-        f"os.environ['HERMES_HOME'] = os.environ.get('HERMES_HOME') or {str(home or get_hermes_home())!r}; "
         "os.environ.pop('PYTHONHOME', None); os.environ.pop('PYTHONPATH', None); "
         "os.environ.pop('VIRTUAL_ENV', None); "
         f"sys.path.insert(0, {str(root)!r}); "
+        f"os.environ['HERMES_HOME'] = os.environ.get('HERMES_HOME') or {default_home}; "
         "import hermes_bootstrap; "
         + entry
     )
@@ -195,18 +196,64 @@ def mint_launcher(
             def _get_script_text(self, entry):
                 return script
 
-        maker = _PathedScriptMaker(None, str(out_dir), add_launchers=True)
-        maker.executable = str(python_exe)
-        maker.variants = {""}
-        maker.clobber = True
-        try:
-            written = maker.make(f"{name} = {module}:{func}", {"interpreter_args": ["-I"]})
-        except Exception:
-            written = []
-        for path in written:
-            if Path(path).suffix.lower() == ".exe":
-                return Path(path)
+        import tempfile
+        from zipfile import BadZipFile, ZipFile
+
+        def make(directory: Path) -> list[str]:
+            maker = _PathedScriptMaker(None, str(directory), add_launchers=True)
+            maker.executable = str(python_exe)
+            maker.variants = {""}
+            maker.clobber = True
+            return maker.make(f"{name} = {module}:{func}", {"interpreter_args": ["-I"]})
+
+        # distlib's exe ZIP records the current time, so byte equality cannot
+        # detect an unchanged launcher. Compare its loader + shebang and script;
+        # leave an active executable alone when only the ZIP timestamp changed.
+        with tempfile.TemporaryDirectory(prefix=f".{name}-", dir=out_dir) as staging:
+            try:
+                candidate = next((Path(p) for p in make(Path(staging))
+                                  if Path(p).suffix.lower() == ".exe"), None)
+            except Exception:
+                candidate = None
+            if candidate is not None:
+                target = out_dir / candidate.name
+                try:
+                    with ZipFile(target) as old, ZipFile(candidate) as new:
+                        if (old.namelist() == new.namelist() == ["__main__.py"]
+                                and target.read_bytes()[:old.infolist()[0].header_offset]
+                                == candidate.read_bytes()[:new.infolist()[0].header_offset]
+                                and old.read("__main__.py") == new.read("__main__.py")):
+                            return target
+                except (OSError, BadZipFile, KeyError):
+                    pass
+                # For changed launchers, distlib's .deleteme replacement can
+                # move an executable Windows still has mapped in memory.
+                try:
+                    written = make(out_dir)
+                except Exception:
+                    written = []
+                for path in written:
+                    if Path(path).suffix.lower() == ".exe":
+                        return Path(path)
         # distlib ran but produced no exe (unexpected) — fall through to cmd.
+
+    # A prepared app environment need not include distlib, even when the
+    # installer used it to publish a native exe. Keep that executable if its
+    # embedded interpreter and script still match; replacing it with a cmd
+    # would require unlinking the currently running exe on Windows.
+    existing = out_dir / f"{name}.exe"
+    from zipfile import BadZipFile, ZipFile
+    try:
+        with ZipFile(existing) as archive:
+            if archive.namelist() == ["__main__.py"]:
+                prefix = existing.read_bytes()[:archive.infolist()[0].header_offset]
+                shebangs = (f"#!{python_exe} -I\n".encode("utf-8"),
+                            f'#!"{python_exe}" -I\n'.encode("utf-8"))
+                if (any(prefix.endswith(shebang) for shebang in shebangs)
+                        and archive.read("__main__.py") == script.encode("utf-8")):
+                    return existing
+    except (OSError, BadZipFile, KeyError):
+        pass
 
     # The script is data to Python, not interpolated shell source.
     import base64
@@ -214,7 +261,6 @@ def mint_launcher(
     code = f"import base64; exec(base64.b64decode('{encoded}'))"
     body = (
         "@echo off\r\n"
-        "chcp 65001 >nul\r\n"
         f'"{python_exe}" -I -c "{code}" %*\r\n'
     )
     return _write_atomic(out_dir / f"{name}.cmd", lambda p: p.write_text(body, encoding="utf-8"))
@@ -226,12 +272,13 @@ def _launcher_script(name: str, repo_root: Path, dependencies: Path | None) -> s
     # install's dependency root, not whichever profile triggered publication.
     return (
         "import os, re, sys\n"
-        f"os.environ['HERMES_HOME'] = os.environ.get('HERMES_HOME') or {str(dependency_home_root())!r}\n"
         "os.environ.pop('PYTHONHOME', None)\n"
         "os.environ.pop('PYTHONPATH', None)\n"
         f"sys.path.insert(0, {str(repo_root.resolve())!r})\n"
+        "if sys.argv[1:2] == ['--print-runtime-command']: sys.dont_write_bytecode = True\n"
+        "from hermes_constants import get_default_hermes_root\n"
+        "os.environ['HERMES_HOME'] = os.environ.get('HERMES_HOME') or str(get_default_hermes_root())\n"
         "if sys.argv[1:2] == ['--print-runtime-command']:\n"
-        "    sys.dont_write_bytecode = True\n"
         "    from pathlib import Path\n"
         "    from hermes_cli._launchers import print_runtime_command\n"
         f"    print_runtime_command(Path({str(repo_root.resolve())!r}), sys.argv[2:])\n"

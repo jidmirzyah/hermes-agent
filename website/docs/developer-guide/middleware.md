@@ -137,7 +137,7 @@ hermes plugins enable <plugin-name>
 hermes chat --query 'Reply exactly ok'
 ```
 
-For source checkouts, use the [PM developer workflow](../../website/docs/reference/package-management.md#developer-workflow)
+For source checkouts, use the [PM developer workflow](../reference/package-management.md#developer-workflow)
 and a separate development home so the runtime sees plugins and middleware from
 the working tree:
 

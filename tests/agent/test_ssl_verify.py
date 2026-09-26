@@ -11,10 +11,9 @@ from agent.ssl_verify import resolve_httpx_verify
 
 @pytest.fixture
 def no_ca_env(monkeypatch):
-    """The developer shell (NixOS exports SSL_CERT_FILE) and the gateway's
-    own cert export both flip resolve_httpx_verify() from ``True`` to a
-    shared context. The contract under test is the fallback, so pin the
-    env the assertion assumes instead of inheriting the host's."""
+    """An operator's SSL_CERT_FILE flips resolve_httpx_verify() from
+    ``True`` to a shared platform context. Pin the env for this fallback
+    assertion rather than inheriting a developer shell's values."""
     monkeypatch.delenv("SSL_CERT_FILE", raising=False)
     monkeypatch.delenv("SSL_CERT_DIR", raising=False)
 
@@ -73,6 +72,85 @@ with httpx.Client(verify=resolve_httpx_verify()) as client:
 """], capture_output=True, text=True, timeout=30)
     assert child.returncode == 0, child.stderr
     assert "truststore unavailable" in child.stderr
+
+
+def test_explicit_provider_ca_replaces_platform_trust_on_real_https(tmp_path):
+    """A private endpoint trusts only its provider CA, never a global fallback."""
+    from datetime import datetime, timedelta, timezone
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from ipaddress import ip_address
+    import os
+    import ssl
+    import subprocess
+    import sys
+    import threading
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Private provider")])
+    now = datetime.now(timezone.utc)
+    cert = (x509.CertificateBuilder().subject_name(subject).issuer_name(subject)
+            .public_key(key.public_key()).serial_number(x509.random_serial_number())
+            .not_valid_before(now - timedelta(days=1)).not_valid_after(now + timedelta(days=1))
+            .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+            .add_extension(x509.SubjectAlternativeName([x509.IPAddress(ip_address("127.0.0.1"))]), critical=False)
+            .sign(key, hashes.SHA256()))
+    ca = tmp_path / "provider-ca.pem"
+    private = tmp_path / "provider.key"
+    ca.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    private.write_bytes(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                                          serialization.NoEncryption()))
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"private provider")
+
+        def log_message(self, format, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    # Earlier tests may have injected truststore; its wrapper is client-only.
+    from agent.ssl_verify import _stdlib_ssl_context_class
+    context = _stdlib_ssl_context_class()(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(ca, private)
+    server.socket = context.wrap_socket(server.socket, server_side=True)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    home = tmp_path / "home"
+    home.mkdir()
+    env = os.environ.copy()
+    env.update(HOME=str(tmp_path), HERMES_HOME=str(home), NO_PROXY="127.0.0.1")
+    for key in ("SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"):
+        env.pop(key, None)
+    script = """
+import httpx, sys
+from agent.ssl_verify import resolve_httpx_verify
+url, ca = sys.argv[1:]
+try:
+    httpx.get(url, verify=resolve_httpx_verify(), timeout=5)
+except httpx.ConnectError:
+    pass
+else:
+    raise AssertionError('unconfigured platform store trusted private provider')
+response = httpx.get(url, verify=resolve_httpx_verify(ca_bundle=ca), timeout=5)
+assert response.content == b'private provider', response
+"""
+    try:
+        child = subprocess.run(
+            [sys.executable, "-c", script, f"https://127.0.0.1:{server.server_port}/", str(ca)],
+            env=env, capture_output=True, text=True, timeout=30, check=False,
+        )
+        assert child.returncode == 0, child.stdout + child.stderr
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
 
 
 def test_explicit_bundle_works_without_truststore():

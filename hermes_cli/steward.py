@@ -24,7 +24,6 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-BUILD_INFO_NAME = "install-stamp.json"
 UPDATE_MECHANISMS = ("self", "app-installer", "electron-updater", "external", "microsoft-store")
 
 STEWARD_DESKTOP = "desktop-app"
@@ -177,23 +176,6 @@ def steward_uninstall_message(steward: str, platform: "str | None" = None) -> st
     return _STEWARD_UNINSTALL_FALLBACK.format(steward=steward)
 
 
-def install_stamp_path(project_root: Path) -> Path:
-    """THE stamp location for ``project_root``, shared by every stamp reader.
-
-    Beside the code in checkouts, Docker and desktop payloads. A Nix package
-    bakes the stamp outside the store's package dir and its wrapper carries
-    ``HERMES_INSTALL_ROOT`` for the executing tree only — so the executing
-    tree resolves through pm.paths.install_root, any other tree is taken
-    literally. Two resolvers here once classified Nix as "unknown".
-    """
-    from pm.paths import install_root, repo_root
-
-    root = Path(project_root)
-    if root.resolve() == repo_root():
-        root = install_root()
-    return root / BUILD_INFO_NAME
-
-
 def read_install_stamp(project_root: Path) -> dict:
     """The build stamp of ``project_root``, or ``{}``.
 
@@ -201,6 +183,8 @@ def read_install_stamp(project_root: Path) -> dict:
     path on a malformed stamp — a tree we cannot prove is ours still
     refuses (see :func:`sealed_steward`), so garbage degrades safely.
     """
+    from pm.paths import install_stamp_path
+
     try:
         data = json.loads(install_stamp_path(project_root).read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):

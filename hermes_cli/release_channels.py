@@ -155,6 +155,15 @@ def validate_request(value: object, *, repository: str | None = None,
         )
         if request.get("version") != request["releaseTag"][1:]:
             raise ChannelError("Release package version mismatch")
+        archive_ref = request.get("archiveRef")
+        if archive_ref is not None:
+            from scripts.releases.versioning import parse_attempt_ref
+            parsed = parse_attempt_ref(archive_ref) if isinstance(archive_ref, str) else None
+            if parsed is None:
+                if archive_ref != request["releaseTag"]:
+                    raise ChannelError("Invalid archive ref")
+            elif parsed[0] != request["version"]:
+                raise ChannelError("Archive ref does not name the release version")
         # Stable uses the Store quad with revision zero; canary uses its UTC
         # yy.mmdd.hh.mmss package version.
         pattern = r"[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" if policy == "canary-release" else r"[0-9]+\.[0-9]+\.[0-9]+\.0"
@@ -322,7 +331,9 @@ def validate_manifest(value: object, record: dict, base_url: str) -> dict:
         raise ChannelError("Build manifest has no packages")
     prefixes = [build_prefix(request["buildId"])]
     if record["policy"] in {"stable-release", "canary-release"}:
-        prefixes.append(f"releases/tag/{request['releaseTag']}/")
+        # The archive prefix is the attempt ref when the request names one; a
+        # bare releaseTag fallback never holds attempt artifacts (fail closed).
+        prefixes.append(f"releases/tag/{request.get('archiveRef') or request['releaseTag']}/")
     seen = set()
     for package in packages:
         if not isinstance(package, dict):

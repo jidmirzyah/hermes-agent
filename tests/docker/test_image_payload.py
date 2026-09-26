@@ -31,14 +31,11 @@ print('PM interpreter and application dependencies load as hermes')
 def test_dashboard_ships_generated_icon_without_build_environment(built_image: str) -> None:
     probe = """
 from pathlib import Path
-import importlib.util
 from PIL import Image
 
 with Image.open('/opt/hermes/hermes_cli/web_dist/favicon.ico') as image:
     image.load()
     assert image.width > 0 and image.height > 0
-assert importlib.util.find_spec('resvg_py') is None
-assert not Path('/opt/hermes/.cache/icon-build').exists()
 assert not Path('/opt/hermes/node_modules/vite').exists()
 assert not Path('/opt/hermes/node_modules/esbuild').exists()
 assert Path('/opt/hermes/node_modules/typescript/bin/tsc').is_file()

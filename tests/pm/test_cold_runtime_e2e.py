@@ -52,6 +52,26 @@ def _bare(python, repo, code, *, env, expected=0):
     )
 
 
+_UNSHIPPED = {"site-packages", "test", "__pycache__"}
+
+
+def _foreign_link(stdlib: Path) -> Path | None:
+    """First link in the shipped stdlib that the store's extractor refuses.
+
+    PM extracts archives with tarfile's data filter, which rejects absolute or
+    escaping links. Distro Pythons link stdlib files into /etc (Debian's
+    sitecustomize.py), so their stdlib cannot stand in for a standalone one.
+    """
+    for directory, dirnames, filenames in os.walk(stdlib):
+        dirnames[:] = [name for name in dirnames if name not in _UNSHIPPED]
+        for name in (*dirnames, *filenames):
+            path = Path(directory) / name
+            if path.is_symlink() and (os.path.isabs(os.readlink(path))
+                                      or not path.resolve().is_relative_to(stdlib)):
+                return path
+    return None
+
+
 @pytest.mark.platforms("linux")
 @pytest.mark.parametrize("bootstrap_name", [None, "python3.11"])
 def test_cold_cli_builds_own_runtime_discovers_plugins_and_repairs_app(tmp_path, bootstrap_name):
@@ -67,6 +87,10 @@ def test_cold_cli_builds_own_runtime_discovers_plugins_and_repairs_app(tmp_path,
     python = Path(sys._base_executable).resolve()
     if sys.version_info[:2] != (3, 14):
         pytest.skip("the checked-in PM runtime currently requires Python 3.14")
+    stdlib = next(d for d in (Path(sys.base_prefix) / "lib").glob("python3.*") if (d / "os.py").is_file())
+    foreign = _foreign_link(stdlib)
+    if foreign is not None:
+        pytest.skip(f"host Python is not self-contained: {foreign} links outside its stdlib")
     bootstrap_python = shutil.which(bootstrap_name) if bootstrap_name else python
     if bootstrap_python is None:
         pytest.skip(f"{bootstrap_name} must be on PATH for the legacy bootstrap test")
@@ -133,7 +157,6 @@ def test_cold_cli_builds_own_runtime_discovers_plugins_and_repairs_app(tmp_path,
             if package.name == "python":
                 # A relocatable python-build-standalone finds its stdlib beside the binary, not at
                 # the host's prefix: ship the host's stdlib the way the real archive does.
-                stdlib = next(d for d in (Path(sys.base_prefix) / "lib").glob("python3.*") if (d / "os.py").is_file())
                 tar.add(stdlib, arcname=f"python/lib/{stdlib.name}",
                         filter=lambda info: None if any(part in info.name.split("/") for part in ("site-packages", "test", "__pycache__")) else info)
         version = _run([str(files[0][0]), "--version"], cwd=tmp_path,
@@ -165,7 +188,7 @@ assert importlib.util.find_spec('idna') is None
         assert not (hermes_home / "installs").exists()
         result = _bare(bootstrap_python, repo, bootstrap + cli.format(action="install"), env=env)
         assert "✓ venv" in result.stdout
-        assert "Preparing the isolated PM runtime" in result.stderr
+        assert "Preparing the isolated Hermes runtime" in result.stderr
         if bootstrap_name:
             # The installed launcher still starts on the old interpreter after
             # a source swap. Completion must re-exec before importing the app.

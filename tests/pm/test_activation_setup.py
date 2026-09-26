@@ -206,7 +206,7 @@ test "${PYTHONPATH-}" = "$prior_pythonpath" || exit 96
     assert Path(probe["module"]).is_relative_to(Path(first["environment"]))
     assert probe["pythonpath"].split(os.pathsep)[0] == str(core)
     # Cold activation builds both PM's isolated runtime and the app environment.
-    assert "Preparing the isolated PM runtime" in cold.stderr
+    assert "Preparing the isolated Hermes runtime" in cold.stderr
     assert len(app_syncs()) == 1
     facts = json.loads((runtime / "facts.json").read_text())["packages"]
     assert facts["python"]["artifacts"] == [first_digest]

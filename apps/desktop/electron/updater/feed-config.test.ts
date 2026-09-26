@@ -57,21 +57,17 @@ it('leaves fallback selection available for missing, invalid or non-string confi
   }
 })
 
-it('holds a configured or env feed base to the update-origin rule and refuses the rest', (): void => {
-  expect(resolveFeedBaseUrl('', undefined)).toBe('')
-  expect(resolveFeedBaseUrl('', '  ')).toBe('')
-  expect(resolveFeedBaseUrl('https://mirror.example/updates', 'http://evil.example/feed')).toBe(
-    'https://mirror.example/updates'
-  )
-  expect(resolveFeedBaseUrl('', 'https://mirror.example/updates')).toBe('https://mirror.example/updates')
-  expect(resolveFeedBaseUrl('', 'http://127.0.0.1:8443/feed')).toBe('http://127.0.0.1:8443/feed')
+it('holds a configured feed base to the update-origin rule and refuses the rest', (): void => {
+  expect(resolveFeedBaseUrl('')).toBe('')
+  expect(resolveFeedBaseUrl('  ')).toBe('')
+  expect(resolveFeedBaseUrl('https://mirror.example/updates')).toBe('https://mirror.example/updates')
+  expect(resolveFeedBaseUrl('http://127.0.0.1:8443/feed')).toBe('http://127.0.0.1:8443/feed')
 
   for (const bad of [
     'http://evil.example/feed',
     'https://user:pw@mirror.example/feed',
     'https://mirror.example/../feed'
   ]) {
-    expect((): string => resolveFeedBaseUrl(bad, undefined)).toThrow()
-    expect((): string => resolveFeedBaseUrl('', bad)).toThrow()
+    expect((): string => resolveFeedBaseUrl(bad)).toThrow()
   }
 })

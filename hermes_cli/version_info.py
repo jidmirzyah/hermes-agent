@@ -34,6 +34,12 @@ class VersionInfo:
     commit_date: int | None = None
     distribution: Literal["docker", "nix", "desktop-app"] | None = None
 
+    @property
+    def display_version(self) -> str:
+        """``<base>+<distance>``: the short form surfaces label a version by.
+        The commit is shown beside it where there is room, never inside it."""
+        return _derived_version(self.base_version, self.distance)
+
 
 def _derived_version(
     base_version: str,
@@ -109,9 +115,8 @@ def _calver_release_version(repo_dir: Path) -> tuple[str, int] | None:
 # --- Install stamp reader ---------------------------------------------------
 
 def _resolve_stamp_file() -> Path | None:
-    """The executing tree's stamp (steward.install_stamp_path owns the location)."""
-    from hermes_cli.steward import install_stamp_path
-    from pm.paths import repo_root
+    """The executing tree's stamp (pm.paths.install_stamp_path owns the location)."""
+    from pm.paths import install_stamp_path, repo_root
 
     p = install_stamp_path(repo_root())
     return p if p.is_file() else None

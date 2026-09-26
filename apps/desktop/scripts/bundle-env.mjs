@@ -1,5 +1,10 @@
 // Defaults must run before bundled modules resolve paths or onboarding flags.
 // An esbuild define would replace reads, not populate the child process env.
+// Match scripts/releases/bundle_env.py and the channel request decoder.
+const ALLOWED_KEYS = new Set([
+  'HERMES_HOME', 'HERMES_DATA_DIR_SUFFIX', 'HERMES_DESKTOP_USER_DATA_DIR',
+  'HERMES_SHARED_AUTH_DIR', 'HERMES_GUEST_ONBOARDING', 'HERMES_SKIP_INTRO'
+])
 
 /** Validate a bundle environment object: plain object of identifiers to
  * strings (defaults) or null (clears). Shared by the banner writer and the
@@ -10,8 +15,8 @@ export function validateBundleEnvironment(values) {
     throw new Error('Bundle environment must be a JSON object')
   }
   for (const [key, value] of Object.entries(values)) {
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || (value !== null && (typeof value !== 'string' || value.includes('\0')))) {
-      throw new Error('Bundle environment requires valid names and string values without NUL, or null to clear')
+    if (!ALLOWED_KEYS.has(key) || (value !== null && (typeof value !== 'string' || value.includes('\0')))) {
+      throw new Error('Bundle environment requires permitted desktop keys and string values without NUL, or null to clear')
     }
   }
   return /** @type {Record<string, string|null>} */ (values)

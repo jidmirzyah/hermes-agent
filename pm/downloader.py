@@ -341,7 +341,7 @@ class Download:
                     if len(failures) == 1:
                         raise
                     raise DownloadError("\n".join(str(error) for error in failures)) from exc
-                logging.getLogger(__name__).warning("%s; trying pinned mirror %s", exc, urls[index + 1])
+                logging.getLogger(__name__).debug("%s; trying pinned mirror %s", exc, urls[index + 1])
 
     def _transfer(self, source: Source, tick) -> int:
         from pm.download_state import partial_lock
@@ -445,14 +445,14 @@ class Download:
 
     @staticmethod
     def _write_sidecar(side: Path, part: Path, covered: _Ranges, remote: _Remote, sha256: str) -> None:
-        from hermes_cli.runtime_state import _atomic_bytes
+        from pm.filesystem import durable_write_bytes
 
         # All writers have closed before coverage is persisted. A sidecar can
         # describe durable bytes, never data still buffered in a worker.
         with part.open("r+b") as stream:
             os.fsync(stream.fileno())
         record = {"total": remote.total, "etag": remote.etag, "sha256": sha256, "ranges": covered}
-        _atomic_bytes(side, json.dumps(record).encode("utf-8"))
+        durable_write_bytes(side, json.dumps(record).encode("utf-8"))
 
     def _fetch_ranged(self, source: Source, remote: _Remote, tick) -> int:
         key = self._key(source.url)

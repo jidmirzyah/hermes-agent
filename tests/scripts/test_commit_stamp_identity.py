@@ -13,13 +13,16 @@ ROOT = Path(__file__).resolve().parents[2]
 def test_stamp_uses_built_commit_even_with_dispatch_sha_and_refuses_mismatch(tmp_path):
     repo = tmp_path / 'repo'
     repo.mkdir()
-    for relative in ('scripts/write_install_stamp.py', 'scripts/releases/commit_build.py',
-                     'scripts/releases/distance.py', 'scripts/releases/versioning.py',
+    for relative in ('scripts/write_install_stamp.py',
                      'hermes_cli/__init__.py', 'hermes_cli/update_channel.py', 'hermes_cli/release_channels.py',
                      'pm/paths.py', 'pm/environments.py', 'hermes_cli/steward.py', 'hermes_constants.py'):
         dest = repo / relative
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(ROOT / relative, dest)
+    # commit_build/distance -> versioning -> semver import each other; copy the
+    # whole package so a new sibling import cannot break the fixture.
+    shutil.copytree(ROOT / 'scripts/releases', repo / 'scripts/releases',
+                    ignore=shutil.ignore_patterns('__pycache__'))
 
     def git(*args):
         return subprocess.run(['git', *args], cwd=repo, check=True, capture_output=True,

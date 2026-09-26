@@ -413,16 +413,34 @@ sync. The `dev` and `test` dependency groups belong only to the separate test
 environment, not the selected application venv. After changing extras, reactivate
 before starting another Python process.
 
-For a new project dependency, edit `pyproject.toml` and regenerate `uv.lock`:
+### Syncing after you edit pyproject.toml
 
-```bash
-python -m pm.build_env --source . --lock-only
-```
+1. Edit `pyproject.toml`. Pin every dependency as the
+   [Dependency Pinning Policy](https://github.com/NousResearch/hermes-agent/blob/main/AGENTS.md#dependency-pinning-policy)
+   requires. Express platform limits with PEP 508 markers, or gate a whole
+   extra in `[tool.hermes.extras-platforms]`.
+2. Relock:
 
-This resolves the source lock without creating or selecting an application
-environment. Use the checkout's prepared Python. For JS dependencies, update
-the owning package manifest and lock. Do not edit PM facts or generated
-workspaces, and do not install packages directly into a selected generation.
+   ```bash
+   hermes pm lock
+   ```
+
+   This re-resolves `uv.lock` from `pyproject.toml` with the same settings CI
+   checks, including the 14-day `exclude-newer` quarantine. It changes no
+   environment. When the lock is already current, it says so and writes
+   nothing. (`hermes pm lock --bump NAME VERSION` is a different operation: it
+   pins a managed tool in `pm/lock.json` and does not touch `uv.lock`.)
+3. Source the activation script again (`source ./activate`, or
+   `. .\activate.ps1` in PowerShell) to sync the application venv and the test
+   interpreter to the new lock. Activation covers `[all]`. If you added an
+   opt-in extra outside `[all]`, `hermes pm lock` prints the command that also
+   puts it in the test interpreter, for example
+   `source ./activate --test-extras all,NAME`.
+4. Commit `pyproject.toml` and `uv.lock` together.
+
+For JS dependencies, update the owning package manifest and lock. Do not edit
+PM facts or generated workspaces, and do not install packages directly into a
+selected generation.
 
 ### Test and editor environments
 
@@ -463,7 +481,6 @@ Use the public `pm` module for Python dependency work:
 | `pm.sync_venv(extras, explicit=True)` | Prepare and select the complete application dependency union, including enabled plugins. |
 | `pm.sync_venv(repair=True, explicit=True)` | Replay the recorded dependency set in a new application generation. |
 | `pm.build_environment(source=..., out=..., explicit=True)` | Build and validate a fresh caller-owned output. No plugin discovery or application selection. |
-| `pm.build_environment(source=..., out=..., groups=[...], only_groups=True, explicit=True)` | Build only the selected locked dependency groups, without application dependencies. Used by icon builds. |
 | `pm.lock_project(source, explicit=True)` | Refresh an explicit project's lock without selecting an environment. |
 | `pm.ensure_environment(name, requirements, explicit=True)` | Prepare and select an isolated dependency generation. Return its Python path. |
 | `pm.ensure_python_tool(name, requirements, executable, explicit=True)` | Prepare an isolated tool and return its executable path. |
@@ -498,16 +515,17 @@ hermes pm install chromium
 
 | Command | Effect |
 |---|---|
-| `pm install [names...]` | Install named packages. With no names, provision required tools plus Python, put those tools on PATH, and then sync the `all` extra. |
+| `pm install [names...]` | Install named packages. With no names, provision required tools plus Python, put those tools on PATH, and then sync the `all` extra. A bare install also installs the default optional tools (`agent-browser` and Chromium); a failed download of these prints a warning and does not fail the install. Naming a package you declined earlier undoes that choice. |
+| `pm install --without NAME` | Do a bare install without the default optional package `NAME` (only `agent-browser`), and record that choice. Later bare installs and `hermes update` also leave it out. The installers' `--skip-browser` / `-SkipBrowser` use this. |
 | `pm install --tools-only` | Install that tool closure and put it on PATH, then stop. The venv sync does not run. |
-| `pm env [names...]` | Print the composed environment of installed packages as JSON. It does not install missing packages. |
+| `pm env [names...]` | Print installed packages' PM-contributed environment values as JSON. It does not install missing packages, though a cold Hermes launch may prepare its own Python runtime first. |
 | `pm doctor` | Check installed tool identities, files, and digests against the lock. |
 | `pm repair` | Rebuild the recorded Python dependency set in a new generation, validate it, then select it. Does not update pins, features, or plugin configuration. |
 | `pm status` | Print the latest sync/update receipt as JSON, or report that no receipt exists. |
 | `pm gc` | Remove unreferenced tool-store entries, eligible download partials, and unused lease-managed Python generations. |
 
-`pm env` can include inherited environment values. Do not publish its output
-without removing credentials.
+`pm env` excludes inherited process variables, including credentials. Its
+output can still reveal local installation paths; review it before sharing.
 
 ### Maintainer commands
 
@@ -516,7 +534,8 @@ not substitutes for an installed application's update mechanism.
 
 | Command | Effect |
 |---|---|
-| `pm lock --bump NAME VERSION` | Resolve and hash supported target artifacts, then write the tool pin. |
+| `pm lock` | Relock `uv.lock` from `pyproject.toml`. Changes no environment; writes nothing when the lock is current. |
+| `pm lock --bump NAME VERSION` | Resolve and hash supported target artifacts, then write the tool pin to `pm/lock.json`. |
 | `pm update [names...]` | Query upstream versions, change tool pins, and install changed tools. |
 | `pm update --check` | Query without writing. Exit 1 can mean updates exist; inspect output to distinguish an error. |
 | `pm update --target TARGET` | Resolve versions for the specified target. |

@@ -1,6 +1,7 @@
 """The enabled-features file: the exact extras the install carries.
 
-The bundle is built with `uv sync --all-extras`, but WHICH extras
+The bundle is built with `uv sync --all-extras` minus the declared
+opt-in extras (`opt_in_extras`), but WHICH extras
 actually resolve differs per platform (markers gate some off). The
 shipped default is the EXACT list that installed — written at bundle
 time beside the payload, read at sync time:
@@ -70,6 +71,26 @@ def declared_extras(repo_dir: Path) -> list[str]:
     with (repo_dir / "pyproject.toml").open("rb") as f:
         data = tomllib.load(f)
     return sorted(data.get("project", {}).get("optional-dependencies", {}))
+
+
+def opt_in_extras(repo_dir: Path) -> list[str]:
+    """Extras that only an explicit selection installs, never an all-extras build.
+
+    ``[tool.hermes] opt-in-extras`` in the repo's pyproject. They stay
+    installable through ``sync_venv([extra])``; bundles and other
+    ``--all-extras`` builds leave them out, so their closures are absent
+    from shipped payloads and from the recorded feature list.
+    """
+    import tomllib
+
+    with (repo_dir / "pyproject.toml").open("rb") as f:
+        data = tomllib.load(f)
+    names = data.get("tool", {}).get("hermes", {}).get("opt-in-extras", [])
+    declared = set(data.get("project", {}).get("optional-dependencies", {}))
+    unknown = sorted(set(names) - declared)
+    if unknown:
+        raise ValueError(f"[tool.hermes] opt-in-extras names undeclared extras: {unknown}")
+    return sorted(set(names))
 
 
 def installed_extras(repo_dir: Path, venv_dir: Path, *, python_exe: Path) -> list[str]:

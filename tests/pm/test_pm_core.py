@@ -184,6 +184,25 @@ def test_deps_compose_dependents_win(pm_env):
     path = runner.env["PATH"]
     assert path.index("toptool-1.0") < path.index("deptool-1.0")
 
+def test_cli_env_reports_only_package_exports(pm_env, monkeypatch, capsys):
+    import json
+    from argparse import Namespace
+    from pm.cli import cmd_env
+    from pm.install import ensure
+
+    lockfile_path, _, docroot, _ = pm_env
+    _, digest = make_tar(docroot, "deptool-1.0.tar.gz", {"bin/faketool": "y"})
+    _pin(lockfile_path, "deptool", "1.0", digest)
+    ensure("deptool", explicit=True)
+    monkeypatch.setenv("FAKE_API_KEY", "never-print-this-secret")
+    monkeypatch.setenv("PATH", "inherited-path-is-not-a-pm-export")
+    assert cmd_env(Namespace(names=["deptool"])) == 0
+    output = capsys.readouterr().out
+    assert "never-print-this-secret" not in output
+    assert "inherited-path-is-not-a-pm-export" not in output
+    assert json.loads(output)["DEPTOOL_SEEN"] == "1"
+    assert "deptool-1.0" in json.loads(output)["PATH"]
+
 
 def test_activation_trusts_a_recorded_entry_a_deliberate_install_repairs(pm_env, monkeypatch):
     """Shell activation skips the byte re-hash; a deliberate install keeps it.
@@ -227,7 +246,7 @@ def test_warm_install_verifies_shared_dependencies_once_under_lock(pm_env, monke
     import importlib
     import os
     from collections import Counter
-    from hermes_cli.runtime_state import _lock
+    from pm.filesystem import lock_fd
     from pm.cli import _install_names
 
     ensure = importlib.import_module("pm.install")
@@ -243,7 +262,7 @@ def test_warm_install_verifies_shared_dependencies_once_under_lock(pm_env, monke
     def verify(package, fact, store, target):
         fd = os.open(store.root / ".install.lock", os.O_CREAT | os.O_RDWR, 0o600)
         try:
-            locked.append(not _lock(fd, wait=False))
+            locked.append(not lock_fd(fd, wait=False))
         finally:
             os.close(fd)
         checked[package.name] += 1
@@ -282,7 +301,7 @@ def test_standalone_warm_ensure_does_not_wait_for_unrelated_writer(pm_env):
 def test_install_forgets_verification_when_state_operation_releases_lock(pm_env, monkeypatch):
     import importlib
     import os
-    from hermes_cli.runtime_state import _lock
+    from pm.filesystem import lock_fd
     from pm.cli import _install_names
 
     ensure = importlib.import_module("pm.install")
@@ -300,7 +319,7 @@ def test_install_forgets_verification_when_state_operation_releases_lock(pm_env,
         # acquire the lock independently, and invalidate prior observations.
         fd = os.open(runtime / ".install.lock", os.O_CREAT | os.O_RDWR, 0o600)
         try:
-            assert _lock(fd, wait=False), "tool lock leaked into the state operation"
+            assert lock_fd(fd, wait=False), "tool lock leaked into the state operation"
             binary.write_text("corrupt", encoding="utf-8")
         finally:
             os.close(fd)

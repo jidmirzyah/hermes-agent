@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -21,9 +22,8 @@ def _project_root() -> Path:
 def _is_sealed(project_root: Path) -> bool:
     """A sealed tree ships its interpreter; only checkouts own a venv.
 
-    The stamp file is the authority (hermes_cli.steward reads the same
-    file; restated here to keep the bare import stdlib-and-local). A
-    tree with BOTH a stamp and .git is a dev tree — treat as checkout.
+    The stamp file is the authority (shared with hermes_cli.steward).
+    A tree with BOTH a stamp and .git is a dev tree — treat as checkout.
 
     A stamp without a valid ``updateMechanism`` is a build-lane bug and
     must not be silently read as "not sealed" (that is exactly the
@@ -32,17 +32,15 @@ def _is_sealed(project_root: Path) -> bool:
     """
     if (project_root / ".git").exists():
         return False
-    try:
-        data = json.loads(
-            (project_root / "install-stamp.json").read_text(encoding="utf-8-sig")
-        )
-    except (OSError, ValueError):
-        return False
-    if not (isinstance(data, dict) and bool(data)):
+    from hermes_cli.steward import read_install_stamp
+    from pm.paths import install_stamp_path
+    stamp_path = install_stamp_path(project_root)
+    data = read_install_stamp(project_root)
+    if not data:
         return False
     if data.get("updateMechanism") not in UPDATE_MECHANISMS:
         raise RuntimeError(
-            f"install-stamp.json at {project_root} is missing a valid "
+            f"install-stamp.json at {stamp_path.parent} is missing a valid "
             f"'updateMechanism' (one of {', '.join(UPDATE_MECHANISMS)}). The "
             "build lane that wrote this stamp must pass --update-mechanism to "
             "scripts/write_install_stamp.py."
@@ -53,7 +51,10 @@ def _is_sealed(project_root: Path) -> bool:
 def check_runtime(project_root: Path) -> str | None:
     """One passive startup verdict; callers only choose stderr or logging."""
     import pm
-    from hermes_cli.steward import sealed_steward
+    from hermes_cli.steward import read_install_stamp, sealed_steward
+
+    if (Path(project_root) / ".git").exists() and read_install_stamp(project_root).get("updateMechanism") != "self":
+        return None  # A developer's checkout does not owe managed products.
 
     problems = pm.activate()
     if not problems:
@@ -117,11 +118,37 @@ def sync(project_root: Path | None = None, *, check: bool = False) -> dict:
         if check:
             return {"state": "would-sync", "ok": True}
         publish_stage("Updating Python dependencies")
+        refuse_foreign_owned_venv(root)
         pm.sync_venv(explicit=True, project_root=root)
+        collect_superseded_generations(root)
         publish_launchers(root)
         return {"state": "synced", "ok": True}
     except Exception as exc:
         return {"state": "failed", "ok": False, "detail": str(exc)}
+
+
+def collect_superseded_generations(project_root: Path) -> None:
+    """Collect what a publish just superseded, as the Docker boot already does.
+
+    Without this only a manual `hermes pm gc` reclaimed old environments. Safe
+    right after a sync: the collectors skip leased, selected and day-young
+    generations and yield to any in-flight install instead of waiting.
+    """
+    import logging
+
+    from hermes_cli.runtime_state import collect_generations
+    from pm.environments import install_state_dir
+    from pm.runtime import collect_runtime_generations
+
+    try:
+        removed = collect_generations(project_root) + collect_runtime_generations(
+            install_state_dir(project_root) / "pm-runtime")
+    except (OSError, ValueError) as exc:
+        # Reclaiming space must never turn a committed update into a failure.
+        logging.getLogger(__name__).warning("dependency generation cleanup skipped: %s", exc)
+        return
+    if removed:
+        logging.getLogger(__name__).info("collected %d unused dependency generations", len(removed))
 
 
 #: Answered from the tree alone; a metadata query must never wait on (or fail with)
@@ -139,6 +166,49 @@ def completion_pending_path(project_root: Path) -> Path:
     from pm.environments import install_state_dir
 
     return install_state_dir(project_root) / "source-completion-pending"
+
+
+def arm_completion(project_root: Path) -> Path:
+    """Persist the tail obligation before selecting a new dependency generation."""
+    pending = completion_pending_path(project_root)
+    pending.parent.mkdir(parents=True, exist_ok=True)
+    pending.write_text("source update tail not finished\n", encoding="utf-8")
+    return pending
+
+
+def clear_completion(project_root: Path) -> None:
+    completion_pending_path(project_root).unlink(missing_ok=True)
+
+
+def refuse_foreign_owned_venv(project_root: Path) -> None:
+    """Refuse cross-user mutation before PM changes the selected environment (#83529)."""
+    if not hasattr(os, "geteuid"):
+        return
+    uid = os.geteuid()  # windows-footgun: ok — guarded POSIX ownership check
+    root = Path(project_root)
+    # A root-run update on a user's checkout is not safe even if a fresh
+    # generation would be allocated: it publishes root-owned state for them.
+    from pm.environments import selected_venv
+    candidates = [root, root / "venv", root / ".venv", root / ".hermes", selected_venv(root)]
+    for venv in (root / "venv", root / ".venv", candidates[-1]):
+        for directory in (venv / ("Scripts" if os.name == "nt" else "bin"),
+                          *venv.glob("lib/python*/site-packages")):
+            if directory.is_dir():
+                candidates.append(directory)
+                for entry in list(directory.iterdir())[:2000]:
+                    candidates.append(entry)
+                    if entry.name.endswith(".dist-info") and entry.is_dir():
+                        candidates.extend(list(entry.iterdir())[:100])
+    for path in candidates:
+        try:
+            owner = path.lstat().st_uid
+        except FileNotFoundError:
+            continue
+        if owner != uid:
+            raise RuntimeError(
+                f"refusing to update {root}: {path} is owned by uid {owner}, "
+                f"not the current uid {uid}; repair ownership before retrying"
+            )
 
 
 def prepare_launch(project_root: Path, argv: list[str]) -> Path | None:
@@ -216,12 +286,14 @@ def _finish_source_update(root: Path, *, current: bool, pending: Path) -> None:
         print("hermes: completing source-update dependencies...", file=sys.stderr, flush=True)
         # Owed from before the sync commits: a crash between the commit and the
         # tail must leave the tail, not a "current" install with nothing built.
-        pending.parent.mkdir(parents=True, exist_ok=True)
-        pending.write_text("source update tail not finished\n", encoding="utf-8")
-        # Main-era installers selected [all] but had no PM ledger. Established
-        # PM installs retain their recorded extras and plugin union instead.
-        extras = ["all"] if not runtime_facts_path(root).is_file() else None
+        refuse_foreign_owned_venv(root)
+        arm_completion(root)
+        # Main-era installs have no PM ledger; carry what their venv held.
+        # Established PM installs retain their recorded extras and plugin union instead.
+        from pm.extras import legacy_selection
+        extras = legacy_selection(root) if not runtime_facts_path(root).is_file() else None
         pm.sync_venv(extras, explicit=True, project_root=root)
+        collect_superseded_generations(root)
         # These can predate the swap. Once PM commits the replacement they
         # must not make early recovery immediately rebuild it a second time.
         for name in (".update-incomplete", ".lazy-refresh-incomplete"):
@@ -251,7 +323,7 @@ def _finish_source_update(root: Path, *, current: bool, pending: Path) -> None:
         raise RuntimeError(
             "source update completion failed; run `hermes update` to finish it"
         )
-    pending.unlink()
+    clear_completion(root)
 
 
 def relaunch_command(

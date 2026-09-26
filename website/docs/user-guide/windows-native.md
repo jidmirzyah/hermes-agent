@@ -40,6 +40,7 @@ No admin rights required. The installer goes to `%LOCALAPPDATA%\hermes\` and add
 | `-NonInteractive` | Skip setup and gateway stages that need input. |
 | `-IncludeDesktop` | Build the desktop app and create shortcuts. |
 | `-ShowResolvedPaths` | Print resolved paths as JSON without installing. |
+| `-Verbose` | Stream every child command's output instead of one status line per step. |
 | `-Manifest` / `-ProtocolVersion` | Inspect the stage protocol used by the bootstrap GUI. |
 | `-Stage NAME -Json` | Run one stage and emit its result frame. |
 

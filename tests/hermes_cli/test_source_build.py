@@ -36,6 +36,27 @@ def stamp_product(root, product, out):
                     str(root), product, str(out)], check=True)
 
 
+def test_source_build_uses_selected_python_for_isolated_icon_child(tmp_path, monkeypatch):
+    from hermes_cli.source_build import source_build_env
+    from pm import paths
+    from pm.environments import site_packages, venv_python
+
+    root = tmp_path / "source"
+    root.mkdir()
+    venv = root / "venv"
+    subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(venv)], check=True)
+    selected = site_packages(venv)
+    (selected / "icon_dependency.py").write_text("ready = True\n", encoding="utf-8")
+    monkeypatch.setattr(paths, "repo_root", lambda: root)
+    monkeypatch.setattr(pm, "ensure", lambda name, **kwargs: Runner(name, kwargs["base_env"]))
+    monkeypatch.syspath_prepend(str(selected))
+
+    env = source_build_env()
+    assert env["HERMES_PYTHON"] == str(venv_python(venv))
+    subprocess.run([env["HERMES_PYTHON"], "-I", "-c",
+                    "import icon_dependency; assert icon_dependency.ready"], check=True)
+
+
 def test_automatic_build_preserves_pm_admission_intent(monkeypatch):
     from hermes_cli.source_build import source_build_env
 
@@ -185,7 +206,7 @@ def test_preparation_reuses_only_the_exact_completed_workspace_union(source_chec
     prepare_source_dependencies(root, ("ui-tui", "web"), env=env)
     first = _events(root)
     assert [event["step"] for event in first] == ["deps"]
-    assert first[0]["python"] == sys.executable
+    assert first[0]["python"] == env["HERMES_PYTHON"]
     assert first[0]["ci"] == "1"
     assert "esbuild" not in first[0]
     assert first[0]["npmrc"] == str(Path(os.environ["HERMES_HOME"]) / "npmrc")

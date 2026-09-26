@@ -64,7 +64,8 @@ def _resolve_channel(name: str, repository: str):
 
     ChannelReader owns HTTPS, authority and digests. The source adapter below
     admits its retirement constraints before any checkout operation. No legacy
-    GitHub fallback is allowed when a record is unavailable.
+    GitHub fallback is allowed when a record is unavailable; the one exception
+    is an unpublished ``main`` record, which resolves to the main branch.
     """
     from hermes_cli.release_channels import ChannelReader
 
@@ -73,11 +74,18 @@ def _resolve_channel(name: str, repository: str):
 
 def resolve_source_target(channel: str, git_cmd=None, cwd=None, *, repository=None) -> SourceTarget:
     """Resolve every subscription, including default labels, through R2."""
-    from hermes_cli.release_channels import validate_name
+    from hermes_cli.release_channels import ChannelNotFound, validate_name
 
     validate_name(channel)
     repository = repository or source_repository(git_cmd, cwd)
-    resolved = _resolve_channel(channel, repository)
+    try:
+        resolved = _resolve_channel(channel, repository)
+    except ChannelNotFound:
+        if channel != "main":
+            raise
+        # main IS the source branch; its record can only add a retirement.
+        # Until one is published, a checkout keeps following the branch via git.
+        return SourceTarget(channel, channel, repository, branch="main")
     terminal = resolved.terminal
     if terminal["repository"].lower() != repository.lower():
         raise ValueError("Channel repository does not match this source installation")

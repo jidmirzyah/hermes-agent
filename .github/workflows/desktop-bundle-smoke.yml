@@ -18,6 +18,10 @@ on:
       tag:
         default: ''
         type: string
+      archive-tag:
+        description: Archive ref the handoffs are staged under (attempt ref for stable phases).
+        default: ''
+        type: string
       commit-build:
         default: false
         type: boolean
@@ -70,6 +74,7 @@ jobs:
     env: &smoke-env
       RELEASE_COMMIT: ${{ inputs.sha }}
       RELEASE_TAG: ${{ inputs.tag }}
+      ARCHIVE_TAG: ${{ inputs.archive-tag }}
       COMMIT_BUILD: ${{ inputs.commit-build }}
       CHANNEL_BUILD: ${{ inputs.channel-build }}
       CHANNEL_REQUEST_SHA256: ${{ inputs.channel-request-sha256 }}
@@ -128,7 +133,7 @@ jobs:
               name=windows-universal; pattern="$product-*-win.msixbundle" ;;
             *) echo '::error::unsupported native smoke target'; exit 1 ;;
           esac
-          args=(--tag "$RELEASE_TAG" --commit "$RELEASE_COMMIT")
+          args=(--tag "${ARCHIVE_TAG:-$RELEASE_TAG}" --commit "$RELEASE_COMMIT")
           if [ "$COMMIT_BUILD" = true ]; then
             test -z "$RELEASE_TAG"
             args=(--commit-build "$RELEASE_COMMIT")
@@ -225,7 +230,7 @@ jobs:
     name: Windows install and chat
     needs: validate
     if: inputs.platform == 'win32'
-    runs-on: ${{ inputs.arch == 'arm64' && 'windows-11-arm' || 'windows-2025' }}
+    runs-on: ${{ inputs.arch == 'arm64' && 'windows-latest-32-arm-core' || 'windows-latest-32-core' }}
     # windows-11-arm runners are much slower (npm ci alone runs 12+ minutes and
     # the MSIX leg exceeds 30 total); x64 legs complete in ~14.
     timeout-minutes: 45

@@ -482,3 +482,68 @@ def test_default_fetch_refuses_non_https_feeds_before_any_request(monkeypatch, u
     monkeypatch.setattr(urllib.request, "urlopen", never)
     with pytest.raises(ValueError, match="https://"):
         default_fetch(url)
+
+
+@pytest.fixture
+def feed_redirect_server(monkeypatch):
+    """Exercise urllib's redirect machinery without requiring a TLS certificate."""
+    import http.client
+    import threading
+    import urllib.request
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    visited = []
+
+    class FeedHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            visited.append(self.path)
+            if self.path == "/start":
+                target = f"http://127.0.0.1:{self.server.server_port}/middle"
+            elif self.path == "/middle":
+                target = f"https://127.0.0.1:{self.server.server_port}/feed"
+            elif self.path == "/secure":
+                target = f"https://127.0.0.1:{self.server.server_port}/feed"
+            else:
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"version: 1.2.0\n")
+                return
+            self.send_response(302)
+            self.send_header("Location", target)
+            self.end_headers()
+
+        def log_message(self, *_args):
+            pass
+
+    # Only the HTTPS transport is replaced; the redirect handler and HTTP
+    # transport stay real, so the server can observe a forbidden HTTP hop.
+    monkeypatch.setattr(
+        urllib.request.HTTPSHandler, "https_open",
+        lambda self, req: self.do_open(http.client.HTTPConnection, req),
+    )
+    server = ThreadingHTTPServer(("127.0.0.1", 0), FeedHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"https://127.0.0.1:{server.server_port}", visited
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
+
+
+def test_default_fetch_refuses_intermediate_plaintext_redirect(feed_redirect_server):
+    from hermes_cli.plugins_updates import default_fetch
+
+    base, visited = feed_redirect_server
+    with pytest.raises(ValueError, match="https://"):
+        default_fetch(base + "/start")
+    assert visited == ["/start"]
+
+
+def test_default_fetch_follows_https_redirect(feed_redirect_server):
+    from hermes_cli.plugins_updates import default_fetch
+
+    base, visited = feed_redirect_server
+    assert default_fetch(base + "/secure") == "version: 1.2.0\n"
+    assert visited == ["/secure", "/feed"]

@@ -8,6 +8,7 @@ from scripts.releases import dispatch_log
 from scripts.releases.bundle_env import parse_assignments
 from scripts.releases.channel_build import dispatch_command as channel_dispatch
 from scripts.releases.commit_build import dispatch_command as commit_dispatch
+from scripts.releases.job_groups import ALL_JOBS
 from tests.ci.test_desktop_release_tag_admission import _workflow
 
 SHA = "a" * 40
@@ -31,7 +32,7 @@ def env(**values):
         "DISPOSABLE_RECEIVERS": "false",
         "RELEASE_PHASE": "",
         "UPLOAD_RELEASE": "false",
-        "TERMUX_ONLY": "false",
+        "JOBS": ALL_JOBS,
         "TERMUX_UPGRADE_FROM_TAG": "",
         "BUNDLE_ENV_JSON": "{}",
         "R2_DISPOSABLE_RUN": "",
@@ -50,6 +51,7 @@ def test_pre_build_setup_prints_the_dispatch_before_any_other_work():
     assert forwarded["BUILD_COMMIT"] == "${{ inputs.build_commit }}"
     assert forwarded["CHANNEL"] == "${{ inputs.channel }}"
     assert forwarded["BUNDLE_ENV_JSON"] == "${{ inputs.bundle_env }}"
+    assert forwarded["JOBS"] == "${{ inputs.jobs }}"
     assert forwarded["DEFAULT_BRANCH"] == "${{ github.event.repository.default_branch }}"
     assert "GITHUB_TOKEN" not in forwarded and "GH_TOKEN" not in forwarded
 
@@ -91,10 +93,18 @@ def test_unrecreatable_dispatches_name_the_kind_and_no_command(override):
     assert "kind: unknown" not in text
 
 
-def test_termux_only_commit_has_a_receipt_but_no_release_command():
-    text = dispatch_log.report(env(BUILD_COMMIT=SHA, TERMUX_ONLY="true"))
+@pytest.mark.parametrize("jobs", ["termux", "darwin-arm64,win32-x64"])
+def test_a_partial_jobs_commit_has_a_receipt_but_no_release_command(jobs):
+    text = dispatch_log.report(env(BUILD_COMMIT=SHA, JOBS=jobs))
     assert "release.py: this dispatch is not a release.py --build-commit run" in text
     assert "receipt: v<version>+commit.<run-created-utc>.35629258153" in text
+
+
+def test_an_unreadable_jobs_value_is_reported_not_raised():
+    # The log must not fail the build; admission refuses the input next.
+    text = dispatch_log.report(env(BUILD_COMMIT=SHA, JOBS="mac,mac"))
+    assert "release.py: this dispatch is not a release.py --build-commit run" in text
+    assert '"jobs": "mac,mac"' in text
 
 
 def test_report_omits_values_the_workflow_did_not_forward(monkeypatch):

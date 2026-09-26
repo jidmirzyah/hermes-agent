@@ -9,6 +9,8 @@ import subprocess
 import sys
 
 import pytest
+
+from pm.plugin_inputs import Members
 from tests.pm._fixtures import (
     _run,
     _wheel,
@@ -94,7 +96,7 @@ def installable_project(locked_project, build_worker):
     metadata = source / "pyproject.toml"
     metadata.write_text(metadata.read_text().replace("package=false", "package=true") +
                         '\n[build-system]\nrequires=[]\nbuild-backend="local_backend"\nbackend-path=["."]\n')
-    (source / "root_app.py").write_text("VALUE = 'installed from the explicit source'\n")
+    (source / "root_app.py").write_text("VALUE = 'installed from the explicit source'\n", encoding="utf-8")
     # A local PEP 517/660 backend: no registry or build-tool downloads in this fixture.
     (source / "local_backend.py").write_text('''
 from pathlib import Path
@@ -188,20 +190,23 @@ def test_public_dependency_only_build_needs_no_application_source(installable_pr
     assert not Path(env["HERMES_HOME"]).exists()
 
 
-def test_group_only_build_excludes_application_dependencies(locked_project, tmp_path, build_worker):
-    import pm
+def test_all_extras_build_leaves_out_opt_in_extras(installable_project, tmp_path):
+    source, uv, env = installable_project
+    manifest = source / "pyproject.toml"
+    manifest.write_text(manifest.read_text() + '\n[tool.hermes]\nopt-in-extras=["other"]\n', encoding="utf-8")
+    from pm import build_environment
 
-    source, _, env = locked_project
-    metadata = source / "pyproject.toml"
-    metadata.write_text(metadata.read_text() + '\n[dependency-groups]\nicons=["chosen-dep==1.0"]\n')
-    pm.lock_project(source, python=Path(sys.executable), cache=tmp_path / "cache", env=env,
-                    offline=True, explicit=True)
-    python = pm.build_environment(source=source, out=tmp_path / "icons", groups=["icons"],
-                                  only_groups=True, python=Path(sys.executable), cache=tmp_path / "cache",
-                                  env=env, offline=True, explicit=True)
-    assert _run([str(python), "-I", "-c", "import chosen_dep, importlib.util; "
-                 "assert importlib.util.find_spec('base_dep') is None; print(chosen_dep.__version__)"],
-                cwd=tmp_path, env=env) == "1.0"
+    probe = ("import json, importlib.util; print(json.dumps([importlib.util.find_spec(n) is not None "
+             "for n in ('chosen_dep', 'other_dep')]))")
+    bundle = build_environment(explicit=True, source=source, python=Path(sys.executable),
+                               out=tmp_path / "bundle env", cache=tmp_path / "cache", env=env,
+                               no_install_project=True, offline=True, all_extras=True)
+    assert json.loads(_run([str(bundle), "-I", "-c", probe], cwd=tmp_path, env=env)) == [True, False]
+    chosen = build_environment(explicit=True, source=source, python=Path(sys.executable),
+                               out=tmp_path / "chosen env", cache=tmp_path / "cache", env=env,
+                               no_install_project=True, offline=True, extras=["other"])
+    assert json.loads(_run([str(chosen), "-I", "-c", probe], cwd=tmp_path, env=env)) == [False, True]
+
 
 
 @pytest.mark.parametrize("lazy", [False, True])
@@ -214,7 +219,7 @@ def test_first_bundle_extension_preserves_shipped_extras(locked_project, build_w
 
     source, _, env = locked_project
     manifest = source / "pyproject.toml"
-    manifest.write_text(manifest.read_text().replace('[tool.uv.workspace]\nmembers=["member"]\n', ""), encoding="utf-8")
+    manifest.write_text(manifest.read_text(encoding="utf-8-sig").replace('[tool.uv.workspace]\nmembers=["member"]\n', ""), encoding="utf-8")
     monkeypatch.setattr(paths, "repo_root", lambda: source)
     pm.lock_project(source, offline=True, explicit=True)
     base = tmp_path / "shipped"
@@ -233,7 +238,7 @@ def test_first_bundle_extension_preserves_shipped_extras(locked_project, build_w
     locked = (source / "uv.lock").read_bytes()
 
     # Admission adds only a plugin, not a list of the bundle's optional extras.
-    pm.sync_venv(explicit=True, plugin_dirs=[source / "member"])
+    pm.sync_venv(explicit=True, plugins=Members([source / "member"]))
     first = selected_venv(source)
     assert first != base
     executable = first / python_relative
@@ -247,8 +252,8 @@ def test_first_bundle_extension_preserves_shipped_extras(locked_project, build_w
     write_features(["other"], tmp_path)
     _wheel(tmp_path / "wheels", "member_dep", "1.1")
     member = source / "member" / "pyproject.toml"
-    member.write_text(member.read_text().replace("member-dep==1.0", "member-dep==1.1"), encoding="utf-8")
-    pm.sync_venv(explicit=True, plugin_dirs=[source / "member"])
+    member.write_text(member.read_text(encoding="utf-8-sig").replace("member-dep==1.0", "member-dep==1.1"), encoding="utf-8")
+    pm.sync_venv(explicit=True, plugins=Members([source / "member"]))
     second = selected_venv(source)
     assert second != first
     second_fact = Facts(runtime_facts_path(source)).get("venv")
@@ -268,7 +273,7 @@ def test_worker_sync_reuses_unions_and_reports_real_lock_drift(locked_project, b
 
     source, _, env = locked_project
     manifest = source / "pyproject.toml"
-    manifest.write_text(manifest.read_text().replace('[tool.uv.workspace]\nmembers=["member"]\n', ""), encoding="utf-8")
+    manifest.write_text(manifest.read_text(encoding="utf-8-sig").replace('[tool.uv.workspace]\nmembers=["member"]\n', ""), encoding="utf-8")
     monkeypatch.setattr(paths, "repo_root", lambda: source)
     pm.lock_project(source, offline=True, explicit=True)
     assert pm.check() == []
@@ -276,28 +281,28 @@ def test_worker_sync_reuses_unions_and_reports_real_lock_drift(locked_project, b
     # The worker imports its own class; this trap affects only inline installs.
     monkeypatch.setattr("pm.packages.Venv.apply", lambda *a, **kw: pytest.fail("venv apply ran in caller"))
 
-    pm.sync_venv(["chosen"], explicit=True, plugin_dirs=[])
+    pm.sync_venv(["chosen"], explicit=True, plugins=Members([]))
     first = selected_venv(source)
     first_fact = Facts(runtime_facts_path(source)).get("venv")
-    pm.sync_venv(["chosen"], explicit=True, plugin_dirs=[])
+    pm.sync_venv(["chosen"], explicit=True, plugins=Members([]))
     assert selected_venv(source) == first
     assert Facts(runtime_facts_path(source)).get("venv") == first_fact
     assert _run([str(first / ("Scripts/python.exe" if os.name == "nt" else "bin/python")), "-I", "-c",
                  "import base_dep, chosen_dep, importlib.util; assert importlib.util.find_spec('other_dep') is None; print(chosen_dep.__version__)"],
                 cwd=tmp_path, env=env) == "1.0"
 
-    pm.sync_venv(["other"], explicit=True, plugin_dirs=[])
+    pm.sync_venv(["other"], explicit=True, plugins=Members([]))
     second = selected_venv(source)
     assert second != first
     assert Facts(runtime_facts_path(source)).get("venv")["extras"] == ["chosen", "other"]
-    pm.sync_venv(["chosen"], explicit=True, plugin_dirs=[])
+    pm.sync_venv(["chosen"], explicit=True, plugins=Members([]))
     assert selected_venv(source) == second
     assert _run([str(second / ("Scripts/python.exe" if os.name == "nt" else "bin/python")), "-I", "-c",
                  "import chosen_dep, other_dep; print(chosen_dep.__version__, other_dep.__version__)"],
                 cwd=tmp_path, env=env) == "1.0 1.0"
     assert pm.check() == []
     _wheel(tmp_path / "wheels", "base_dep", "1.1")
-    manifest.write_text(manifest.read_text().replace("base-dep==1.0", "base-dep==1.1"), encoding="utf-8")
+    manifest.write_text(manifest.read_text(encoding="utf-8-sig").replace("base-dep==1.0", "base-dep==1.1"), encoding="utf-8")
     pm.lock_project(source, offline=True, explicit=True)
     assert pm.check() == ["venv: out of sync with uv.lock"]
     lock = Lockfile(paths.lockfile_path())
@@ -314,6 +319,7 @@ def test_build_backend_output_is_streamed_before_build_finishes(installable_proj
     import io
     from pm.environment import PythonEnvironment
 
+    monkeypatch.setenv("HERMES_VERBOSE", "1")  # live backend output is the streamed (CI) view's contract
     source, uv, env = installable_project
     release = tmp_path / "release-build"
     stdout_marker = "construction-root: backend stdout"
@@ -385,7 +391,7 @@ def test_streaming_bounds_memory_without_losing_failure_class(tmp_path, diagnost
         "[os.write(2, b'x' * 65536) for _ in range(128)]; "
         "os.write(2, b'final diagnostic'); raise SystemExit(1)"
     )
-    with open(os.devnull, "w") as output:
+    with open(os.devnull, "w", encoding="utf-8") as output:
         environment = PythonEnvironment(uv=Path(sys.executable), python=Path(sys.executable),
             destination=tmp_path / "venv", cache=tmp_path / "cache", env=dict(os.environ), output=output)
         tracemalloc.start()
@@ -402,9 +408,11 @@ def test_streaming_bounds_memory_without_losing_failure_class(tmp_path, diagnost
     assert "final diagnostic" in str(actual)
 
 
-def test_child_output_is_live_and_keeps_explicit_index_credentials(tmp_path):
+def test_child_output_is_live_and_keeps_explicit_index_credentials(tmp_path, monkeypatch):
     import io
     from pm.environment import PythonEnvironment
+
+    monkeypatch.setenv("HERMES_VERBOSE", "1")  # CI's streamed log, not the contained view
 
     released = tmp_path / "release-child"
 
@@ -446,11 +454,13 @@ def test_child_output_is_live_and_keeps_explicit_index_credentials(tmp_path):
 
 
 @pytest.fixture(params=["environment", "cli"])
-def streaming_runner(request, tmp_path):
+def streaming_runner(request, tmp_path, monkeypatch):
     import contextlib
     import io
     from pm.cli import _run_live
     from pm.environment import PythonEnvironment
+
+    monkeypatch.setenv("HERMES_VERBOSE", "1")  # CI's streamed log, not the contained view
 
     output = io.StringIO()
     environment = PythonEnvironment(
@@ -551,7 +561,7 @@ def test_failed_build_removes_only_its_candidate(installable_project, tmp_path, 
         (source / "root_app.py").unlink()
     elif damage == "check":
         backend = source / "local_backend.py"
-        backend.write_text(backend.read_text().replace("base-dep==1.0", "base-dep==2.0"))
+        backend.write_text(backend.read_text(encoding="utf-8-sig").replace("base-dep==1.0", "base-dep==2.0"), encoding="utf-8")
         # Same-size edits within one timestamp tick otherwise reuse the backend's .pyc.
         shutil.rmtree(source / "__pycache__", ignore_errors=True)
     else:
@@ -576,14 +586,14 @@ def test_lock_upgrade_and_group_selection_use_the_same_environment(locked_projec
 
     source, uv, env = locked_project
     manifest = source / "pyproject.toml"
-    manifest.write_text(manifest.read_text().replace('base-dep==1.0', 'base-dep>=1,<2') +
+    manifest.write_text(manifest.read_text(encoding="utf-8-sig").replace('base-dep==1.0', 'base-dep>=1,<2') +
                         '\n[dependency-groups]\nqa=["other-dep==1.0"]\n')
     environment = PythonEnvironment(uv=uv, python=Path(sys.executable), destination=tmp_path / "candidate",
                                     cache=tmp_path / "cache", env=env, offline=True)
     environment.lock(source, timeout=60)
     _wheel(tmp_path / "wheels", "base_dep", "1.1")
     environment.lock(source, timeout=60)
-    packages = tomllib.loads((source / "uv.lock").read_text())["package"]
+    packages = tomllib.loads((source / "uv.lock").read_text(encoding="utf-8-sig"))["package"]
     assert next(p["version"] for p in packages if p["name"] == "base-dep") == "1.0"
     environment.lock(source, upgrade=True, timeout=60)
     locked = (source / "uv.lock").read_bytes()
@@ -634,7 +644,7 @@ def test_explicit_workspace_preserves_seed_and_replays_copied_members(locked_pro
 
     source, uv, env = locked_project
     project = source / "pyproject.toml"
-    project.write_text(project.read_text().replace(
+    project.write_text(project.read_text(encoding="utf-8-sig").replace(
         '[tool.uv.workspace]\nmembers=["member"]\n', "",
     ).replace('base-dep==1.0', 'base-dep>=1,<2'))
     _run([str(uv), "lock", "--python", sys.executable], cwd=source, env=env)
@@ -663,8 +673,8 @@ def test_explicit_workspace_preserves_seed_and_replays_copied_members(locked_pro
     recorded = tmp_path / "first" / "workspace"
     recorded_lock = (recorded / "uv.lock").read_bytes()
     import tomllib
-    document = tomllib.loads((recorded / "pyproject.toml").read_text())
-    assert document["project"] == tomllib.loads(project.read_text())["project"]
+    document = tomllib.loads((recorded / "pyproject.toml").read_text(encoding="utf-8-sig"))
+    assert document["project"] == tomllib.loads(project.read_text(encoding="utf-8-sig"))["project"]
     [relative] = document["tool"]["uv"]["workspace"]["members"]
     copied = recorded / relative / "pyproject.toml"
     assert copied.read_bytes() == before_member
@@ -673,8 +683,8 @@ def test_explicit_workspace_preserves_seed_and_replays_copied_members(locked_pro
     assert workspace.members_stamp([original_member]) != stamp
 
     # Repair replays recorded inputs, not today's edited source/plugins.
-    (original_member / "pyproject.toml").write_text("broken plugin TOML")
-    project.write_text("broken source TOML")
+    (original_member / "pyproject.toml").write_text("broken plugin TOML", encoding="utf-8")
+    project.write_text("broken source TOML", encoding="utf-8")
     second = PythonEnvironment(uv=uv, python=Path(sys.executable), destination=tmp_path / "second" / "venv",
                                cache=tmp_path / "cache", env=env, offline=True)
     second.create()
@@ -702,12 +712,12 @@ def test_real_sync_retains_selection_until_commit(locked_project, tmp_path, monk
     monkeypatch.setattr("pm._uv._toolchain", lambda **kw: (uv, Path(sys.executable)))
     engine = importlib.import_module("pm.install")
     monkeypatch.setattr(engine, "lazy_installs_allowed", lambda: True)
-    engine.sync_venv(["chosen"], plugin_dirs=[], explicit=True)
+    engine.sync_venv(["chosen"], plugins=Members([]), explicit=True)
     old = selected_venv(source)
     facts = paths.runtime_facts_path().read_bytes()
     home = Path(os.environ["HERMES_HOME"])
     config = home / "config.yaml"
-    config.write_text("plugins: {enabled: []}\nsecurity: {allow_lazy_installs: true}\n")
+    config.write_text("plugins: {enabled: []}\nsecurity: {allow_lazy_installs: true}\n", encoding="utf-8")
     config_bytes = config.read_bytes()
     if failure == "facts":
         def refuse(*args, **kwargs):
@@ -715,12 +725,12 @@ def test_real_sync_retains_selection_until_commit(locked_project, tmp_path, monk
         with monkeypatch.context() as fault:
             fault.setattr(Facts, "record_state", refuse)
             with pytest.raises(OSError, match="facts disk full"):
-                engine.sync_venv(["other"], plugin_dirs=[], explicit=True)
+                engine.sync_venv(["other"], plugins=Members([]), explicit=True)
         assert selected_venv(source) == old
         assert paths.runtime_facts_path().read_bytes() == facts
     elif failure == "missing-cfg":
         (old / "pyvenv.cfg").unlink()
-        engine.sync_venv(["chosen"], plugin_dirs=[], explicit=True)
+        engine.sync_venv(["chosen"], plugins=Members([]), explicit=True)
         assert selected_venv(source) != old
         assert (selected_venv(source) / "pyvenv.cfg").is_file()
     else:
@@ -743,7 +753,7 @@ def test_live_apply_keeps_selection_on_failed_union(locked_project, tmp_path, mo
 
     source, uv, env = locked_project
     metadata = source / "pyproject.toml"
-    metadata.write_text(metadata.read_text().replace('[tool.uv.workspace]\nmembers=["member"]\n', ""))
+    metadata.write_text(metadata.read_text(encoding="utf-8-sig").replace('[tool.uv.workspace]\nmembers=["member"]\n', ""), encoding="utf-8")
     _run([str(uv), "lock", "--python", sys.executable], cwd=source, env=env)
     source_lock = (source / "uv.lock").read_bytes()
     monkeypatch.setattr(Path, "home", lambda: tmp_path / "isolated-home")
@@ -762,7 +772,7 @@ def test_live_apply_keeps_selection_on_failed_union(locked_project, tmp_path, mo
     generations = prepared["environment"].parent.parent
     prior_generations = set(generations.iterdir())
     plugin = source / "member" / "pyproject.toml"
-    plugin.write_text(plugin.read_text().replace('member-dep==1.0', 'member-dep==2.0'))
+    plugin.write_text(plugin.read_text(encoding="utf-8-sig").replace('member-dep==1.0', 'member-dep==2.0'), encoding="utf-8")
     with pytest.raises(ResolutionConflict):
         Venv().apply(["chosen"], plugin_dirs=[source / "member"])
     assert selected_venv(source) == prepared["environment"]

@@ -445,6 +445,11 @@
     "kind": "bare_which"
   },
   {
+    "path": "pm/security_packages.py",
+    "symbol": "IronProxy.verify_provenance",
+    "kind": "bare_which"
+  },
+  {
     "path": "pm/shell.py",
     "symbol": "bash",
     "kind": "bare_which"

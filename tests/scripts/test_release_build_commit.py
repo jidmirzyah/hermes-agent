@@ -121,7 +121,7 @@ def test_commit_build_dispatch_is_repository_independent(fixture_repo):
     expected = ['gh', 'workflow', 'run', 'desktop-bundled-release.yml',
                 '--ref', 'main', '--repo', 'fixture-owner/fixture-repo',
                 '-f', f'build_commit={tip}', '-f', 'tag=', '-f', 'upload_release=false',
-                '-f', 'termux_only=false', '-f', 'termux_upgrade_from_tag=']
+                '-f', 'termux_upgrade_from_tag=']
     result, calls = invoke('--build-commit', tip, '--publish')
     assert result.returncode == 0, result.stderr
     dispatches = [call for call in calls if call[1:3] == ['workflow', 'run']]
@@ -136,7 +136,7 @@ def test_commit_build_dispatch_is_repository_independent(fixture_repo):
     assert dispatches == [['gh', 'workflow', 'run', 'desktop-bundled-release.yml',
                            '--ref', 'main', '--repo', 'NousResearch/hermes-agent',
                            '-f', f'build_commit={tip}', '-f', 'tag=', '-f', 'upload_release=false',
-                           '-f', 'termux_only=false', '-f', 'termux_upgrade_from_tag=']]
+                           '-f', 'termux_upgrade_from_tag=']]
 
 
 # (Fork-conditional removal) The disposable routing test retired with it: a
@@ -148,14 +148,15 @@ def test_commit_bundle_environment_is_literal_and_validated(fixture_repo):
     repo, _, invoke = fixture_repo
     tip = git(repo, 'rev-parse', 'HEAD')
     values = {'HERMES_GUEST_ONBOARDING': '1', 'HERMES_DATA_DIR_SUFFIX': 'magic-test',
-              'EMPTY': '', 'LITERAL': 'a=b "quote"\n$(not-a-command)'}
+              'HERMES_SKIP_INTRO': '', 'HERMES_SHARED_AUTH_DIR': 'a=b "quote"\n$(not-a-command)'}
     flags = [part for key, value in values.items() for part in ('--bundle-env', f'{key}={value}')]
     result, calls = invoke('--build-commit', tip, '--publish', *flags)
     assert result.returncode == 0, result.stderr
     dispatch = next(call for call in calls if call[1:3] == ['workflow', 'run'])
     assert json.loads(next(field.split('=', 1)[1] for field in dispatch if field.startswith('bundle_env='))) == values
     for invalid in (['--bundle-env', 'MISSING'], ['--bundle-env', 'BAD-NAME=x'],
-                    ['--bundle-env', 'DUP=x', '--bundle-env', 'DUP=y']):
+                    ['--bundle-env', 'NODE_OPTIONS=--require=evil'], ['--bundle-unset', 'PATH'],
+                    ['--bundle-env', 'HERMES_HOME=x', '--bundle-env', 'HERMES_HOME=y']):
         result, calls = invoke('--build-commit', tip, '--publish', *invalid)
         assert result.returncode != 0 and not calls
     result, calls = invoke('--bundle-env', 'NAME=value')

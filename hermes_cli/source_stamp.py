@@ -60,4 +60,46 @@ def write_source_stamp(root: Path) -> dict | None:
         with suppress(OSError):
             os.unlink(tmp_name)
     _reset_version_info_cache()
+    # Every path that publishes a new checkout identity (completion handoff, the PM
+    # updater's finish, boot-time adoption) moves the installers' receipt with it.
+    refresh_bootstrap_receipt(root, stamp)
     return stamp
+
+
+BOOTSTRAP_RECEIPT = ".hermes-bootstrap-complete"
+
+
+def refresh_bootstrap_receipt(root: Path, stamp: dict) -> None:
+    """Move the installers' bootstrap receipt to the commit ``stamp`` just published.
+
+    install.sh / install.ps1 write the receipt once, at the commit they installed;
+    an update that moves the checkout has to move it too, or it keeps naming the
+    replaced release. Only an existing receipt is refreshed: its presence is what
+    marks a script install, so a manual clone never grows one.
+    """
+    receipt_path = Path(root) / BOOTSTRAP_RECEIPT
+    try:
+        # install.ps1 writes it with Windows PowerShell's UTF-8 BOM.
+        previous = json.loads(receipt_path.read_text(encoding="utf-8-sig"))
+    except FileNotFoundError:
+        return
+    except (OSError, ValueError):
+        previous = {}
+    if not isinstance(previous, dict):
+        previous = {}
+    receipt = {
+        **previous,
+        "schemaVersion": 1,
+        "pinnedCommit": stamp["commit"],
+        # A detached checkout keeps the branch it was installed from.
+        "pinnedBranch": stamp["branch"] or previous.get("pinnedBranch"),
+        "completedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
+    }
+    fd, tmp_name = tempfile.mkstemp(dir=root, prefix=".hermes-bootstrap-complete.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(receipt, indent=2) + "\n")
+        os.replace(tmp_name, receipt_path)
+    finally:
+        with suppress(OSError):
+            os.unlink(tmp_name)

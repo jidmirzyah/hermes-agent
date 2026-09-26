@@ -32,6 +32,8 @@ import time
 from pathlib import Path
 from typing import NoReturn
 
+from scripts.releases.versioning import parse_attempt_ref
+
 ARCH = "aarch64"
 COMPONENT = "main"
 
@@ -217,7 +219,19 @@ def existing_published(out_dir: Path, suite: str) -> set:
     return published
 
 
-def stage(pool_dir: Path, out_dir: Path, suite: str, gpg_key_file: Path | None) -> int:
+def stage(
+    pool_dir: Path,
+    out_dir: Path,
+    suite: str,
+    gpg_key_file: Path | None,
+    pool_subdir: str = "",
+) -> int:
+    # The pool upload is immutable with a one-year cache header, so a recut
+    # of the same version must not reuse a pool key; only an attempt ref
+    # (which names the build, not the version) may prefix the pool, and it
+    # doubles as the guard against path escapes.
+    if pool_subdir and parse_attempt_ref(pool_subdir) is None:
+        die(f"--pool-subdir must be an attempt ref (rc.<N>-vX.Y.Z), got {pool_subdir!r}")
     debs = sorted(pool_dir.glob("*.deb"))
     if not debs:
         die(f"no .deb files found in pool {pool_dir}")
@@ -238,12 +252,13 @@ def stage(pool_dir: Path, out_dir: Path, suite: str, gpg_key_file: Path | None) 
                 "(published apt assets are immutable)"
             )
         arch = fields["Architecture"]
-        target = out_dir / "pool" / deb.name[0].lower() / deb.name
+        prefix = f"{pool_subdir}/" if pool_subdir else ""
+        target = out_dir / "pool" / pool_subdir / deb.name[0].lower() / deb.name
         target.parent.mkdir(parents=True, exist_ok=True)
         # Unconditional write: the pool file must always equal the source so
         # the stanza hashes below can never describe a stale/different file.
         target.write_bytes(raw)
-        filename = f"pool/{deb.name[0].lower()}/{deb.name}"
+        filename = f"pool/{prefix}{deb.name[0].lower()}/{deb.name}"
         size = len(raw)
         sha256 = hashlib.sha256(raw).hexdigest()
         stanzas.append(
@@ -508,13 +523,14 @@ def main(argv: list | None = None) -> int:
         choices=["hermes-stable", "hermes-canary", "hermes-nightly"],
     )
     ap.add_argument("--gpg-key-file", type=Path, default=None)
+    ap.add_argument("--pool-subdir", default="")
     args = ap.parse_args(argv)
 
     if not args.pool.is_dir():
         die(f"pool dir not found: {args.pool}")
     args.out.mkdir(parents=True, exist_ok=True)
     try:
-        return stage(args.pool, args.out, args.suite, args.gpg_key_file)
+        return stage(args.pool, args.out, args.suite, args.gpg_key_file, args.pool_subdir)
     except StageError as e:
         die(str(e))
 

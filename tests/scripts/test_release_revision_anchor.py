@@ -10,6 +10,7 @@ def _git(repo, *args):
 def test_get_commits_attributes_each_revision_not_current_head(tmp_path, monkeypatch):
     """A mailmap change after an older commit must not rewrite that commit's author."""
     from scripts import release
+    from scripts.releases import authors
 
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -35,7 +36,7 @@ def test_get_commits_attributes_each_revision_not_current_head(tmp_path, monkeyp
     monkeypatch.setattr(release, "REPO_ROOT", repo)
     assert _git(repo, "show", "-s", "--format=%aN", payload_sha) == "Mapped Person"
     assert _git(repo, "show", "-s", "--use-mailmap", "--format=%aN", payload_sha) == "Mapped Person"
-    monkeypatch.setitem(release.AUTHOR_MAP, "test@example.com", "test-user")
+    monkeypatch.setitem(authors.AUTHOR_MAP, "test@example.com", "test-user")
     commits = release.get_commits(since_tag="base")
     payload = next(commit for commit in commits if commit["sha"] == payload_sha)
     assert payload["author_name"] == "Test"

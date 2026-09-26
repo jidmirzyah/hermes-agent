@@ -132,7 +132,7 @@ console.log("[prebuild] generating icon assets…");
 {
   const r = spawnSync("node", [iconGenScript, "--source", repoRoot, "--out", repoRoot], { stdio: "inherit", cwd: repoRoot });
   if (r.status !== 0) {
-    console.error("[prebuild] icon generation failed — see the isolated icon-build runner output above");
+    console.error("[prebuild] icon generation failed — it needs a Hermes runtime Python (HERMES_PYTHON); see the output above");
     process.exit(1);
   }
 }

@@ -241,7 +241,9 @@ export class ChannelResolver {
         throw new Error('Protected release version mismatch')
       }
 
-      prefixes.push(`releases/tag/${request.releaseTag}/`)
+      // The archive prefix is the attempt ref when the request names one; a
+      // bare releaseTag fallback never holds attempt artifacts (fail closed).
+      prefixes.push(`releases/tag/${request.archiveRef ?? request.releaseTag}/`)
     }
 
     for (const entry of manifest.packages) {

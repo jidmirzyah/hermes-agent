@@ -150,8 +150,11 @@ The installer adds `~/.local/bin` to your PATH. If you use a non-standard shell 
 
 #### Unsupported Python version
 
-Hermes requires **Python 3.14** (`>=3.14,<3.15`), not an arbitrary newer version.
-The installer and packaged distributions provide their pinned interpreter.
+Current first-party installations require **Python 3.14**, not an arbitrary
+newer version. The `>=3.11,<3.15` range in `pyproject.toml` allows older
+installations to run the updater before switching to 3.14; it does not mean
+the current runtime supports 3.11–3.13. The installer and packaged
+distributions provide their pinned interpreter.
 
 For a manual source environment, use the
 [development setup](../developer-guide/contributing.md#development-setup).

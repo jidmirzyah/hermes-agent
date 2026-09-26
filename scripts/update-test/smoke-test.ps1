@@ -234,7 +234,7 @@ try {
   # Both trees as they are right now: post is checked against this for exactness.
   $homeBefore = Get-TreeListing $H
   $userDataBefore = Get-TreeListing $env:HERMES_DESKTOP_USER_DATA_DIR
-  $r = Invoke-Rehearsal -Arguments @('pre', '-Source', $Install, '-Ref', 'main', '-BackupRoot', $Backups)
+  $r = Invoke-Rehearsal -Arguments @('pre', '-Source', $Install, '-BackupRoot', $Backups)
   Check 'pre exits 0' ($r.Code -eq 0)
   $Snap = (Get-ChildItem -LiteralPath $Backups -Directory | Sort-Object Name)[-1].FullName
   foreach ($f in @('hermes-backup.zip', 'shadows.txt', 'manifest.json', 'hermes-home.txt', 'target-sha')) {
@@ -246,13 +246,11 @@ try {
   Check 'shadow storage cap on C: is at least 128 GB while the snapshot lives' ((Get-ShadowCapC) -ge [UInt64]128GB)
 
   Write-Host "`n--- pre points the install at the rehearsal copy ---"
-  $served = (& git -C (Join-Path $Snap 'serve.git') rev-parse refs/heads/main | Out-String).Trim()
-  Check 'serve.git main is the custom ref' ($served -eq $HeadSha)
   $cfg = (& git -C $Install config --local --get-regexp 'insteadOf' 2>$null | Out-String)
   Check 'two insteadOf entries written (repo-local)' ((([regex]::Matches($cfg, 'insteadOf', 'IgnoreCase')).Count) -eq 2)
   Check 'upstream-prompt marker created' (Test-Path -LiteralPath (Join-Path $H '.skip_upstream_prompt'))
   $getUrl = (& git -C $Install remote get-url origin | Out-String).Trim()
-  Check 'remote get-url resolves to the rehearsal copy' ($getUrl -match 'serve\.git')
+  Check 'remote get-url resolves to -Source' ($getUrl -eq $Install)
   $configured = (& git -C $Install config --get remote.origin.url | Out-String).Trim()
   Check 'config --get remote.origin.url stays official' ($configured -match 'NousResearch')
 

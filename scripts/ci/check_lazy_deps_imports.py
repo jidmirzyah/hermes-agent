@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Fail when tracked production code imports the deleted tools.lazy_deps module.
+"""Fail when tracked production code imports the tools.lazy_deps stub.
 
-``tools/lazy_deps.py`` was deleted by the pm migration; pm.extras
-(available / ensure_import / ensure_and_bind) is the only lazy-install
-surface. Any remaining import of it is an ImportError at call time, so
-this guard blocks the migration from silently re-opening.
+``tools/lazy_deps.py`` survives only as an old-updater stub that raises or
+stops for relaunch; pm.extras (available / ensure_import / ensure_and_bind)
+is the only lazy-install surface. A production import of the stub never
+gets its dependencies, so this guard blocks the migration from silently
+re-opening.
 
 - **Tracked inventory.** The file list comes from ``git ls-files``, so
   ignored worktree/build debris is never walked. The check never passes
@@ -19,8 +20,8 @@ this guard blocks the migration from silently re-opening.
 - **Errors are failures.** A tracked file that cannot be read, decoded,
   or parsed is reported and fails the run (exit 2), not skipped.
 
-tests/ files are out of scope: tests may reference the deleted module to
-assert it is gone.
+tests/ files are out of scope: tests may reference the stub module to
+assert its behaviour.
 
 Exit codes: 0 = clean, 1 = offenders found (exact ``path:line`` sites on
 stdout), 2 = inventory/analysis error.
@@ -40,7 +41,7 @@ import subprocess
 import sys
 from pathlib import Path, PurePosixPath
 
-_DELETED_MODULE = "tools.lazy_deps"
+_STUB_MODULE = "tools.lazy_deps"
 _DELETED_PARENT = "tools"
 
 
@@ -82,7 +83,7 @@ def _relative_target(relpath: str, node: ast.ImportFrom) -> str | None:
 
     ``level`` 1 is the file's own package; each further level climbs one
     package. Returns None when the import escapes the repo root (never a
-    real module, so never the deleted one).
+    real module, so never the stub).
     """
     parts = PurePosixPath(relpath).with_suffix("").parts[:-1]
     up = node.level - 1
@@ -99,19 +100,19 @@ def _import_sites(tree: ast.AST, relpath: str) -> list[str]:
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                if alias.name == _DELETED_MODULE or alias.name.startswith(
-                    _DELETED_MODULE + "."
+                if alias.name == _STUB_MODULE or alias.name.startswith(
+                    _STUB_MODULE + "."
                 ):
                     sites.append(
-                        f"{relpath}:{node.lineno}: import of deleted module "
+                        f"{relpath}:{node.lineno}: import of stub module "
                         f"'{alias.name}'"
                     )
         elif isinstance(node, ast.ImportFrom):
             names = ", ".join(a.name for a in node.names)
             kind: str | None = None
             if node.level == 0:
-                if node.module == _DELETED_MODULE or (
-                    node.module and node.module.startswith(_DELETED_MODULE + ".")
+                if node.module == _STUB_MODULE or (
+                    node.module and node.module.startswith(_STUB_MODULE + ".")
                 ):
                     kind = f"'{node.module} ({names})'"
                 elif node.module == _DELETED_PARENT and any(
@@ -124,13 +125,13 @@ def _import_sites(tree: ast.AST, relpath: str) -> list[str]:
                     a.name == "lazy_deps" for a in node.names
                 ):
                     kind = f"'{resolved} ({names})' (relative)"
-                elif resolved == _DELETED_MODULE or (
-                    resolved and resolved.startswith(_DELETED_MODULE + ".")
+                elif resolved == _STUB_MODULE or (
+                    resolved and resolved.startswith(_STUB_MODULE + ".")
                 ):
                     kind = f"'{resolved} ({names})' (relative)"
             if kind is not None:
                 sites.append(
-                    f"{relpath}:{node.lineno}: from-import of deleted module {kind}"
+                    f"{relpath}:{node.lineno}: from-import of stub module {kind}"
                 )
     return sites
 
@@ -166,8 +167,8 @@ def main(argv: list[str]) -> int:
         for site in sorted(offenders):
             print(site)
         print(
-            f"{len(offenders)} import(s) of '{_DELETED_MODULE}' (deleted module — "
-            "ImportError at call time). Migrate to pm.extras "
+            f"{len(offenders)} import(s) of '{_STUB_MODULE}' (old-updater stub — "
+            "it never provides dependencies). Migrate to pm.extras "
             "(available / ensure_import / ensure_and_bind).",
             file=sys.stderr,
         )

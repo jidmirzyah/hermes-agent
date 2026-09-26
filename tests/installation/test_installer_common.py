@@ -27,7 +27,9 @@ def test_redirect_and_historical_installer_keep_transport_flags_and_exit(tmp_pat
     git("add", ".")
     git("commit", "-qm", "old")
     old = git("rev-parse", "HEAD")
-    script.write_text('# --skip-browser --include-desktop\n' + script.read_text(encoding="utf-8"), encoding="utf-8")
+    source_body = script.read_text(encoding="utf-8")
+    script.write_text('case "$1" in --help) printf "%s\\n" "--skip-browser --include-desktop"; exit 0;; esac\n'
+                      '# --skip-browser --include-desktop\n' + source_body, encoding="utf-8")
     git("commit", "-qam", "new")
     new = git("rev-parse", "HEAD")
     subprocess.run(["git", "clone", "--bare", "-q", str(repo), str(serve)], env=env, check=True)
@@ -57,6 +59,18 @@ run_source_installer "$2" "$3" "$3" "$6" new desktop
     refused = run('run_source_installer "$2" "$3" "$3" "$5" unavailable desktop')
     assert refused.returncode != 0 and "does not support --include-desktop" in refused.stderr
     assert not (work / "install-unavailable.log").exists()
+    script.write_text('case "$1" in\n'
+                      '  --help) printf "%s\\n" "--include-desktop"; exit 0;;\n'
+                      '  --skip-browser) exit 23;;\n'
+                      'esac\n'
+                      '# --skip-browser no longer skips browser installation; --include-desktop stays supported\n'
+                      + source_body, encoding="utf-8")
+    git("commit", "-qam", "reject retired browser flag")
+    current = run('run_source_installer "$2" "$3" "$3" HEAD current desktop')
+    assert current.returncode == 0, current.stderr
+    assert (work / "install-current.log").read_text(encoding="utf-8").splitlines() == [
+        "--skip-setup", "--include-desktop",
+    ]
     script.write_text("exit 23\n", encoding="utf-8")
     git("commit", "-qam", "failed installer")
     failed = run('run_source_installer "$2" "$3" "$3" HEAD broken')

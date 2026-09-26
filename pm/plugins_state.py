@@ -7,6 +7,9 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Optional
+import logging
+
+LOG = logging.getLogger(__name__)
 
 
 def _profiles_root() -> Path:
@@ -112,7 +115,9 @@ def dependency_homes() -> list[Path]:
     return homes
 
 
-def enabled_plugins_ordered(*, proposed_home=None, enabled=None, disabled=None, installing: Path | None = None) -> dict[Path, list[str]]:
+def enabled_plugins_ordered(*, proposed_home=None, enabled=None, disabled=None,
+                            installing: Path | None = None,
+                            skip_invalid_secondary: bool = False) -> dict[Path, list[str]]:
     """plugins_dir → ordered enabled list, per home. Keyed by the
     PLUGINS DIR (where the member dirs live), not the home itself.
 
@@ -122,9 +127,16 @@ def enabled_plugins_ordered(*, proposed_home=None, enabled=None, disabled=None, 
     the union. Admission refuses a conflicting candidate without changing
     the active environment or disabling an existing provider."""
     out: dict[Path, list[str]] = {}
-    for home in dependency_homes():
+    homes = dependency_homes()
+    for home in homes:
         # ONE parse per home feeds both queries (enabled + provider).
-        config = read_home_selection(home)
+        try:
+            config = read_home_selection(home)
+        except ValueError as exc:
+            if not skip_invalid_secondary or home == homes[0]:
+                raise
+            LOG.warning("Skipping broken secondary profile %s during dependency verification: %s", home, exc)
+            continue
         config = config or {}
         if proposed_home is not None and home.resolve() == Path(proposed_home).resolve():
             config = {**config, "plugins": {"enabled": list(enabled or ()), "disabled": list(disabled or ())}}

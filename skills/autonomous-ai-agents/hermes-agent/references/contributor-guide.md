@@ -103,7 +103,8 @@ scripts/run_tests.sh -v --tb=long             # pass-through pytest flags
 - The runner probes repository `.venv`, `venv`, and the standard source-install
   venv before falling back to `HERMES_PYTHON`. Each candidate must contain pytest.
 - **Windows:** run the same wrapper through Git Bash. See `references/windows-quirks.md`.
-- After dependency changes, run `python -m pm.build_env --source . --lock-only`.
+- After editing `pyproject.toml`, run `hermes pm lock`, re-source `./activate`, and
+  commit `pyproject.toml` with `uv.lock`.
   Do not mutate Hermes environments with raw pip or uv commands.
 
 Host-specific tests run on the real host. Use one `@pytest.mark.platforms(...)`

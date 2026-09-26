@@ -47,9 +47,9 @@ byte-compare against.
 Rendering: resvg (resvg-py) for SVG -> PNG fidelity at every size.
 Containers: Pillow for multi-size .ico and .icns.
 
-Build dependencies:
-    The runner uses the locked icon-build group in an isolated environment.
-    resvg-py is not a runtime extra and does not enter production payloads.
+Dependencies:
+    Pillow and resvg-py are core runtime dependencies; run this file with a
+    Hermes runtime interpreter (scripts/generate-icons.mjs uses HERMES_PYTHON).
 
 Outputs (30 files):
   assets/icon-master.svg                              generated light master
@@ -102,13 +102,13 @@ try:
     import resvg_py
 except ImportError:
     sys.exit(
-        "resvg-py is build-only. Run the isolated generator with:\n"
-        "  node scripts/generate-icons.mjs"
+        "resvg-py is missing: run the generator with a Hermes runtime interpreter\n"
+        "  (HERMES_PYTHON=<hermes venv python> node scripts/generate-icons.mjs)"
     )
 
-# Copy of hermes_cli.update_channel._CANARY_TAG_RE: this renderer runs in an
-# isolated icon-build venv (Nix, Docker, PM) where the application package is
-# absent. tests/scripts/test_icon_flavors.py pins it to the canonical one.
+# Copy of hermes_cli.update_channel._CANARY_TAG_RE: builders run this renderer
+# on the runtime dependencies without the application package installed
+# (Docker, bundles). tests/scripts/test_icon_flavors.py pins it to the canonical one.
 _CANARY_TAG_RE = re.compile(
     r"^v(?:0|[1-9]\d{0,2})\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)"
     r"\+canary\.20\d{6}T\d{6}Z$"

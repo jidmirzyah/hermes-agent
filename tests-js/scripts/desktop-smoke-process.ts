@@ -37,7 +37,11 @@ function psEnvValue(environment: string, name: string): string | undefined {
 
 /** Call only after binding the live listener (and bundled resources) to root. */
 export function readInstallationCommit(root: string, origin: 'source' | 'bundled'): string {
-  const commit = origin === 'source' ? nativeText('git', ['-C', root, 'rev-parse', 'HEAD'])
+  // The install drivers export their real git: a fresh-machine leg takes every
+  // git off PATH so the product must provision its own, which this observer
+  // must not depend on.
+  const git: string = process.env.HERMES_E2E_REAL_GIT || 'git'
+  const commit = origin === 'source' ? nativeText(git, ['-C', root, 'rev-parse', 'HEAD'])
     : z.object({ payload: z.literal('bundled'), commit: z.string() }).parse(
       JSON.parse(fs.readFileSync(path.join(root, '..', 'install-stamp.json'), 'utf8')),
     ).commit

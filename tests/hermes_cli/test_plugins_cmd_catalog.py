@@ -47,19 +47,17 @@ def world(client, tmp_path, monkeypatch):
     monkeypatch.setattr(pc, "_scan_on_install_enabled", lambda: False)
     monkeypatch.setattr(pc, "_console", lambda: type("C", (), {"print": lambda *a, **k: None})())
 
-    def publish_without_environment(
-        *_args, staged_plugin=None, selection=None, **_kwargs
-    ):
+    def publish_without_environment(*_args, plugins=None, **_kwargs):
         from hermes_cli.runtime_state import finish_publication
         from pm import paths
+        from pm.plugin_inputs import Selection, StagedUpdate
         from pm.publication import PluginSelection, StagedPlugin
 
-        assert (staged_plugin is None) != (selection is None)
-        if staged_plugin is not None:
-            change = StagedPlugin(staged_plugin)
+        if isinstance(plugins, StagedUpdate):
+            change = StagedPlugin(dict(plugins.data))
         else:
-            assert selection is not None
-            change = PluginSelection(selection)
+            assert isinstance(plugins, Selection)
+            change = PluginSelection(dict(plugins.data))
         change.publish(paths.repo_root())
         finish_publication(paths.repo_root())
 

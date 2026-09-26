@@ -19,6 +19,7 @@ import struct
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -326,9 +327,8 @@ def test_build_only_fails_when_pack_produces_corrupt_exe(tmp_path, monkeypatch, 
     make_pe(live_exe, PE_AMD64)  # the previous, working app
     live_bytes = live_exe.read_bytes()
 
-    install_ok = subprocess.CompletedProcess(["npm", "ci"], 0)
-
     def pack_into_staging(cmd, *args, **kwargs):
+        assert kwargs["env"]["PATH"].startswith("C:\\pm-pinned-git\\cmd;")
         if cmd[1:3] != ["run", "builder"]:
             return subprocess.CompletedProcess(list(cmd), 0)
         # electron-builder honours -c.directories.output=<staging>; emulate a
@@ -339,9 +339,14 @@ def test_build_only_fails_when_pack_produces_corrupt_exe(tmp_path, monkeypatch, 
         make_pe(staging / "win-unpacked" / "Hermes.exe", PE_AMD64, truncate_to=0x300)
         return subprocess.CompletedProcess(list(cmd), 0)
 
+    def pinned_git(name, *, base_env):
+        assert name == "git"
+        return SimpleNamespace(env={**base_env, "PATH": "C:\\pm-pinned-git\\cmd;" + base_env["PATH"]})
+
     with patch("hermes_cli.main_desktop.shutil.which", return_value="/usr/bin/npm"), \
          patch("hermes_cli.source_build.source_build_env", return_value={"PATH": "/usr/bin"}), \
          patch("hermes_cli.source_build.prepare_source_dependencies"), \
+         patch("pm.ensure", side_effect=pinned_git), \
          patch("hermes_cli.main_desktop._desktop_build_needed", return_value=True), \
          patch("hermes_cli.main_desktop._stop_desktop_processes_locking_build", return_value=[]), \
          patch("hermes_cli.main_desktop._windows_native_machine", return_value="AMD64"), \

@@ -72,7 +72,7 @@
 # ============================================================================
 
 param(
-    [ValidateSet("stage", "install", "update", "all")]
+    [ValidateSet("stage", "install", "update", "verify-stamp", "all")]
     [string]$Phase = "all",
 
     # How OLD gets installed, named by the same ids the combination
@@ -100,7 +100,8 @@ param(
     [string]$InstallRef = "auto",
     # Update target ref (default HEAD). A stable-to-stable leg passes the
     # next release tag here; only label the leg stable-to-stable when BOTH
-    # refs are release tags.
+    # refs are release tags. NEXT mints a synthetic child of -InstallRef
+    # (the HEAD -> NEXT leg: install HEAD, update with HEAD's own updater).
     [string]$UpdateRef = "HEAD",
 
     # Repo checkout whose HEAD is the update target.
@@ -248,12 +249,29 @@ function Set-GitRedirect {
     # if we didn't do this, we'd need the  .skip_upstream_prompt file to prevent a hang in headless,"add the
     # official repo as upstream?" prompt would hang a headless run. But we don't anymore :D
 
-    $realGit = (Get-Command git.exe -ErrorAction Stop).Source
+    # The dispatch-time capture, not PATH: a fresh-machine leg has already
+    # stripped git from PATH by the time stage re-arms the redirect.
+    $realGit = $script:RealGitExe
         # Export the real git so later checks can observe the TRANSPORT url. Once
         # the shim below is on PATH, `git` reports the official origin for
         # `remote get-url origin` (so fork detection sees it); any check that must
         # see the file:// redirect instead has to bypass the shim via this path.
         $env:HERMES_E2E_REAL_GIT = $realGit
+
+    if ($script:FreshMachine) {
+        # A fresh Windows box has no git. install.ps1's Get-PinnedGit returns
+        # ANY git on PATH (the dev shortcut), so the runner's git -- or the
+        # shim below -- would skip pinned-git staging entirely. Take every
+        # git.exe directory off PATH and install no shim: the product must
+        # provision its own. The shim's one job (fork detection seeing the
+        # official origin) is covered by .skip_upstream_prompt, same as
+        # routes whose detached updater bypasses the shim.
+        $kept = @($env:PATH -split ';' | Where-Object { $_ -and -not (Test-Path -LiteralPath (Join-Path $_ 'git.exe')) })
+        $env:PATH = $kept -join ';'
+        Assert-True (-not (Get-Command git -ErrorAction SilentlyContinue)) "fresh machine: no git resolvable on PATH"
+        Write-Host "  fresh machine: git removed from PATH, no remote get-url shim"
+        return
+    }
         $shimDir = Join-Path $WorkRoot "shim"
     New-Item -ItemType Directory -Path $shimDir -Force | Out-Null
     $shimPath = Join-Path $shimDir "git.bat"
@@ -428,9 +446,10 @@ function Invoke-RefInstaller {
     $script = Join-Path $WorkRoot "install-$Label.ps1"
     (Invoke-Git @("-C", $RepoRoot, "show", "$Ref`:scripts/install.ps1")) -join "`n" |
         Set-Content -LiteralPath $script -Encoding UTF8
-    $flags = @("-SkipSetup", "-HermesHome", $HermesHome, "-InstallDir", $InstallDir)
+    $flags = @("-HermesHome", $HermesHome, "-InstallDir", $InstallDir)
     $text = Get-Content -LiteralPath $script -Raw
     if ($text -match '\$NonInteractive') { $flags += "-NonInteractive" }
+    else { $flags += "-SkipSetup" }
     if ($IncludeDesktop) {
         # The desktop stage is the point of this leg: a ref without the
         # parameter is a hard failure, not a silent plain install.
@@ -502,6 +521,37 @@ function Invoke-ManualCardUpdate([string]$ReceiptPath, [string]$TargetSha) {
     Assert-True ($null -ne (Get-DesktopExe)) "Hermes.exe still present after manual update"
 }
 
+function Clear-HistoricalInstallerChurn {
+    # The GUI driver refuses a dirty source tree. v2026.7.1's installer leaves
+    # its own state there: `npm install` rewrites package-lock.json on Windows
+    # (later installers use `npm ci`, #112378) and v2026.6.19-era installers
+    # write an unignored .install_method. Undo only that installer-generated
+    # state in this disposable clone; any other change still fails, listed.
+    # porcelain=v2: Invoke-Git trims output, which would eat v1's leading " M".
+    $lines = @((Invoke-Git @("-C", $InstallDir, "status", "--porcelain=v2", "--untracked-files=all")) -split "\r?\n" |
+        Where-Object { $_ })
+    if ($lines.Count -eq 0) { return }
+    Write-Host "  source status before GUI update:"
+    $lines | ForEach-Object { Write-Host "    $_" }
+    $locks = @(); $other = @()
+    foreach ($line in $lines) {
+        $fields = $line -split " ", 9
+        if ($fields[0] -eq "1" -and $fields[1] -eq ".M" -and $fields.Count -eq 9 -and
+            ($fields[8] -eq "package-lock.json" -or $fields[8] -like "*/package-lock.json")) {
+            $locks += $fields[8]
+        } elseif ($line -eq "? .install_method") {
+            Add-Content -LiteralPath (Join-Path $InstallDir ".git\info\exclude") -Value "/.install_method"
+        } else {
+            $other += $line
+        }
+    }
+    Assert-True ($other.Count -eq 0) "installed source has only installer-generated changes (other: $($other -join '; '))"
+    if ($locks.Count) { Invoke-Git (@("-C", $InstallDir, "checkout", "--") + $locks) | Out-Null }
+    $left = @((Invoke-Git @("-C", $InstallDir, "status", "--porcelain", "--untracked-files=all")) -split "\r?\n" |
+        Where-Object { $_ })
+    Assert-True ($left.Count -eq 0) "undid only installer-generated source churn before the GUI update"
+}
+
 function Invoke-HermesDesktopAppUpdate([string]$TargetSha) {
     # The hermes-desktop launch surface: `hermes desktop` runs its whole
     # real pipeline; the driver intercepts the product's final spawn
@@ -531,6 +581,7 @@ function Invoke-HermesDesktopAppUpdate([string]$TargetSha) {
     Write-LogGroup "hermes desktop (launch capture) transcript" $log
     Assert-True ($capExit -eq 0) "hermes desktop exited 0 during launch capture"
     Assert-True (Test-Path -LiteralPath "$spec.captured") "a launch was actually captured (exit 0 without a launch must not pass)"
+    Clear-HistoricalInstallerChurn
 
     $node = $DriverNode
     $chatOut = Join-Path $ProofRoot 'update-window'
@@ -570,6 +621,48 @@ function Invoke-HermesDesktopAppUpdate([string]$TargetSha) {
     Assert-True ($windows.Count -eq 1) "updated desktop relaunched exactly one verified window"
     $script:ChatFailure = $true
     Close-VerifiedDesktop $desktopExe $windows[0].Id
+}
+
+# Evidence for a GUI-driver failure, taken while the installer is still alive: which Hermes
+# processes exist (was Hermes.exe ever started, and by whom), the installer's thread states,
+# and a full memory dump of the installer. The installer's tracing log is buffered and never
+# reaches disk when the job kills it; the dump still holds it. A Launch that left the
+# installer on LAUNCHING had no other trace (tests/install/e2e-assets/install-and-launch.ahk).
+function Save-GuiDriverFailureEvidence([System.Diagnostics.Process]$Installer, [string]$OutDir) {
+    New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
+    Get-CimInstance Win32_Process |
+        Where-Object { $_.Name -match '^(hermes|msedgewebview2|python|uv|git|node)' -or $_.ParentProcessId -eq $Installer.Id } |
+        Sort-Object CreationDate |
+        Select-Object ProcessId, ParentProcessId, CreationDate, Name, CommandLine |
+        Format-Table -AutoSize -Wrap | Out-String -Width 400 |
+        Tee-Object -FilePath (Join-Path $OutDir "processes.txt") | Write-Host
+    if ($Installer.HasExited) {
+        Write-Host "  Hermes-Setup.exe already exited (code $($Installer.ExitCode) at $($Installer.ExitTime))"
+        return
+    }
+    $Installer.Refresh()
+    $Installer.Threads |
+        Select-Object Id, ThreadState, WaitReason, StartTime, TotalProcessorTime |
+        Format-Table -AutoSize | Out-String -Width 200 |
+        Tee-Object -FilePath (Join-Path $OutDir "installer-threads.txt") | Write-Host
+    if (-not ('HdE2E.Dump' -as [type])) {
+        Add-Type -Namespace HdE2E -Name Dump -MemberDefinition @'
+[DllImport("dbghelp.dll", SetLastError = true)]
+public static extern bool MiniDumpWriteDump(IntPtr hProcess, uint processId, Microsoft.Win32.SafeHandles.SafeFileHandle hFile, uint dumpType, IntPtr exceptionParam, IntPtr userStreamParam, IntPtr callbackParam);
+'@
+    }
+    $dumpPath = Join-Path $OutDir "Hermes-Setup.dmp"
+    $file = [System.IO.File]::Create($dumpPath)
+    try {
+        # MiniDumpWithFullMemory | MiniDumpWithHandleData | MiniDumpWithThreadInfo
+        $ok = [HdE2E.Dump]::MiniDumpWriteDump($Installer.Handle, [uint32]$Installer.Id, $file.SafeFileHandle, 0x1006, [IntPtr]::Zero, [IntPtr]::Zero, [IntPtr]::Zero)
+        $err = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
+    }
+    finally {
+        $file.Close()
+    }
+    if ($ok) { Write-Host "  Hermes-Setup.exe dump: $dumpPath ($([math]::Round((Get-Item $dumpPath).Length / 1MB, 1)) MB)" }
+    else { Write-Host "  Hermes-Setup.exe dump failed (Win32 error $err)" }
 }
 
 function Save-DesktopScreenshot([string]$OutFile) {
@@ -640,6 +733,34 @@ function Stop-HermesAppProcesses([string]$Label) {
 # ----------------------------------------------------------------------------
 # Phase: stage -- serve.git with `main` at OLD (advanced to HEAD by update-gui)
 # ----------------------------------------------------------------------------
+# Mirror of resolve_update_ref's NEXT arm in e2e-assets/installer-common.sh:
+# a synthetic child of $Parent whose tree adds one marker file (a real diff,
+# not an empty fast-forward), written to the object store only -- no ref, no
+# worktree change. A local `clone --bare` copies objects/ wholesale, which is
+# how it reaches serve.git. A throwaway index stands in for mktree so no
+# NUL-delimited stdin has to cross PowerShell's native pipe.
+function New-NextCommit([string]$Repo, [string]$Parent) {
+    $marker = Join-Path $WorkRoot "next-marker.txt"
+    Set-Content -LiteralPath $marker -Encoding ASCII -Value "synthetic next commit for the HEAD -> NEXT install E2E leg"
+    $blob = Invoke-Git @("-C", $Repo, "hash-object", "-w", "--no-filters", $marker)
+    $saved = @{}
+    $vars = @{
+        GIT_INDEX_FILE = (Join-Path $WorkRoot "next.index")
+        GIT_AUTHOR_NAME = "Hermes E2E"; GIT_AUTHOR_EMAIL = "e2e@hermes.invalid"
+        GIT_COMMITTER_NAME = "Hermes E2E"; GIT_COMMITTER_EMAIL = "e2e@hermes.invalid"
+    }
+    foreach ($k in $vars.Keys) { $saved[$k] = [Environment]::GetEnvironmentVariable($k); [Environment]::SetEnvironmentVariable($k, $vars[$k]) }
+    try {
+        Invoke-Git @("-C", $Repo, "read-tree", $Parent) | Out-Null
+        Invoke-Git @("-C", $Repo, "update-index", "--add", "--cacheinfo", "100644,$blob,.hermes-e2e-next") | Out-Null
+        $tree = Invoke-Git @("-C", $Repo, "write-tree")
+        return Invoke-Git @("-C", $Repo, "commit-tree", $tree, "-p", $Parent, "-m", "e2e: synthetic next commit")
+    } finally {
+        foreach ($k in $vars.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k]) }
+        Remove-Item -LiteralPath $vars.GIT_INDEX_FILE -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Invoke-PhaseStage {
     Write-Step "STAGE: bare serve repo, main -> OLD (install base)"
 
@@ -651,10 +772,6 @@ function Invoke-PhaseStage {
     # The purge above deleted the redirect gitconfig; re-arm it so the
     # bare-clone below (and everything after) sees the redirect file.
     Set-GitRedirect
-
-    $current = Invoke-Git @("-C", $RepoRoot, "rev-parse", "${UpdateRef}^{commit}")
-    $targetLabel = if ($UpdateRef -eq "HEAD") { "HEAD" } else { $UpdateRef }
-    Write-Host "  HEAD (update target): $current"
 
     # OLD: explicit -InstallRef, or the newest release tag -- the version a
     # user who installed on release day is on.
@@ -668,7 +785,13 @@ function Invoke-PhaseStage {
     }
     $old = Invoke-Git @("-C", $RepoRoot, "rev-parse", "$oldRef^{commit}")
     Write-Host "  OLD  ($oldRef): $old"
-    Assert-True ($old -ne $current) "OLD differs from HEAD (an update is genuinely available)"
+    # NEXT is minted before the clone so it rides along into serve.git.
+    $targetLabel = $UpdateRef
+    $current = if ($UpdateRef -eq "NEXT") { New-NextCommit $RepoRoot $old } else {
+        Invoke-Git @("-C", $RepoRoot, "rev-parse", "${UpdateRef}^{commit}")
+    }
+    Write-Host "  update target ($targetLabel): $current"
+    Assert-True ($old -ne $current) "OLD differs from $targetLabel (an update is genuinely available)"
 
     # Bare-clone the checkout: this is the repo the installer and updater
     # actually talk to. Local-path clone hardlinks objects, so it's fast
@@ -677,6 +800,7 @@ function Invoke-PhaseStage {
     # serves, so staging OLD means parking `main` there; the update phase
     # advances it to HEAD.
     Invoke-Git @("clone", "--bare", "--quiet", $RepoRoot, $ServeRepo) | Out-Null
+    Invoke-Git @("-C", $ServeRepo, "cat-file", "-e", "$current^{commit}") | Out-Null
     Invoke-Git @("-C", $ServeRepo, "update-ref", "refs/heads/main", $old) | Out-Null
     Invoke-Git @("-C", $ServeRepo, "symbolic-ref", "HEAD", "refs/heads/main") | Out-Null
 
@@ -793,6 +917,11 @@ function Invoke-PhaseInstallGui {
         }
         if (Test-Path -LiteralPath $ahkLog) {
             Get-Content -LiteralPath $ahkLog | ForEach-Object { Write-Host "  ahk| $_" }
+        }
+        if ($ahk.ExitCode -ne 0) {
+            # Evidence must not replace the driver's own failure below.
+            try { Save-GuiDriverFailureEvidence $installer (Join-Path $proof "driver-failure") }
+            catch { Write-Host "  evidence capture failed: $_" }
         }
         Assert-True ($ahk.ExitCode -eq 0) "AutoHotkey driver exited 0 (Install clicked, Launch clicked, app window seen)"
 
@@ -1351,12 +1480,12 @@ function Invoke-PhaseUpdate {
             if (Test-Path -LiteralPath $bootLog) {
                 Move-Item -LiteralPath $bootLog -Destination "$bootLog.install-phase" -Force
             }
-            Invoke-PhaseInstallGui -Mode "update" -ExpectedSha $state.current -ExpectedLabel "HEAD"
+            Invoke-PhaseInstallGui -Mode "update" -ExpectedSha $state.current -ExpectedLabel $state.target_label
             Assert-DesktopArtifact "HEAD"
         }
     }
 
-    Assert-True ((Get-InstalledHead) -eq $state.current) "checkout landed on HEAD"
+    Assert-True ((Get-InstalledHead) -eq $state.current) "checkout landed on $($state.target_label)"
     Test-HermesRuns "post-update"
     Assert-UserShims
     Invoke-PreserveVerify
@@ -1420,6 +1549,9 @@ Write-Host "  repo:     $RepoRoot"
 Write-Host "  workroot: $WorkRoot"
 
 $script:RealGitExe = (Get-Command git.exe -ErrorAction Stop).Source
+# The HEAD start is the fresh-machine leg: HEAD's installer on a box with
+# nothing on it, git included (see Set-GitRedirect).
+$script:FreshMachine = ($InstallRef -eq "HEAD")
 
 Set-GitRedirect
 

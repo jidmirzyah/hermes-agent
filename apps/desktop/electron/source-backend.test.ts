@@ -183,8 +183,9 @@ test.skipIf(process.platform === 'win32')(
           assert.ok(source)
           assert.equal(source.command, fixture.python)
           assert.match(
+            // The real spawn runs in the user's workspace, never the checkout.
             execFileSync(source.command, source.args, {
-              cwd: source.root,
+              cwd: temp,
               env: { ...env, ...source.env },
               encoding: 'utf8',
               timeout: 15_000
@@ -224,7 +225,7 @@ test('Windows console selection uses only the selected interpreter directory', (
     fs.writeFileSync(consolePython, '')
     const backend: SourceBackend | null = createSourcePythonBackend(root, selected, ['serve'], { isWindows: true })
     assert.equal(backend?.command, consolePython)
-    assert.equal(backend?.env.PYTHONPATH, '')
+    assert.equal(backend?.env.PYTHONPATH, root)
     assert.equal(backend?.env.PYTHONHOME, '')
     assert.equal(createSourcePythonBackend(root, selected, [], { isWindows: false })?.command, selected)
     assert.equal(createSourcePythonBackend(root, null, []), null)

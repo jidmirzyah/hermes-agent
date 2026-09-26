@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { DesktopUpdateStatus, DesktopVersionInfo, HermesConnection } from '@/global'
 import { en } from '@/i18n/en'
+import type * as SessionStore from '@/store/session'
 import { $connection } from '@/store/session'
 import {
   $backendUpdateStatus,
@@ -17,10 +18,11 @@ import {
 
 import { AboutSettings } from './about-settings'
 
-vi.mock('@/store/session', async (): Promise<Record<string, unknown>> => {
+vi.mock('@/store/session', async (importOriginal): Promise<Record<string, unknown>> => {
+  const actual = await importOriginal<typeof SessionStore>()
   const { atom } = await import('nanostores')
 
-  return { $connection: atom<HermesConnection | null>(null) }
+  return { ...actual, $connection: atom<HermesConnection | null>(null) }
 })
 
 vi.mock('@/store/updates', async (): Promise<Record<string, unknown>> => {

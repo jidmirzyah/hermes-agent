@@ -31,8 +31,9 @@ The bundled payload contains:
 - Generated CLI launchers from the archived project's script declarations.
 
 `pm/lock.json` owns managed-tool pins. `pyproject.toml` and `uv.lock` own Python
-requirements. Native staging uses `--all-extras`, subject to platform markers.
-This is broader than the source installer's extra named `all`.
+requirements. Native staging uses `--all-extras`, subject to platform markers,
+minus the extras `[tool.hermes] opt-in-extras` names (installed only when the
+user selects them). This is broader than the source installer's extra named `all`.
 
 The backend runs from app resources. Launchers execute the store interpreter
 with the source and dependency paths; they do not boot through a relocated
@@ -184,8 +185,11 @@ runtime overrides; `--bundle-env HERMES_HOME=` is a default, not a forced clear.
 
 For local commit builds, `HERMES_BUNDLE_ENV_JSON` accepts a JSON object whose
 string values are defaults and whose `null` values are explicit clears. For example,
-`{"HERMES_HOME":null,"HERMES_DATA_DIR_SUFFIX":"magic-test"}`. These settings are
-not applied to the build runner itself.
+`{"HERMES_HOME":null,"HERMES_DATA_DIR_SUFFIX":"magic-test"}`. Only
+`HERMES_HOME`, `HERMES_DATA_DIR_SUFFIX`, `HERMES_DESKTOP_USER_DATA_DIR`,
+`HERMES_SHARED_AUTH_DIR`, `HERMES_GUEST_ONBOARDING`, and `HERMES_SKIP_INTRO`
+are accepted. Process-control variables such as `NODE_OPTIONS` and `PATH`
+are rejected. These settings are not applied to the build runner itself.
 Commit archive keys still use the SHA, so use a fresh commit for different
 defaults: an existing artifact is never overwritten with different bytes.
 
@@ -339,9 +343,9 @@ For an ordinary package of that desktop build, use the workspace's
 replace the complete tagged build described above.
 
 Icons are generated from `assets/nous-girl-*.svg` and `assets/backgrounds/`.
-`node scripts/generate-icons.mjs` uses the locked, isolated `icon-build` group.
-Generated PNG/ICO/ICNS files are not source assets. Build-only renderers do not
-belong in production payload dependencies.
+`node scripts/generate-icons.mjs` renders them with the Hermes runtime Python
+(`HERMES_PYTHON`, else `python` on PATH); Pillow and resvg-py are core
+dependencies. Generated PNG/ICO/ICNS files are not source assets.
 
 [Stable release admission](../../docs/stable-releases.md) requires the full
 pipeline, not just successful packaging. Native signed-package update tests

@@ -44,7 +44,7 @@ def test_setup_reads_pins_independent_of_indentation(tmp_path, served, indent, b
     (core / "pm" / "__init__.py").touch()
     (core / "pm" / "cli.py").write_text(
         "import json, pathlib, sys\n"
-        "assert sys.argv[1:] == ['install', '--trust-recorded'], sys.argv\n"
+        "assert sys.argv[1:] == ['install', '--test-environment', '--trust-recorded'], sys.argv\n"
         f"pathlib.Path({str(receipt)!r}).write_text(json.dumps(sys.argv[1:]))\n",
         encoding="utf-8",
     )
@@ -89,7 +89,7 @@ def test_setup_reads_pins_independent_of_indentation(tmp_path, served, indent, b
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert (runtime / f"uv-{uv_version}-{target}" / "uv").read_text() == uv_script
-    assert json.loads(receipt.read_text()) == ["install", "--trust-recorded"]
+    assert json.loads(receipt.read_text()) == ["install", "--test-environment", "--trust-recorded"]
     assert calls.read_text().splitlines() == [
         "--version", f"python install --no-bin --no-registry {py_version}",
         f"python find --managed-python {py_version}",

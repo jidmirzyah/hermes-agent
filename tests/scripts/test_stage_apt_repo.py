@@ -37,6 +37,67 @@ def no_gpg(monkeypatch):
     monkeypatch.setattr(stage_apt_repo.shutil, "which", lambda _: None)
 
 
+def _stage(pool: Path, out: Path, suite: str, pool_subdir: str = "") -> int:
+    args = ["--pool", str(pool), "--out", str(out), "--suite", suite]
+    if pool_subdir:
+        args += ["--pool-subdir", pool_subdir]
+    return stage_apt_repo.main(args)
+
+
+def _pool_keys(out: Path, suite: str) -> set:
+    text = (out / "dists" / suite / "main" / "binary-aarch64" / "Packages").read_text(encoding="utf-8")
+    return {
+        dict(line.split(": ", 1) for line in stanza.splitlines())["Filename"]
+        for stanza in text.strip().split("\n\n")
+    }
+
+
+def test_pool_subdir_is_in_the_path_and_the_index(tmp_path):
+    pool = tmp_path / "pool-in"
+    pool.mkdir()
+    make_deb(pool / "hermes-agent_0.21.5_aarch64.deb", "hermes-agent", "0.21.5-1")
+    out = tmp_path / "repo"
+    assert _stage(pool, out, "hermes-stable", pool_subdir="rc.2-v0.21.5") == 3
+    deb = out / "pool" / "rc.2-v0.21.5" / "h" / "hermes-agent_0.21.5_aarch64.deb"
+    assert deb.is_file()
+    assert _pool_keys(out, "hermes-stable") == {"pool/rc.2-v0.21.5/h/hermes-agent_0.21.5_aarch64.deb"}
+
+
+def test_no_pool_subdir_keeps_the_plain_layout(tmp_path):
+    pool = tmp_path / "pool-in"
+    pool.mkdir()
+    make_deb(pool / "hermes-agent_1.2.3_aarch64.deb", "hermes-agent", "1.2.3-1")
+    out = tmp_path / "repo"
+    assert _stage(pool, out, "hermes-canary") == 3
+    assert (out / "pool" / "h" / "hermes-agent_1.2.3_aarch64.deb").is_file()
+    assert _pool_keys(out, "hermes-canary") == {"pool/h/hermes-agent_1.2.3_aarch64.deb"}
+
+
+def test_two_attempts_of_one_version_use_different_pool_keys(tmp_path):
+    keys = set()
+    for attempt in ("rc.1-v0.21.5", "rc.2-v0.21.5"):
+        root = tmp_path / attempt
+        pool = root / "pool-in"
+        pool.mkdir(parents=True)
+        make_deb(pool / "hermes-agent_0.21.5_aarch64.deb", "hermes-agent", "0.21.5-1")
+        out = root / "repo"
+        assert _stage(pool, out, "hermes-stable", pool_subdir=attempt) == 3
+        keys |= {attempt} & {k.split("/")[1] for k in _pool_keys(out, "hermes-stable")}
+    assert keys == {"rc.1-v0.21.5", "rc.2-v0.21.5"}
+
+
+@pytest.mark.parametrize("subdir", ["../x", "v0.21.5", "rc.1-v0.21.5/x", ""])
+def test_pool_subdir_rejects_non_attempt_refs(tmp_path, subdir):
+    pool = tmp_path / "pool-in"
+    pool.mkdir()
+    make_deb(pool / "hermes-agent_1.2.3_aarch64.deb", "hermes-agent", "1.2.3-1")
+    if subdir:
+        with pytest.raises(SystemExit):
+            _stage(pool, tmp_path / "repo", "hermes-stable", pool_subdir=subdir)
+    else:
+        assert _stage(pool, tmp_path / "repo", "hermes-stable", pool_subdir=subdir) == 3
+
+
 def test_canary_versions_below_stable():
     versions = ["1.2.3-1", "1.2.3~canary.20260831120000-1", "1.2.4~canary.1-1", "1.2.4-1"]
     ordered = sorted(versions, key=stage_apt_repo.deb_version_key)

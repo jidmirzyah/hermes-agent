@@ -78,7 +78,9 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-pm
         with:
-          toolchain: node
+          toolchain: all
+          # tests-js generates real icons; the wrapper needs core Pillow/resvg.
+          extras: '[]'
           cache-node: false
       - name: Install the locked JS workspace
         run: npm ci --workspace ui-tui --workspace tests-js --include-workspace-root --include=dev --no-fund --no-audit

@@ -34,6 +34,17 @@ script-reinstall update uses the target revision's script. A `hermes-update`
 leg starts the old release's updater, and app-update legs start its app flow.
 These paths are intentionally different.
 
+### The HEAD -> NEXT column
+
+Every combination also runs from HEAD itself. The driver installs HEAD, then mints NEXT: a synthetic child of HEAD that adds one marker file (`.hermes-e2e-next`). NEXT exists only in the object store, with no ref, and the bare clone carries it into `serve.git`. The driver then moves `main` to NEXT and applies the update method.
+
+This column tests two things that no tag leg tests:
+
+- HEAD's installer on an empty machine. Tag legs run an old installer, or run HEAD's installer over an existing install.
+- HEAD's own updater. Tag legs start the old release's updater.
+
+On Windows, the HEAD leg also takes every `git.exe` directory off PATH and installs no `remote get-url` shim. `install.ps1` uses any git that it finds on PATH, so without this step pinned-git staging never runs. The driver's own git plumbing uses the git path that it captured before the strip. The drivers take NEXT as `--update-ref NEXT` (Windows: `-UpdateRef NEXT`). The run workflows take it as the `update-ref` input.
+
 ## What one leg does
 
 Each leg with the script drivers has these phases:
@@ -136,7 +147,7 @@ A leg can install a release from months back. The driver must not assume that th
 The desktop app has two launch paths, so the matrix has two app-update methods. Both click "Update now" in the running app. They differ in how the app starts:
 
 - `open-app-update`: the app starts from the installed app entry point. On Windows, both the desktop installer and `installer-script+desktop` create shortcuts, so both support this route. On Linux and macOS, the script's opt-in desktop stage builds inside the checkout without registering an OS entry point. The macOS route therefore requires a desktop-installer install; Linux has no open-app-update leg.
-- `hermes-desktop-app-update`: the app starts with the `hermes desktop` command. Every install method provides this command, on each OS that ships the desktop app. On linux this is the only app surface: no desktop installer and no packaged desktop artifact exist for linux. The driver captures the product's own launch call (argv, cwd, environment) with `e2e-assets/launch-capture/sitecustomize.py` and re-executes it under Playwright, which owns the app and clicks the update flow.
+- `hermes-desktop-app-update`: the app starts with the `hermes desktop` command. Every install method provides this command, on each OS that ships the desktop app. On linux this is the only app surface: no desktop installer and no packaged desktop artifact exist for linux. The driver captures the product's own launch call (argv, cwd, environment) with `e2e-assets/launch-capture/sitecustomize.py` and re-executes it under Playwright, which owns the app and clicks the update flow. Pre-PM console scripts load the capture hook via `PYTHONPATH`; PM launchers use `-I`, so `launch-capture/pm-launch.py` obtains the installed launcher's own isolated runtime command and loads the driver hook before its bootstrap.
 
 ## Skips
 
@@ -208,7 +219,7 @@ contract and not exercised.
   `-UpdateRef`), defaulting to HEAD. Pass the next release tag to target a
   stable→stable upgrade through the same serve.git staging; only label a leg
   stable-to-stable when BOTH the install ref and the target ref are release
-  tags. The workflow matrix itself is unchanged.
+  tags. `NEXT` is reserved for the HEAD -> NEXT column (see above).
 
 ## Manual update rehearsals
 

@@ -37,13 +37,13 @@ def test_collector_keeps_selected_leased_and_pre_lease_generations(tmp_path):
 
 
 def test_collector_yields_to_an_in_flight_stage(tmp_path):
-    from hermes_cli.runtime_state import _lock
+    from pm.filesystem import lock_fd
 
     root = tmp_path / "pm-runtime"
     aborted = _generation(root, "aborted", published=False)
     root.mkdir(exist_ok=True)
     with (root / ".prepare.lock").open("a+b") as lock:
-        assert _lock(lock.fileno(), wait=False)
+        assert lock_fd(lock.fileno(), wait=False)
         assert collect_runtime_generations(root) == []
     assert aborted.is_dir()
     assert collect_runtime_generations(root) == [aborted]

@@ -55,12 +55,12 @@ jobs:
 
       - name: Check SQLite runs WAL
         # Hermes picks DELETE journal mode on a SQLite with the WAL-reset
-        # bug. If this interpreter links one, every WAL test silently runs
-        # DELETE (or skips), so fail loudly instead. Tests that need DELETE
+        # bug. If the PM-pinned interpreter links one, every WAL test silently
+        # runs DELETE (or skips), so fail loudly instead. Tests that need DELETE
         # select it explicitly (journal_mode config, a pinned vulnerable
         # version), so they run on any interpreter.
         run: |
-          .venv/bin/python -c "import sqlite3, sys, hermes_state_wal as w; v = w.is_sqlite_wal_reset_vulnerable(); print(f'Python {sys.version.split()[0]}, SQLite {sqlite3.sqlite_version}, WAL-reset vulnerable: {v}'); sys.exit(1 if v else 0)"
+          "$HERMES_PYTHON" -c "import sqlite3, sys, hermes_state_wal as w; v = w.is_sqlite_wal_reset_vulnerable(); print(f'Python {sys.version.split()[0]}, SQLite {sqlite3.sqlite_version}, WAL-reset vulnerable: {v}'); sys.exit(1 if v else 0)"
 
       - name: Restore per-file duration cache
         # scripts/run_tests_parallel.py raises a file's timeout to
@@ -137,12 +137,20 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - name: Set up Node
-        # The boot-contract suite feeds serve's stdout through Desktop's own
-        # backend-ready.ts (native TS stripping needs Node >= 22.18).
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - name: Set up locked Python, Node and test dependencies
+        # toolchain: all puts PM's locked Node in the runner's PM store, not
+        # only on PATH. The E2E sandboxes copy node from that store
+        # (tests/e2e/core/_pm_dependencies.py) and forbid lazy installs, and
+        # the dashboard's /api/pty resolves the TUI's node through PM only.
+        # A setup-node binary on PATH is invisible to PM, so every /api/pty
+        # chat refused to start. The locked Node also satisfies the
+        # boot-contract suite (backend-ready.ts needs Node >= 22.18).
+        uses: ./.github/actions/setup-pm
         with:
-          node-version: 26
+          toolchain: all
+          extras: '["all", "anthropic", "bedrock", "mistral", "fal", "modal", "daytona", "hindsight", "parallel-web"]'
+          test-environment: 'true'
+          prune-python-cache: true
 
       - name: Install Node deps and build the Ink TUI
         # tests/e2e/core/terminal drives the real `hermes --tui` over a PTY;
@@ -189,6 +197,12 @@ jobs:
           mapfile -t files < <(find tests/e2e -name 'test_*.py' -not -path 'tests/e2e/core/upgrade/*' | sort)
           scripts/run_tests.sh --include-integration "${files[@]}"
         env:
+          # An e2e file is a process tree, not one CPU-bound pytest worker. With
+          # 32 files at once the hosted run starved live children before their
+          # ready frames (empty stderr, still alive) and hit 60–120s deadlines
+          # across unrelated SQLite, tenancy, provider and terminal suites.
+          # Bound the trees, not the child readiness/turn timeouts.
+          HERMES_TEST_WORKERS: "4"
           # Multi-process episodes (torture chamber, compaction kill -9,
           # gateway liveness, delivery exactly-once through a real gateway,
           # the cron virtual-clock soak) legitimately run past the 300 s default.
@@ -258,8 +272,8 @@ jobs:
             pyproject.toml
             uv.lock
 
-      - name: Set up Python 3.11
-        run: uv python install 3.11.15
+      - name: Set up Python 3.14
+        run: uv python install 3.14
 
       - name: Install dependencies
         # `uv sync --locked` installs the exact pinned set from uv.lock (and
@@ -273,7 +287,7 @@ jobs:
         # in the venv up front.
         uses: ./.github/actions/retry
         with:
-          command: uv sync --locked --python 3.11.15 --extra all --extra dev --extra anthropic --extra mistral --extra fal --extra modal --extra daytona --extra parallel-web
+          command: uv sync --locked --python 3.14 --extra all --group dev --extra anthropic --extra mistral --extra fal --extra modal --extra daytona --extra parallel-web
 
       - name: Install bubblewrap
         # Every spawned updater runs in bwrap (own PID namespace, no user

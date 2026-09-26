@@ -8,7 +8,8 @@ import subprocess
 import sys
 from threading import Thread
 
-from tools import checkpoint_manager as checkpoints
+import tools.checkpoint_manager as checkpoints
+from tools import checkpoint_maintenance
 
 
 def test_active_snapshot_owns_store_until_its_ref_is_published(tmp_path, monkeypatch):
@@ -45,9 +46,9 @@ assert c.CheckpointManager(enabled=True, max_total_size_mb=0).ensure_checkpoint(
     reader.start()
     try:
         assert ready.get(timeout=20).strip() == "tree-written"
-        result = checkpoints.prune_checkpoints(retention_days=0, checkpoint_base=base)
+        result = checkpoint_maintenance.prune_checkpoints(retention_days=0, checkpoint_base=base)
         assert result["errors"] > 0, "maintenance must refuse an active store writer"
-        assert not checkpoints.clear_all(base)["deleted"]
+        assert not checkpoint_maintenance.clear_all(base)["deleted"]
     finally:
         output, error = child.communicate(input="publish\n", timeout=30)
         reader.join(timeout=5)

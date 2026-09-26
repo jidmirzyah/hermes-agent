@@ -1,4 +1,4 @@
-"""Process bootstrap for Hermes entry points: Windows UTF-8 stdio, import-path
+"""Process bootstrap for Hermes entry points: Windows UTF-8 stdio and ANSI console, import-path
 hardening, durable lazy-install target, and dual-stack (Happy Eyeballs) connects.
 
 Windows binds stdio to the console code page (cp1252), so ``print("café")`` raises
@@ -253,6 +253,47 @@ def apply_windows_utf8_bootstrap() -> bool:
     return True
 
 
+_ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+
+
+def enable_windows_vt(streams=None) -> bool:
+    """Opt the console behind stdout/stderr in to ANSI escape processing.
+
+    ``hermes_cli.colors`` and the skins emit raw SGR codes whenever stdout is a TTY. A
+    conhost console (PowerShell 5.1, cmd.exe, the installer's ``hermes setup``) prints
+    them as ``←[35m`` until the output handle has ENABLE_VIRTUAL_TERMINAL_PROCESSING, and
+    shells hand native children a console with it off. The mode belongs to the console
+    buffer, so setting it here also covers the relaunched child. Handles that are not a
+    console (pipes, files, NUL, a windowless pythonw) fail GetConsoleMode and are left
+    alone. A console that refuses VT (pre-Windows 10) gets NO_COLOR instead, which
+    ``should_use_color`` and rich honour, so it shows plain text rather than garbage.
+    Returns False only in that fallback case.
+    """
+    if not _IS_WINDOWS:
+        return True
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    enabled = True
+    for stream in (sys.stdout, sys.stderr) if streams is None else streams:
+        try:
+            handle = msvcrt.get_osfhandle(stream.fileno())
+        except (AttributeError, OSError, ValueError):
+            continue  # no fd (None under pythonw, StringIO in embedders)
+        mode = wintypes.DWORD()
+        if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            continue
+        if mode.value & _ENABLE_VIRTUAL_TERMINAL_PROCESSING:
+            continue
+        if not kernel32.SetConsoleMode(handle, mode.value | _ENABLE_VIRTUAL_TERMINAL_PROCESSING):
+            enabled = False
+    if not enabled:
+        os.environ.setdefault("NO_COLOR", "1")
+    return enabled
+
+
 def suppress_platform_ver_console() -> None:
     """Stub ``platform._syscmd_ver`` on Windows — decode-crash + console-flash guard.
 
@@ -446,6 +487,7 @@ def export_scratch_tmp_env() -> None:
 
 # Apply on import — entry points only need ``import hermes_bootstrap`` first.
 apply_windows_utf8_bootstrap()
+enable_windows_vt()
 suppress_platform_ver_console()
 install_never_free_environ()
 activate_durable_lazy_target()

@@ -49,8 +49,6 @@ def dispatch_command(
         "-f",
         "upload_release=false",
         "-f",
-        "termux_only=false",
-        "-f",
         "termux_upgrade_from_tag=",
     ]
     if bundle_env:

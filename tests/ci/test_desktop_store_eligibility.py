@@ -8,6 +8,7 @@ import sys
 
 import pytest
 
+from tests.ci.desktop_release_roles import native_builds, universal_assembler
 from tests.ci.test_desktop_release_tag_admission import _BASH, _child_env, _workflow
 
 
@@ -34,7 +35,7 @@ def test_bundle_only_requests_store_for_stable(tmp_path, tag, commit, store):
     env = _child_env(HERMES_PAYLOAD_TAG=tag, HERMES_BUILD_COMMIT=commit,
                      HERMES_PAYLOAD_VERSION='0.28.0', RELEASE_PHASE='candidate' if store else '', CALL_LOG=str(log))
     env['PATH'] = str(helper) + os.pathsep + env['PATH']
-    job = jobs['assemble-win32-bundle']
+    job = jobs[universal_assembler(jobs)]
     script = next(step['run'] for step in job['steps']
                   if step.get('name') == 'Assemble the signed MSIX bundle without publishing')
     result = subprocess.run([_BASH, '-e', '-o', 'pipefail', '-c', script], env=env, cwd=tmp_path,
@@ -52,9 +53,11 @@ def test_bundle_only_requests_store_for_stable(tmp_path, tag, commit, store):
 @pytest.mark.platforms('windows')
 def test_native_windows_build_selects_store_only_for_stable(tmp_path):
     jobs = _workflow()['jobs']
+    legs = native_builds(jobs)
     scripts = {
-        kind: next(step['run'] for step in jobs[job]['steps'] if step.get('name') == 'Build and package')
-        for kind, job in [('release', 'build-win32-release'), ('commit', 'build-win32-commit')]
+        kind: next(step['run'] for step in jobs[legs[('win32-x64', kind)]]['steps']
+                   if step.get('name') == 'Build and package')
+        for kind in ('release', 'commit')
     }
     cases = [
         ('v0.28.0', '', True, 'release'),

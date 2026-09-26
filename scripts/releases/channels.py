@@ -218,12 +218,15 @@ class ChannelPublisher:
 
     def allocate_protected(self, name: str, commit: str, source_version: str, *,
                            release_tag: str, version: str, windows_version: str,
-                           identity: dict, policy: str, release_gate) -> dict:
+                           identity: dict, policy: str, release_gate,
+                           archive_ref: str | None = None) -> dict:
         """Reserve accepted legacy bytes, never authorize a custom build as stable."""
         facts = {"schema": 1, "channel": name, "repository": self.repository, "commit": commit,
                  "sourceVersion": source_version, "version": version, "windowsVersion": windows_version,
                  "releaseTag": release_tag, "identity": deepcopy(identity), "bundleEnv": {},
                  "publicBase": self.public_base}
+        if archive_ref is not None:
+            facts["archiveRef"] = archive_ref
         build_id = hashlib.sha256(canonical_json(facts)).hexdigest()[:32]
         key = build_prefix(build_id) + "request.json"
         for _ in range(16):

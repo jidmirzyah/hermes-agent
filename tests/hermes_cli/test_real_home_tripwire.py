@@ -132,6 +132,34 @@ def test_close_keeps_a_reused_descriptors_new_owner(tmp_path, monkeypatch):
             original_close(fd)
 
 
+def test_path_metadata_exemption_tracks_path_changes(protected_home, monkeypatch):
+    from tests.home_io_guard import HomeIOGuard
+
+    target = protected_home / "file.txt"
+    guard = HomeIOGuard(lambda: [protected_home])
+    monkeypatch.setenv("PATH", str(protected_home))
+    guard.check(target, metadata=True)  # executable lookup, not a state read
+    monkeypatch.setenv("PATH", str(protected_home.parent))
+    with pytest.raises(AssertionError, match="REAL hermes home"):
+        guard.check(target, metadata=True)
+
+
+def test_relative_path_metadata_exemption_tracks_working_directory(protected_home, tmp_path, monkeypatch):
+    from tests.home_io_guard import HomeIOGuard
+
+    target = protected_home / "file.txt"
+    guard = HomeIOGuard(lambda: [protected_home])
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "nested").mkdir()
+    monkeypatch.setenv("PATH", "../protected")
+    monkeypatch.chdir(other)
+    guard.check(target, metadata=True)
+    monkeypatch.chdir(other / "nested")
+    with pytest.raises(AssertionError, match="REAL hermes home"):
+        guard.check(target, metadata=True)
+
+
 def test_checkout_inside_a_guarded_root_is_not_hermes_state():
     """The default install checks the repo out INSIDE the home (install.sh:
     INSTALL_DIR=$HERMES_HOME/hermes-agent): the checkout, its .venv and test

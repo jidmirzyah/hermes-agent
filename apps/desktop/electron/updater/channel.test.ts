@@ -7,7 +7,7 @@ import feedContract from '../../update-feed.cjs'
 
 import { ChannelResolver } from './channel'
 import type { ChannelBuild, ChannelManifest, ChannelRecord, RetiredChannel } from './channel-protocol'
-import { decodeChannelRecord, sameChannelIdentity } from './channel-protocol'
+import { decodeChannelManifest, decodeChannelRecord, sameChannelIdentity } from './channel-protocol'
 import { ChannelStrategy } from './channel-strategy'
 
 const servers: Server[] = []
@@ -175,6 +175,15 @@ async function retiredFixture(
   return { ...f, retired }
 }
 
+test.each(['NODE_OPTIONS', 'PATH', 'HERMES_PYTHON'])(
+  'channel manifest rejects process-control bundle key %s',
+  async (key: string): Promise<void> => {
+    const f = await fixture()
+    f.manifest.request.bundleEnv[key] = null
+    expect((): void => { decodeChannelManifest(JSON.stringify(f.manifest)) }).toThrow('Invalid bundle environment name')
+  }
+)
+
 test('receiver kind mirrors the identity comparison between retired channel and destination', async (): Promise<void> => {
   const f = await retiredFixture()
 
@@ -244,6 +253,75 @@ test('protected canary accepts bounded Windows revisions without relaxing stable
   f.manifest.packages[0].version = '1.2.4.0'
   f.publish()
   expect((await resolver.resolve()).kind).toBe('active')
+})
+
+test.each(['rc.1-v0.21.5', 'rc.12-v1.0.0'] as const)(
+  'admits attempt archive ref %j as the protected prefix',
+  async (attempt): Promise<void> => {
+    const f = await fixture()
+    f.record.policy = 'stable-release'
+    Object.assign(f.manifest.request, {
+      releaseTag: 'v0.21.5',
+      version: '0.21.5',
+      windowsVersion: '0.21.5.0',
+      archiveRef: attempt
+    })
+    f.manifest.packages[0].version = '0.21.5'
+    f.manifest.packages[0].artifact.key = `releases/tag/${attempt}/darwin/Hermes.zip`
+    f.manifest.packages[0].feed.key = `releases/tag/${attempt}/darwin/stable-mac.yml`
+    f.publish()
+    const result = await new ChannelResolver({
+      build: f.build,
+      platform: 'darwin',
+      arch: 'arm64',
+      signer: 'ABCDE12345'
+    }).resolve()
+    expect(result.kind).toBe('active')
+  }
+)
+
+test('the protected archive prefix falls back closed to the bare release tag', async (): Promise<void> => {
+  const f = await fixture()
+  f.record.policy = 'stable-release'
+  Object.assign(f.manifest.request, { releaseTag: 'v1.2.3', version: '1.2.3', windowsVersion: '1.2.3.0' })
+  f.manifest.packages[0].version = '1.2.3'
+  const attempt = 'rc.2-v1.2.3'
+  f.manifest.packages[0].artifact.key = `releases/tag/${attempt}/darwin/Hermes.zip`
+  f.manifest.packages[0].feed.key = `releases/tag/${attempt}/darwin/stable-mac.yml`
+  const resolver = new ChannelResolver({ build: f.build, platform: 'darwin', arch: 'arm64', signer: 'ABCDE12345' })
+  // A stable request without archiveRef can never admit attempt-scoped bytes.
+  f.publish()
+  await expect(resolver.resolve()).rejects.toThrow(/prefix/)
+  // An archiveRef naming another version points at a different archive.
+  f.manifest.request.archiveRef = 'rc.2-v1.2.4'
+  f.publish()
+  await expect(resolver.resolve()).rejects.toThrow(/prefix/)
+  f.manifest.request.archiveRef = attempt
+  f.publish()
+  expect((await resolver.resolve()).kind).toBe('active')
+})
+
+test('archiveRef parses the shared attempt-ref grammar or is refused', async (): Promise<void> => {
+  const f = await fixture()
+  const decode = (): unknown => decodeChannelManifest(JSON.stringify(f.manifest))
+  for (const ref of ['rc.1-v0.21.5', 'rc.12-v1.0.0']) {
+    f.manifest.request.archiveRef = ref
+    expect(decode).not.toThrow()
+  }
+  for (const ref of [
+    'v0.21.5-rc',
+    'v0.21.5-rc.1',
+    'rc.01-v0.21.5',
+    'rc.0-v0.21.5',
+    'rc.1-v2026.9.21',
+    'v0.21.5',
+    'abandoned-rc.1-v0.21.5'
+  ]) {
+    f.manifest.request.archiveRef = ref
+    expect(decode).toThrow(/archiveRef/)
+  }
+  delete f.manifest.request.archiveRef
+  expect(decode).not.toThrow()
 })
 
 test('offers a digest-bound retirement without a second proof document', async (): Promise<void> => {

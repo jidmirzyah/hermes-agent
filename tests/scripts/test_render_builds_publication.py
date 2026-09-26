@@ -118,6 +118,16 @@ def test_incomplete_tag_keeps_channel_and_links_diagnostics(monkeypatch, r2_serv
     assert r2_server.store['releases/canary/index.html'][0] == b'previous good page'
 
 
+def test_attempt_page_warns_and_canary_page_does_not():
+    base = 'https://cdn.example'
+    sentence = ('Attempt builds are not upgrade-safe: every attempt of 1.2.3 has the same '
+                'package version, so an installed attempt is not replaced by the published 1.2.3.')
+    page = rbt.render_page('rc.1-v1.2.3', {}, base)
+    assert sentence in page
+    for tag in ('v1.2.3', 'v1.2.3+canary.20260818T101010Z', 'abandoned-rc.1-v1.2.3'):
+        assert sentence not in rbt.render_page(tag, {}, base)
+
+
 @pytest.mark.parametrize('version,name', [
     ('1.2.3', 'HermesBundled-1.2.3-win-x64.msix'),
     ('1.2.3+canary.20260818T000000Z', 'HermesBundled-1.2.3+canary.20260818T000000Z-win-x64.msix'),
@@ -126,6 +136,15 @@ def test_exact_version_and_flat_name_boundaries(version, name):
     names = [name, 'HermesBundled-1.2.3+canary.20260817T000000Z-win-x64.msix', 'HermesBundled-1.2.4-win-x64.msix', name + '.blockmap']
     assert rbt.filter_names_for_version(names, version) == [name]
     assert rbt.parse_assets([name])['HermesBundled'][('win', 'x64')] == (name, 'msix')
+
+
+def test_attempt_archive_objects_are_listed_by_their_plain_version(monkeypatch):
+    keys = ['releases/tag/rc.2-v1.2.3/HermesBundled-1.2.3-win-x64.msix',
+            'releases/tag/rc.2-v1.2.3/HermesBundled-1.2.3-win-x64.msix.blockmap',
+            'releases/tag/rc.2-v1.2.3/latest.yml',
+            'releases/tag/rc.2-v1.2.3/HermesBundled-1.2.4-win-x64.msix']
+    monkeypatch.setattr(rbt, 'r2_object_names_under', lambda prefix: keys)
+    assert rbt.r2_object_names('rc.2-v1.2.3') == [keys[0]]
 
 
 @pytest.mark.parametrize('current,tag,allowed', [

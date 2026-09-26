@@ -17,7 +17,6 @@ def _stamp_probe(tmp_path, shell):
     repo = tmp_path / "installed source"
     for relative in (
         "scripts/write_install_stamp.py", "hermes_cli/__init__.py",
-        "scripts/releases/distance.py", "scripts/releases/versioning.py",
         "hermes_cli/update_channel.py", "hermes_cli/release_channels.py",
         "pm/paths.py", "pm/environments.py",
         "hermes_cli/steward.py", "hermes_constants.py",
@@ -25,6 +24,10 @@ def _stamp_probe(tmp_path, shell):
         dest = repo / relative
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(ROOT / relative, dest)
+    # distance -> versioning -> semver import each other; copy the whole
+    # package so a new sibling import cannot break the fixture.
+    shutil.copytree(ROOT / "scripts/releases", repo / "scripts/releases",
+                    ignore=shutil.ignore_patterns("__pycache__"))
     env = dict(os.environ, HOME=str(tmp_path), HERMES_HOME=str(tmp_path / "home"),
                GIT_CONFIG_GLOBAL=str(tmp_path / "gitconfig"), GIT_CONFIG_NOSYSTEM="1")
     (tmp_path / "gitconfig").write_text('[url "file:///staged/serve.git"]\n'

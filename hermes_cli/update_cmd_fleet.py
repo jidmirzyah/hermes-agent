@@ -324,6 +324,54 @@ def _live_fleet_covers_receipt(expected_sha: str | None, receipt: dict, owed: se
         return False
 
 
+def _marker_owed_gateways(inventory: object) -> set[tuple[str, str]] | None:
+    """The ``("gateway", profile)`` set a marker's inventory owes; None when it recorded none.
+
+    Raises ValueError for a malformed or unsupported inventory, which keeps the marker.
+    """
+    from hermes_cli.update_cmd_fleet_gatewayless import runtime_outside_gateway_evidence
+
+    if inventory is None:
+        return None
+    if not isinstance(inventory, dict) or inventory.get("version") != 1:
+        raise ValueError("unsupported fleet-restart inventory")
+    runtimes = inventory.get("runtimes")
+    if not isinstance(runtimes, list):
+        raise ValueError("fleet-restart inventory has no runtime list")
+    owed: set[tuple[str, str]] = set()
+    for runtime in runtimes:
+        if not isinstance(runtime, dict):
+            raise ValueError("fleet-restart inventory row is not an object")
+        if runtime_outside_gateway_evidence(runtime):
+            continue
+        profile = runtime.get("profile")
+        if runtime.get("kind") != "gateway" or not isinstance(profile, str) or not profile.strip() or profile == "unknown":
+            raise ValueError("fleet-restart inventory row is not an identified gateway")
+        owed.add(("gateway", profile))
+    return owed
+
+
+def _discharge_gatewayless_marker(checkout_sha: str, expected_sha: str) -> bool:
+    """Settle an inventory-less marker on a host with no live gateway (#118742).
+
+    Only when the host itself shows nothing the update could still owe a restart to, and HEAD
+    still holds the code it pulled.
+    """
+    from hermes_cli.update_cmd_fleet_checkout import checkout_contains
+    from hermes_cli.update_cmd_fleet_gatewayless import host_owes_no_gateway_restart
+
+    try:
+        gatewayless = (checkout_sha == expected_sha or checkout_contains(expected_sha)) and host_owes_no_gateway_restart()
+    except Exception as exc:
+        logger.debug("Gateway-less host probe failed; keeping fleet-restart-pending marker: %s", exc)
+        return False
+    if not gatewayless:
+        return False
+    _clear_fleet_restart_pending_marker()
+    logger.debug("Fleet-restart-pending marker discharged: host runs no gateway at %s", checkout_sha[:10])
+    return True
+
+
 def _marker_only_restart_obsolete() -> bool:
     """Settle only the inventory stored with this marker's target SHA.
 
@@ -350,33 +398,13 @@ def _marker_only_restart_obsolete() -> bool:
     phase never touched it — this marker only stops re-warning about it on every later startup.
     """
     from hermes_cli.update_cmd_fleet_checkout import checkout_contains
-    from hermes_cli.update_cmd_fleet_gatewayless import host_owes_no_gateway_restart, runtime_outside_gateway_evidence
 
     try:
         fields = _obligation_fields()
         if fields is None:
             return False
         expected_sha = fields.get("expected_sha", "").strip()
-        inventory = json.loads(fields.get("inventory", "null"))
-        owed: set[tuple[str, str]] | None = None
-        if inventory is not None:
-            if not isinstance(inventory, dict) or inventory.get("version") != 1:
-                return False
-            runtimes = inventory.get("runtimes")
-            if not isinstance(runtimes, list):
-                return False
-            owed = set()
-            for runtime in runtimes:
-                if not isinstance(runtime, dict):
-                    return False
-                if runtime_outside_gateway_evidence(runtime):
-                    continue
-                if runtime.get("kind") != "gateway":
-                    return False
-                profile = runtime.get("profile")
-                if not isinstance(profile, str) or not profile.strip() or profile == "unknown":
-                    return False
-                owed.add(("gateway", profile))
+        owed = _marker_owed_gateways(json.loads(fields.get("inventory", "null")))
     except (OSError, UnicodeError, ValueError):
         return False
     if owed is not None and not owed:
@@ -405,18 +433,7 @@ def _marker_only_restart_obsolete() -> bool:
     if not fleet:
         if owed is not None:
             return False  # Absence cannot prove recovery of the recorded inventory.
-        # No recorded owed set and no live gateway: settle only when the host itself shows nothing
-        # the update could still owe a restart to, and HEAD still holds the code it pulled (#118742).
-        try:
-            gatewayless = (checkout_sha == expected_sha or checkout_contains(expected_sha)) and host_owes_no_gateway_restart()
-        except Exception as exc:
-            logger.debug("Gateway-less host probe failed; keeping fleet-restart-pending marker: %s", exc)
-            return False
-        if not gatewayless:
-            return False
-        _clear_fleet_restart_pending_marker()
-        logger.debug("Fleet-restart-pending marker discharged: host runs no gateway at %s", checkout_sha[:10])
-        return True
+        return _discharge_gatewayless_marker(checkout_sha, expected_sha)
     covered = _fleet_covered_gateways(fleet)
     if covered is None:
         return False  # unidentified runtime: the matrix cannot vouch for it

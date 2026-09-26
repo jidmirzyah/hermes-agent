@@ -43,6 +43,9 @@
 #   --update-ref     what to update TO. Default: HEAD. Pass the next release
 #                    tag for a stable-to-stable leg; only label the leg
 #                    stable-to-stable when BOTH refs are release tags.
+#                    NEXT mints a synthetic child of --install-ref (the
+#                    HEAD -> NEXT leg: install HEAD, update with HEAD's
+#                    own updater).
 #
 # Requires a clean full-history checkout with release tags fetched.
 
@@ -112,6 +115,8 @@ source "$(dirname "$0")/e2e-assets/mock-provider.sh"
 source "$(dirname "$0")/e2e-assets/source-driver.sh"
 # shellcheck source=e2e-assets/installer-common.sh
 source "$(dirname "$0")/e2e-assets/installer-common.sh"
+# shellcheck source=e2e-assets/source-update-command.sh
+source "$(dirname "$0")/e2e-assets/source-update-command.sh"
 # shellcheck source=e2e-assets/source-build-env.sh
 source "$ASSETS/source-build-env.sh"
 # Full transcript in the job log, collapsed (GitHub renders ::group:: as a
@@ -141,25 +146,24 @@ if [ -z "$INSTALL_REF" ]; then
   [ -n "$INSTALL_REF" ] || fail "no release tags in the checkout to use as OLD"
 fi
 OLD_SHA="$(git -C "$REPO_ROOT" rev-parse "${INSTALL_REF}^{commit}")"
-HEAD_SHA="$(git -C "$REPO_ROOT" rev-parse HEAD)"
 
 # The update target defaults to HEAD; --update-ref selects any other ref so
 # a stable-to-stable leg can target the next release tag instead of the tip.
 # Only call this leg stable-to-stable when BOTH refs are release tags.
-TARGET_LABEL="HEAD"
-TARGET_SHA="$HEAD_SHA"
-if [ -n "$UPDATE_REF" ]; then
-  TARGET_SHA="$(git -C "$REPO_ROOT" rev-parse "${UPDATE_REF}^{commit}")"
-  TARGET_LABEL="$UPDATE_REF"
-fi
+# NEXT (the HEAD -> NEXT leg) is minted before the clone so it rides along.
+TARGET_LABEL="${UPDATE_REF:-HEAD}"
+TARGET_SHA="$(resolve_update_ref "$REPO_ROOT" "$OLD_SHA" "$TARGET_LABEL")" \
+  || fail "cannot resolve update ref '$TARGET_LABEL'"
 [ "$OLD_SHA" != "$TARGET_SHA" ] || fail "OLD ($INSTALL_REF) IS the update target ($TARGET_LABEL); no update would be available"
 
 git clone --bare --quiet "$REPO_ROOT" "$SERVE_REPO"
+git -C "$SERVE_REPO" cat-file -e "$TARGET_SHA^{commit}" \
+  || fail "update target $TARGET_SHA ($TARGET_LABEL) did not reach serve.git"
 git -C "$SERVE_REPO" update-ref refs/heads/main "$OLD_SHA"
 git -C "$SERVE_REPO" symbolic-ref HEAD refs/heads/main
 # The installer may pin a commit that is reachable but not at a ref tip.
 git -C "$SERVE_REPO" config uploadpack.allowAnySHA1InWant true
-ok "serve.git main = $OLD_SHA ($INSTALL_REF), update target $HEAD_SHA"
+ok "serve.git main = $OLD_SHA ($INSTALL_REF), update target $TARGET_SHA ($TARGET_LABEL)"
 
 
 
@@ -423,11 +427,7 @@ case "$UPDATE_METHOD" in
     # installed hermes; older ones read the prompt from stdin, so close it.
     HERMES="$(source_hermes "$INSTALL_DIR")" || fail "no installed update command"
     help="$(source_build_env "$HERMES" update --help 2>&1)" || fail "installed update --help failed: $help"
-    if grep -qF -- --yes <<< "$help"; then
-      update_cmd=("$HERMES" update --yes)
-    else
-      update_cmd=("$HERMES" update)
-    fi
+    build_source_update_command "$HERMES" "$help"
     rc=0
     (cd "$INSTALL_DIR" && source_build_env "${update_cmd[@]}" < /dev/null 2>&1 | ts_prefix > "$LOG_DIR/update.log") || rc=$?
     log_group "hermes update transcript" "$LOG_DIR/update.log"
@@ -452,6 +452,8 @@ case "$UPDATE_METHOD" in
     # fixup) runs for real in the installed code.
     EXPECT_DESKTOP=present
     HERMES="$(source_hermes "$INSTALL_DIR")" || fail "no installed desktop command"
+    accept_installer_marker "$INSTALL_DIR" \
+      || fail "installed source has changes other than the generated install marker"
     ASSETS="$REPO_ROOT/tests/install/e2e-assets"
     SPEC="$WORK_ROOT/launch-spec.json"
 
@@ -471,10 +473,19 @@ case "$UPDATE_METHOD" in
 
     step "capturing the hermes desktop launch spec (build runs for real)"
     rc=0
-    (cd "$INSTALL_DIR" && \
-      PYTHONPATH="$ASSETS/launch-capture${PYTHONPATH:+:$PYTHONPATH}" \
-      HERMES_E2E_CAPTURE_LAUNCH="$SPEC" \
-      source_build_env "$HERMES" desktop < /dev/null 2>&1 | ts_prefix > "$LOG_DIR/desktop-launch-capture.log") || rc=$?
+    if [ "$HERMES" = "$INSTALL_DIR/.hermes/bin/hermes" ]; then
+      # The PM launcher uses -I: PYTHONPATH/sitecustomize cannot reach it.
+      # Ask the installed launcher for its own isolated command, then inject
+      # the driver hook into that command without changing product code.
+      (cd "$INSTALL_DIR" && source_build_env python3 -I "$ASSETS/launch-capture/pm-launch.py" \
+        "$HERMES" "$SPEC" < /dev/null 2>&1 | ts_prefix > "$LOG_DIR/desktop-launch-capture.log") || rc=$?
+    else
+      # Pre-PM console scripts load sitecustomize from PYTHONPATH.
+      (cd "$INSTALL_DIR" && \
+        PYTHONPATH="$ASSETS/launch-capture${PYTHONPATH:+:$PYTHONPATH}" \
+        HERMES_E2E_CAPTURE_LAUNCH="$SPEC" \
+        source_build_env "$HERMES" desktop < /dev/null 2>&1 | ts_prefix > "$LOG_DIR/desktop-launch-capture.log") || rc=$?
+    fi
     log_group "hermes desktop (launch capture) transcript" "$LOG_DIR/desktop-launch-capture.log"
     [ "$rc" -eq 0 ] || fail "hermes desktop exited $rc during launch capture; transcript above"
     # Exit 0 without a capture means a version that never reached its

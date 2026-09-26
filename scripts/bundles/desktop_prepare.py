@@ -18,6 +18,8 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from scripts.releases.versioning import parse_attempt_ref
+
 
 def git(source: Path, *args: str) -> str:
     return subprocess.check_output(["git", *args], cwd=source, text=True, encoding="utf-8").rstrip("\r\n")
@@ -151,7 +153,10 @@ class BuildRequest:
                                     .replace(tzinfo=timezone.utc).timestamp())
             else:
                 claim_tag = os.environ.get("RELEASE_CLAIM_TAG", "")
-                if claim_tag != tag + "-rc":
+                # The payload version stays plain; the claim must name the same
+                # version as an attempt ref, never the checkout.
+                parsed = parse_attempt_ref(claim_tag)
+                if parsed is None or parsed[0] != version:
                     raise ValueError("stable preparation requires its exact claim tag")
                 claim_object = os.environ.get("RELEASE_CLAIM_OBJECT", "")
                 if not re.fullmatch(r"[a-f0-9]{40}", claim_object) or \

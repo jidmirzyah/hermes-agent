@@ -104,7 +104,10 @@ export function prepareNodeDependencies({ source, workspaces, env = process.env,
   // npm can fail during validation before deleting node_modules. Invalidate first.
   rmSync(receipt, { force: true })
   rmSync(nativeReceipt, { force: true })
-  execFileSync(node, [npm, ...args], { cwd: source, env, stdio: 'inherit' })
+  console.log(`node-deps: installing workspace dependencies with npm ci (${selected.join(', ')})...`)
+  // Builders set CI=1, which turns npm's spinner off. Ask for it back: npm
+  // still shows it only on a terminal. Kept out of `args`, which keys the receipt.
+  execFileSync(node, [npm, ...args, '--progress=true'], { cwd: source, env, stdio: 'inherit' })
   if (reuse) {
     const completed = `${key}\n${createHash('sha256').update(readFileSync(hiddenLock)).digest('hex')}\n`
     writeFileSync(receipt, completed)

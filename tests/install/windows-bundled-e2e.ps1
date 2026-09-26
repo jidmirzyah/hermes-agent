@@ -19,7 +19,6 @@ $env:HERMES_DESKTOP_USER_DATA_DIR = Join-Path $Work 'electron-user-data'
 $env:HOME = Join-Path $Work 'os-home'
 New-Item -ItemType Directory -Path $env:HOME | Out-Null
 . (Join-Path $Assets 'desktop-smoke-windows.ps1')
-$env:HERMES_DESKTOP_FEED_BASE_URL = ''
 $Node = if ($env:HERMES_E2E_NODE) { $env:HERMES_E2E_NODE } else { (Get-Command node.exe).Source }
 function Run-Node([string[]]$Argv) {
     & $Node @Argv

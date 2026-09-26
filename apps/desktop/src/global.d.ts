@@ -1,4 +1,5 @@
 import type { GatewayWsUrlResult } from '@hermes/shared'
+import type { HermesSkin } from '@hermes/shared/skin'
 import type { TranslucencyState } from '@hermes/shared/translucency'
 
 import type { ScreenshotApi } from '../electron/command-screenshot-types'
@@ -359,6 +360,8 @@ declare global {
       localModelsEnabled?: boolean
       /** Launch flag shared with every backend the app starts. */
       guestOnboardingEnabled?: boolean
+      /** Sanitized local `display.skin`, available before any gateway connects. */
+      localSkin?: { profile: string; skin: HermesSkin } | null
       /** Launch flag: skip the first-run film (HERMES_SKIP_INTRO=1 or
        *  --skip-intro) so a fresh HERMES_HOME lands on the guided chat. */
       skipIntro?: boolean

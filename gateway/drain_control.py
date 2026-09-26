@@ -48,11 +48,11 @@ def current_instantiation_epoch() -> str:
     """
     boot_id = pid1_start = ""
     with contextlib.suppress(OSError):
-        boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8-sig").strip()
+        boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
     with contextlib.suppress(OSError, IndexError):
         # "<pid> (<comm>) <state> ...": comm may contain spaces/parens, so split on the
         # LAST ')'. starttime is field 22 (1-indexed) = tail index 19.
-        pid1_start = Path("/proc/1/stat").read_text(encoding="utf-8-sig").rsplit(")", 1)[1].split()[19]
+        pid1_start = Path("/proc/1/stat").read_text(encoding="utf-8").rsplit(")", 1)[1].split()[19]
     return f"{boot_id}:{pid1_start}" if (boot_id or pid1_start) else ""
 
 

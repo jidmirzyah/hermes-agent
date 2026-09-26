@@ -22,3 +22,19 @@ def test_program_files_git_precedes_the_path_bash():
     candidates = windows_bash_candidates(on_path, {"ProgramFiles": PF})
     assert candidates[0] == PF + r"\Git\bin\bash.exe"
     assert candidates[-1] == on_path
+
+def test_per_user_and_32bit_git_roots_are_candidates():
+    candidates = windows_bash_candidates(None, {
+        "ProgramFiles": PF, "ProgramFiles(x86)": r"D:\Progs32",
+        "LOCALAPPDATA": r"C:\Users\u\AppData\Local",
+    })
+    assert r"D:\Progs32\Git\bin\bash.exe" in candidates
+    assert r"C:\Users\u\AppData\Local\Programs\Git\bin\bash.exe" in candidates
+    assert r"C:\Users\u\AppData\Local\hermes\git\usr\bin\bash.exe" in candidates
+
+def test_nonstarting_bash_is_rejected(monkeypatch):
+    import subprocess
+    from pm import shell
+
+    monkeypatch.setattr(shell.subprocess, "run", lambda *a, **kw: subprocess.CompletedProcess(a, 1))
+    assert shell._bash_starts("broken-bash.exe") is False

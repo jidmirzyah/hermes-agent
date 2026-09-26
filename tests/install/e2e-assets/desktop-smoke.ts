@@ -200,7 +200,7 @@ function captureBackendLogs(homes: readonly string[], outDir: string, phase: str
  * runtime before Electron starts, using the exact environment it will inherit.
  */
 export function settleSourceDesktopRuntime(options: SmokeOptions, launch: Launch): void {
-  if (options.origin !== 'source' || options.phase !== 'new') { return }
+  if (options.origin !== 'source' || (options.phase !== 'old' && options.phase !== 'new')) { return }
 
   const invocation = sourceRuntimeSettleCommand(options.root, launch.env)
   const result = spawnSync(invocation.command, invocation.args, {

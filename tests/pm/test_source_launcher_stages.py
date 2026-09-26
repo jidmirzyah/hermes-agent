@@ -7,6 +7,7 @@ import subprocess
 
 import pytest
 
+from hermes_platform.host.facts import native_arch
 from pm.environments import install_state_dir, site_packages
 from pm.lock import Lockfile
 from tests.hermes_cli.test_source_launcher_publication import fixture_tree
@@ -24,6 +25,9 @@ def test_powershell_stage_publishes_without_a_checkout_venv(tmp_path, monkeypatc
     pin = Lockfile(repo / 'pm/lock.json').version('python')
     assert pin
     py_version = '.'.join(pin.split('+')[0].split('.')[:2])
+    # The request names the machine's architecture: a bare version lets uv
+    # pick an emulated x86_64 build on Windows-on-ARM.
+    py_request = f"cpython-{py_version}-windows-{'aarch64' if native_arch() == 'arm64' else 'x86_64'}-none"
     calls = home / 'uv-calls'
     selected = install_state_dir(repo) / 'environments/ready/venv'
     site = site_packages(selected)
@@ -42,10 +46,10 @@ function Invoke-FixtureUv {
     $call = $args -join ' '
     Add-Content -LiteralPath $env:PROBE_UV_CALLS -Encoding UTF8 -Value $call
     switch -Exact ($call) {
-        "python install --no-bin --no-registry $env:PROBE_PY_VERSION" {
+        "python install --no-bin --no-registry $env:PROBE_PY_REQUEST" {
             if (-not (Test-Path -LiteralPath $env:PROBE_PYTHON -PathType Leaf)) { throw 'missing fixture Python' }
         }
-        "python find --managed-python --no-project $env:PROBE_PY_VERSION" {
+        "python find --managed-python --no-project $env:PROBE_PY_REQUEST" {
             Write-Output $env:PROBE_PYTHON
         }
         default { throw "unexpected bootstrap uv call: $call" }
@@ -68,7 +72,7 @@ exit 0
     env = dict(os.environ, PROBE_INSTALLER=str(ROOT / 'scripts/install.ps1'),
                PROBE_REPO=str(repo), PROBE_HOME=str(home), PROBE_PYTHON=str(interpreter),
                HERMES_HOME=str(tmp_path / 'other-home'),
-               PROBE_PY_VERSION=py_version, PROBE_UV_CALLS=str(calls),
+               PROBE_PY_REQUEST=py_request, PROBE_UV_CALLS=str(calls),
                UV_OFFLINE='1', UV_PYTHON_DOWNLOADS='never')
     env['PATH'] = os.pathsep.join([str(powershell.parent), str(Path(os.environ['SystemRoot']) / 'System32')])
     env['PATHEXT'] = '.COM;.EXE;.BAT;.CMD'
@@ -78,8 +82,7 @@ exit 0
     assert result.returncode == 0, result.stdout + result.stderr
     assert b'REACHED_PATH_PUBLICATION' in result.stdout
     assert calls.read_text(encoding='utf-8-sig').splitlines() == [
-        f'python install --no-bin --no-registry {py_version}',
-        f'python find --managed-python --no-project {py_version}',
+        f'python find --managed-python --no-project {py_request}',
     ]
     for name in ('hermes', 'hermes-acp'):
         command = home / 'bin' / (name + ('.exe' if (home / 'bin' / (name + '.exe')).is_file() else '.cmd'))

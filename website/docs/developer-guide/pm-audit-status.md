@@ -55,7 +55,7 @@ distinguishes runtime activation from independent test and editor environments.
 | C10 | Repair uninstall dispatch and owned-link removal. |
 | C13, C14 | Prepare one complete dependency environment before publication. Preserve declared constraints and explicit pins; permit compatible transitive upgrades. Infrastructure failures do not disable plugins. |
 | C15, C18 | Retain recoverable tool-store entries on failed publication. Use atomic facts/config writes and context-local receipts. |
-| C16, C29 | Migrate removed dependency helpers and restore missing-dependency hints. Run the embedded Hindsight service from its separate environment. |
+| C16, C29 | Migrate removed dependency helpers and restore missing-dependency hints. |
 | C20, C21 | Correct platform-test selection and make the removed-import guard inspect actual source. |
 | C22, C23 | Publish immutable release artifacts before feeds and resolve FFmpeg artifacts by target. |
 | C25 | Preserve paused downloads, resume handles, and single-worker ownership. |

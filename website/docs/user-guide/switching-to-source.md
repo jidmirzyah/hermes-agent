@@ -72,7 +72,9 @@ hermes --version
 ```
 
 The bootstrap reads tool pins from `pm/lock.json` and delegates installation
-to PM. Current first-party code requires Python 3.14 (`>=3.14,<3.15`).
+to PM. Current first-party code runs on Python 3.14. The wider
+`>=3.11,<3.15` package metadata only lets older installs run the updater
+before PM switches them to 3.14; it is not a runtime support range.
 The source default is the `all` extra, not the desktop bundle's `--all-extras`.
 
 Activation composes the installed tool environment and defines `hermes` as this

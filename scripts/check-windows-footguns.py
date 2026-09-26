@@ -464,7 +464,10 @@ FOOTGUNS: list[Footgun] = [
             "path.read_text(encoding='utf-8-sig') / "
             "open(path, 'r', encoding='utf-8-sig')"
         ),
-        post_filter=lambda m, line: _is_read_shaped(line),
+        # Literal /proc/ and /sys/ paths are kernel pseudo-files: Linux
+        # generates them, no Windows tool can BOM them, and they do not
+        # exist on Windows at all, so plain utf-8 is the honest encoding.
+        post_filter=lambda m, line: _is_read_shaped(line) and not _KERNEL_PSEUDO_FILE.search(line),
     ),
     Footgun(
         name="write with encoding='utf-8-sig' (emits a BOM)",
@@ -694,6 +697,10 @@ def _extract_mode(line: str) -> str | None:
         if m:
             return m.group(1)
     return None
+
+
+# A string literal (plain or f-string) that starts with /proc/ or /sys/.
+_KERNEL_PSEUDO_FILE = re.compile(r"""['"]/(?:proc|sys)/""")
 
 
 def _is_read_shaped(line: str) -> bool:

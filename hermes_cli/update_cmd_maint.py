@@ -331,19 +331,35 @@ def _read_project_version() -> str | None:
         return None
 
 
+def _checkout_version() -> str | None:
+    """The checkout's runtime identity, computed exactly as ``write_source_stamp`` publishes it.
+
+    pyproject.toml is an inert 0.0.0 on source checkouts; the release a checkout
+    runs is derived from its reachable tags.
+    """
+    from hermes_cli.update_cmd import _m
+    from hermes_cli.version_info import _git_version_info
+    info = _git_version_info(Path(_m().PROJECT_ROOT), include_untracked=True)
+    return info.derived_version if info.commit else None
+
+
 def _update_complete_message(pre_version: str | None) -> str:
     """Completion line with ``vA → vB`` when known; plain when either side is unknown or
     the version did not change.
 
     Ported from PrimeIntellect-ai/prime-agent#630: after a successful self-update, show both versions
     (``v0.19.4 → v0.20.0``) so the user can see what they actually got. Falls back to the plain message when
-    either side is unknown or the version did not change (e.g. several commits landed within one release).
+    either side is unknown or the version did not change.
     """
-    post_version = _read_project_version()
+    def shown(version: str) -> str:
+        # A tagless checkout's identity is ``git.<sha>``, not a release number.
+        return f"v{version}" if version[:1].isdigit() else version
+
+    post_version = _checkout_version()
     if pre_version and post_version and pre_version != post_version:
-        return f"✓ Update complete! (v{pre_version} → v{post_version})"
+        return f"✓ Update complete! ({shown(pre_version)} → {shown(post_version)})"
     if post_version:
-        return f"✓ Update complete! (v{post_version})"
+        return f"✓ Update complete! ({shown(post_version)})"
     return "✓ Update complete!"
 
 
@@ -853,9 +869,38 @@ def _refresh_cua_driver_after_update() -> None:
         pm.ensure("cua-driver", explicit=True)
 
 
+def _install_default_tools_after_update() -> None:
+    """Give an existing install the optional default PM tools (agent-browser + Chromium).
+
+    A source update re-syncs only the venv, so a tool that became a default after
+    this install was created would never arrive and browser tools would stay
+    missing. The installers' PM stage runs the same selection. Declined packages
+    stay declined (pm/defaults.py). A failed download warns and never fails the update.
+    """
+    import pm
+    from pm.defaults import default_packages
+    from pm.install import lazy_installs_allowed, sealed
+    from pm.lock import Lockfile
+    from pm.paths import lockfile_path
+
+    # Sealed payloads ship their tools; the lazy-install policy (config or the
+    # Docker/test bridge) means the user asked Hermes not to fetch on its own.
+    if sealed() or not lazy_installs_allowed():
+        return
+    for name in default_packages(Lockfile(lockfile_path()).names()):
+        if pm.installed_package(name) is not None:
+            continue
+        print(f"\n→ Installing {name} (browser tools; opt out with `hermes pm install --without {name}`)...")
+        try:
+            pm.ensure(name, explicit=True)
+        except (pm.InstallError, OSError) as exc:
+            print(f"  ⚠ {name} was not installed: {exc}")
+            print(f"    Retry with: hermes pm install {name}")
+
+
 def _print_checkpoint_footprint_notice() -> None:
     """Surface a GB-scale /rollback store the user may not know is on (see the helper's docstring)."""
-    from tools.checkpoint_manager import checkpoint_footprint_notice
+    from tools.checkpoint_maintenance import checkpoint_footprint_notice
     notice = checkpoint_footprint_notice()
     if notice:
         print(f"\n\033[1;33mℹ  {notice}\033[0m")
@@ -892,6 +937,7 @@ def _print_post_update_notices_and_self_heals() -> None:
         ('CLI launcher exposure failed: %s', lambda: _launchers.expose_cli(_m().PROJECT_ROOT)),
         ('Windows bin launcher migration failed: %s', _migrate_windows_bin_path),
         ('cua-driver refresh failed: %s', _refresh_cua_driver_after_update),
+        ('Default PM tool install failed: %s', _install_default_tools_after_update),
         ('Checkpoint footprint notice failed: %s', _print_checkpoint_footprint_notice),
         ('Plugin compat notice failed: %s', _print_plugin_compat_notice),
         # Legacy HERMES_NEMO_RELAY_ATIF_*/ATOF_* vars produce no traces since the Relay cutover;
@@ -943,6 +989,18 @@ def _run_post_update_maintenance(
     # state.db integrity guard for root home AND every profile; restore from own snapshot.
     with _best_effort('Post-update state.db integrity check failed: %s'):
         _verify_and_restore_state_dbs_post_update()
+
+    # Pre-PM installers cloned --depth 1, which hides the release tag identity is
+    # derived from. Fetch the commit graph before the completion line and the
+    # install stamp read that identity.
+    try:
+        from hermes_cli.gitlock import fetch_full_commit_graph
+        from hermes_cli.update_cmd import _no_prompt_git_kwargs
+        if fetch_full_commit_graph(Path(_m().PROJECT_ROOT), **_no_prompt_git_kwargs()):
+            print("  ✓ Fetched release history (commits only) for version identity")
+    except (OSError, subprocess.SubprocessError) as exc:
+        detail = (getattr(exc, "stderr", None) or str(exc)).strip().splitlines()[-1:] or [type(exc).__name__]
+        print(f"  ⚠ Could not fetch release history ({detail[0]}); the version shows as git.<sha> until the next update")
 
     # Seed the model-catalog cache from the checkout instead of a bot-gated, flaky fetch.
     with _best_effort('Model catalog seed during update failed: %s'):

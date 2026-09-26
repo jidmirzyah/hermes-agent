@@ -51,6 +51,10 @@ class Package:
     name: unique id.
     deps: packages installed before this one.
     optional: not part of the root closure; installed on demand.
+    default: an optional package the default install also carries (installers,
+        bare `pm install`, `hermes update`) unless the user declined it
+        (pm/defaults.py). It stays optional: a failed download warns instead of
+        failing the install, and its absence never blocks PATH activation.
     internal: tooling PM uses inside install/build steps — never on PATH
         and never selected as an application root. Dependencies and explicit
         build requests can select it. node/npm are shipped runtime tools
@@ -65,6 +69,7 @@ class Package:
     name: str = ""
     deps: tuple[str, ...] = ()
     optional: bool = False
+    default: bool = False
     internal: bool = False
     on_path: bool = True
     url: str = ""
@@ -172,8 +177,8 @@ class DebPackage(Package):
     .deb (Package + Version) must match the pin. Digest verification of
     the downloaded bytes happens in the store, as for every package.
 
-    unpack() is the hardened extractor: traversal, symlink-target, and
-    member-type checks, shaped after the established safe-extract rules
+    unpack() pulls data.tar out of the ar container and hands it to
+    pm.store.extract_tar, the one containment policy for every PM tarball
     (symlinks allowed with in-root targets; devices/fifos refused).
     """
 
@@ -210,98 +215,21 @@ class DebPackage(Package):
             offset = start + size + (size % 2)
         if payload is None:
             raise InstallError(self.name, f"no data.tar member in {archive.name}")
-        self._safe_untar(payload, staged)
+        self._untar_payload(payload, staged)
 
-    def _safe_untar(self, payload: bytes, staged: Path) -> None:
+    def _untar_payload(self, payload: bytes, staged: Path) -> None:
         import io
-        import posixpath
-        import shutil
         import stat as stat_mod
         import tarfile
 
+        from pm.store import extract_tar
+
+        try:
+            extract_tar(io.BytesIO(payload), staged)
+        except tarfile.FilterError as exc:
+            member = exc.tarinfo.name if exc.tarinfo is not None else "?"
+            raise InstallError(self.name, f"unsafe member {member!r}: {exc}") from exc
         real_staged = os.path.realpath(staged)
-
-        def _contained(p: Path) -> bool:
-            """True when p's REAL location (following any planted symlink
-            ancestors) stays inside the staged tree."""
-            real = os.path.realpath(p)
-            return real == real_staged or real.startswith(real_staged + os.sep)
-
-        deferred_links = []
-        with tarfile.open(fileobj=io.BytesIO(payload)) as tf:
-            for member in tf.getmembers():
-                path = PurePosixPath(member.name)
-                parts = tuple(q for q in path.parts if q not in ("", "."))
-                if path.is_absolute() or ".." in parts:
-                    raise InstallError(self.name, f"unsafe member path {member.name!r}")
-                if not parts:
-                    continue  # the "./" root member
-                target = staged.joinpath(*parts)
-                if not _contained(target):
-                    raise InstallError(self.name, f"member escapes staged tree: {member.name}")
-                if member.isdir():
-                    target.mkdir(parents=True, exist_ok=True)
-                    continue
-                if member.issym():
-                    if PurePosixPath(member.linkname).is_absolute() or Path(member.linkname).is_absolute():
-                        raise InstallError(
-                            self.name,
-                            f"absolute symlink target {member.linkname!r} "
-                            f"in {member.name}",
-                        )
-                    link_dir = "/".join(parts[:-1])
-                    resolved = posixpath.normpath(posixpath.join(link_dir, member.linkname))
-                    if resolved == ".." or resolved.startswith("../"):
-                        raise InstallError(self.name, f"symlink escapes root: {member.name}")
-                    if not _contained(target.parent / member.linkname):
-                        raise InstallError(self.name, f"symlink escapes staged tree: {member.name}")
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    if target.exists() or target.is_symlink():
-                        target.unlink()
-                    try:
-                        target.symlink_to(member.linkname)
-                    except OSError:
-                        resolved_path = staged.joinpath(*resolved.split("/"))
-                        if resolved_path.is_file():
-                            shutil.copy2(resolved_path, target)
-                        else:
-                            deferred_links.append((member.linkname, target, resolved_path))
-                    continue
-                if not member.isfile():
-                    raise InstallError(self.name, f"unsupported member type: {member.name}")
-                target.parent.mkdir(parents=True, exist_ok=True)
-                if not _contained(target.parent):
-                    raise InstallError(
-                        self.name,
-                        f"member {member.name} resolves outside the staged tree "
-                        "through a symlinked ancestor",
-                    )
-                extracted = tf.extractfile(member)
-                if extracted is None:
-                    raise InstallError(self.name, f"cannot read member {member.name}")
-                with extracted, open(target, "wb") as dst:
-                    shutil.copyfileobj(extracted, dst)
-                try:
-                    target.chmod(member.mode & 0o777)
-                except OSError:
-                    pass
-        while deferred_links:
-            pending = []
-            for linkname, target, resolved_path in deferred_links:
-                if not _contained(resolved_path):
-                    raise InstallError(
-                        self.name,
-                        f"symlink {target.name} resolves outside the staged tree",
-                    )
-                if target.exists() or target.is_symlink():
-                    continue
-                if resolved_path.is_file():
-                    shutil.copy2(resolved_path, target)
-                else:
-                    pending.append((linkname, target, resolved_path))
-            if len(pending) == len(deferred_links):
-                break
-            deferred_links = pending
         # Termux debs carry owner-only modes across the whole tree (700 on
         # binaries n libs, 600 on stdlib .py files) -- postinst would
         # normalize on a real phone, but pm extracts without postinst, and
@@ -321,13 +249,15 @@ class DebPackage(Package):
                     continue
                 if stat_mod.S_ISLNK(mode):
                     continue
-                if not _contained(f):
+                if not os.path.realpath(f).startswith(real_staged + os.sep):
                     continue
                 wanted = 0o644 | (0o111 if mode & 0o111 else 0)
                 try:
                     f.chmod(wanted)
                 except OSError:
-                    pass
+                    # Best effort by design: a file we cannot chmod keeps its
+                    # extracted mode, and verify() still judges the tree.
+                    continue
 
     def verify(self, entry: Path, target: str) -> str:
         """'' when the staged tree is plausible on target: the expected

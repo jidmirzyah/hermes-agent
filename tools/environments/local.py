@@ -306,40 +306,13 @@ def _sanitize_subprocess_env(base_env: dict | None, extra_env: dict | None = Non
 def hermes_subprocess_env(
     *, inherit_credentials: bool = False, base_env: dict[str, str] | None = None
 ) -> dict[str, str]:
-    """Build a sanitized environment dict for a spawned subprocess.
+    """Sanitize a non-terminal child's environment (no skill passthrough).
 
-    Centralized helper for the **non-terminal** spawn surface (browser,
-    ACP/CLI executors, computer-use driver, dep-ensure, TUI Node host,
-    detached gateway).  Use this instead of copying ``os.environ`` directly
-    so strip-by-default is the uniform policy across every spawn site, with a
-    single source of truth (``_HERMES_PROVIDER_ENV_BLOCKLIST``).  The terminal
-    / execute_code path keeps using :func:`_sanitize_subprocess_env`, which is
-    skill-aware (``env_passthrough``); this helper is for spawns that have no
-    skill-passthrough concept.
-
-    Two-tier stripping:
-
-    * **Tier 1 (always):** ``_ALWAYS_STRIP_KEYS`` — gateway bot tokens, GitHub
-      auth, and remote-compute secrets are removed regardless of
-      ``inherit_credentials``.  No child Hermes spawns legitimately needs them.
-    * **Tier 2 (conditional):** the rest of ``_HERMES_PROVIDER_ENV_BLOCKLIST``
-      (LLM provider API keys, tool secrets) is removed unless the caller passes
-      ``inherit_credentials=True``.
-
-    Pass ``inherit_credentials=True`` **only** when the child legitimately
-    needs LLM provider credentials — a user-blessed ``claude`` / ``codex`` /
-    ``gemini`` CLI executor, or the TUI Node host that makes model calls.  The
-    flag is grep-able for audit: ``grep -rn 'inherit_credentials=True'`` lists
-    every spawn site that still receives provider credentials.
-
-    Callers that need a *specific* non-provider secret (e.g. the browser worker
-    needs ``BROWSERBASE_API_KEY`` / ``FIRECRAWL_API_KEY``) should call with
-    ``inherit_credentials=False`` and copy just those keys back from
-    ``os.environ`` into the returned dict.
-
-    ``base_env`` swaps the starting environment (default ``os.environ``) —
-    for callers that already hold a curated env (pm's sanitized uv env) and
-    want the strip policy applied on top of it.
+    Bot, GitHub and remote-compute secrets never pass through; provider/tool
+    credentials pass only with ``inherit_credentials=True`` for children that
+    need them. Callers needing one other secret should add only that key back.
+    ``base_env`` lets an already curated environment use the same policy.
+    Terminal and execute_code spawns use the skill-aware sanitizer instead.
     """
     env = dict(base_env) if base_env is not None else os.environ.copy()
     env = _scrub_credentials(env, inherit_credentials=inherit_credentials)

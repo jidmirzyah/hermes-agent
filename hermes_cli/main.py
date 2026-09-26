@@ -3830,6 +3830,12 @@ def main():
         configure_windows_stdio()
     except Exception:
         pass
+    # A non-UTF-8 locale that the package import had to repair would crash Python children the
+    # same way. Only on that host, so a healthy UTF-8 locale keeps its children untouched.
+    from hermes_cli import _stdio_repaired
+    if _stdio_repaired:
+        os.environ.setdefault("PYTHONUTF8", "1")
+        os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 
     # One TLS authority: trust the OS store before any outbound call resolves a
     # CA bundle (agent/ssl_verify.py). Never raises; False just means OpenSSL's paths.

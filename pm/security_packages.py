@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import logging
 import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -109,9 +111,9 @@ class IronProxy(_SignedBinary):
     signing_key_url = "https://raw.githubusercontent.com/paradigmxyz/iron-proxy/be5f255d0d9d10d8573bd65f480dd48a07772bf1/public-key.asc"
 
     def _probe_env(self) -> dict:
-        from agent.proxy_sources.iron_proxy import _allowlisted_env
+        from agent.proxy_sources.iron_proxy import allowlisted_env
 
-        return _allowlisted_env()
+        return allowlisted_env()
 
     def fetch_url(self, version: str, target: str) -> str:
         platform, arch = target.split("-")
@@ -124,6 +126,24 @@ class IronProxy(_SignedBinary):
         return [archive, f"{base}/checksums.txt", f"{base}/checksums.txt.asc", self.signing_key_url]
 
     def verify_provenance(self, directory: Path) -> None:
-        from agent.proxy_sources.iron_proxy import _verify_checksums_signature
-
-        _verify_checksums_signature(directory, directory / "checksums.txt")
+        # Keep package provenance inside PM rather than calling a private
+        # helper in the running proxy (which also owns runtime subprocesses).
+        gpg = shutil.which("gpg")
+        if not gpg:
+            logging.getLogger(__name__).warning("gpg unavailable; iron-proxy archive checksum remains enforced")
+            return
+        with tempfile.TemporaryDirectory(prefix="hermes-iron-signature-") as home:
+            args = [gpg, "--homedir", home, "--batch", "--no-tty"]
+            signature = directory / "checksums.txt.asc"
+            key = directory / "public-key.asc"
+            if not signature.is_file() or not key.is_file():
+                raise InstallError(self.name, "pinned signature assets missing")
+            imported = subprocess.run([*args, "--import", str(key)], stdin=subprocess.DEVNULL,
+                                      capture_output=True, timeout=60, check=False)
+            if imported.returncode:
+                logging.getLogger(__name__).warning("Could not import iron-proxy signing key; archive checksum remains enforced")
+                return
+            verified = subprocess.run([*args, "--verify", str(signature), str(directory / "checksums.txt")],
+                                      stdin=subprocess.DEVNULL, capture_output=True, timeout=60, check=False)
+            if verified.returncode:
+                raise InstallError(self.name, "GPG signature verification failed")

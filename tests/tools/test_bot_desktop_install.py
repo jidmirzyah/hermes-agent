@@ -89,7 +89,7 @@ def test_timeout_kills_the_package_managers_whole_process_group(monkeypatch):
 
     def gone() -> bool:  # /proc-based: a reparented orphan sits outside our subtree, where os.kill(pid, 0) is guarded
         try:
-            return "Z" in (Path(f"/proc/{child}/stat").read_text(encoding="utf-8-sig").rsplit(")", 1)[1].split() or ["Z"])[0]
+            return "Z" in (Path(f"/proc/{child}/stat").read_text(encoding="utf-8").rsplit(")", 1)[1].split() or ["Z"])[0]
         except OSError:
             return True
 

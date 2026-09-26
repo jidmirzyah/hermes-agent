@@ -62,7 +62,11 @@ def complete_source_checkout(
     if complete:
         from hermes_cli.source_stamp import write_source_stamp
 
-        write_source_stamp(root)
+        try:
+            write_source_stamp(root)
+        except (OSError, ValueError) as exc:
+            print(f"⚠ Source update completed, but the install stamp could not be written: {exc}",
+                  file=sys.stderr)
     return complete
 
 
