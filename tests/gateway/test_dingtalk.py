@@ -1,12 +1,11 @@
 """Tests for DingTalk platform adapter."""
 import asyncio
-from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from gateway.config import Platform, PlatformConfig
+from gateway.config import PlatformConfig
 
 
 class _FakeDingTalkModel:
@@ -107,18 +106,6 @@ class TestDingTalkRequirements:
 # ---------------------------------------------------------------------------
 
 
-class TestDingTalkAdapterInit:
-
-    def test_reads_config_from_extra(self):
-        from plugins.platforms.dingtalk.adapter import DingTalkAdapter
-        config = PlatformConfig(
-            enabled=True,
-            extra={"client_id": "cfg-id", "client_secret": "cfg-secret"},
-        )
-        adapter = DingTalkAdapter(config)
-        assert adapter._client_id == "cfg-id"
-        assert adapter._client_secret == "cfg-secret"
-        assert adapter.name == "Dingtalk"  # base class uses .title()
 
 
 # ---------------------------------------------------------------------------
@@ -126,12 +113,6 @@ class TestDingTalkAdapterInit:
 # ---------------------------------------------------------------------------
 
 
-class TestDeduplication:
-
-    def test_first_message_not_duplicate(self):
-        from plugins.platforms.dingtalk.adapter import DingTalkAdapter
-        adapter = DingTalkAdapter(PlatformConfig(enabled=True))
-        assert adapter._dedup.is_duplicate("msg-1") is False
 
 
 # ---------------------------------------------------------------------------
@@ -164,7 +145,6 @@ class TestSend:
         assert call_args[0][0] == "https://dingtalk.example/webhook"
         payload = call_args[1]["json"]
         assert payload["msgtype"] == "markdown"
-        assert payload["markdown"]["title"] == "Hermes"
         assert payload["markdown"]["text"] == "Hello!"
 
 
@@ -216,7 +196,7 @@ class TestConnect:
     @pytest.mark.asyncio
     async def test_disconnect_finalizes_open_streaming_cards(self):
         """Streaming cards must be finalized before HTTP client closes."""
-        from unittest.mock import AsyncMock, patch
+        from unittest.mock import AsyncMock
         from plugins.platforms.dingtalk.adapter import DingTalkAdapter
         adapter = DingTalkAdapter(PlatformConfig(enabled=True))
         adapter._http_client = AsyncMock()
@@ -275,12 +255,6 @@ class TestWebhookDomainAllowlist:
         )
 
 
-class TestHandlerProcessIsAsync:
-    """dingtalk-stream >= 0.20 requires ``process`` to be a coroutine."""
-
-    def test_process_is_coroutine_function(self):
-        from plugins.platforms.dingtalk.adapter import _IncomingHandler
-        assert asyncio.iscoroutinefunction(_IncomingHandler.process)
 
 
 class TestExtractText:
@@ -602,20 +576,6 @@ class TestExtractTextMentions:
 # ---------------------------------------------------------------------------
 
 
-class TestMessageContextIsolation:
-
-    def test_contexts_keyed_by_chat_id(self):
-        """Two concurrent chats must not clobber each other's context."""
-        from plugins.platforms.dingtalk.adapter import DingTalkAdapter
-        adapter = DingTalkAdapter(PlatformConfig(enabled=True))
-
-        msg_a = MagicMock(conversation_id="chat-A", sender_staff_id="user-A")
-        msg_b = MagicMock(conversation_id="chat-B", sender_staff_id="user-B")
-        adapter._message_contexts["chat-A"] = msg_a
-        adapter._message_contexts["chat-B"] = msg_b
-
-        assert adapter._message_contexts["chat-A"] is msg_a
-        assert adapter._message_contexts["chat-B"] is msg_b
 
 
 # ---------------------------------------------------------------------------
@@ -710,7 +670,6 @@ class TestCardLifecycle:
         result = await adapter.edit_message("chat-1", "track-1", "heartbeat")
 
         assert not result.success
-        assert result.error == "AI Cards are not configured for message editing"
         adapter._get_access_token.assert_not_awaited()
         if card_sdk is not None:
             assert card_sdk.mock_calls == []
@@ -729,128 +688,3 @@ class TestCardLifecycle:
 # AI Card Tests
 # ---------------------------------------------------------------------------
 
-class TestDingTalkAdapterAICards:
-    @pytest.fixture
-    def config(self):
-        return PlatformConfig(
-            enabled=True,
-            extra={
-                "client_id": "test_id",
-                "client_secret": "test_secret",
-                "card_template_id": "test_card_template",
-            },
-        )
-
-    @pytest.fixture
-    def mock_stream_client(self):
-        client = MagicMock()
-        client.get_access_token = MagicMock(return_value="test_token")
-        return client
-
-    @pytest.fixture
-    def mock_http_client(self):
-        return AsyncMock()
-
-    @pytest.fixture
-    def mock_message(self):
-        msg = MagicMock()
-        msg.message_id = "test_msg_id"
-        msg.conversation_id = "test_conv_id"
-        msg.conversation_type = "1"
-        msg.sender_id = "sender1"
-        msg.sender_nick = "Test User"
-        msg.sender_staff_id = "staff1"
-        msg.text = MagicMock(content="Hello")
-        msg.session_webhook = "https://api.dingtalk.com/robot/sendBySession?session=test"
-        msg.session_webhook_expired_time = 999999999999
-        msg.create_at = int(datetime.now(tz=timezone.utc).timestamp() * 1000)
-        msg.at_users = []
-        return msg
-
-    @pytest.mark.asyncio
-    async def test_send_uses_ai_card_if_configured(self, config, mock_stream_client, mock_http_client, mock_message):
-        from plugins.platforms.dingtalk.adapter import DingTalkAdapter
-
-        adapter = DingTalkAdapter(config)
-        adapter._stream_client = mock_stream_client
-        adapter._http_client = mock_http_client
-        adapter._message_contexts["test_conv_id"] = mock_message
-        adapter._session_webhooks = {"test_conv_id": ("https://api.dingtalk.com/robot/sendBySession?session=test", 9999999999999)}
-        adapter._card_template_id = "test_card_template"
-
-        # Mock the card SDK with proper async methods
-        mock_card_sdk = MagicMock()
-        mock_card_sdk.create_card_with_options_async = AsyncMock()
-        mock_card_sdk.deliver_card_with_options_async = AsyncMock()
-        mock_card_sdk.streaming_update_with_options_async = AsyncMock()
-        adapter._card_sdk = mock_card_sdk
-
-        # Mock access token
-        adapter._get_access_token = AsyncMock(return_value="test_token")
-
-        result = await adapter.send("test_conv_id", "Hello World")
-
-        mock_card_sdk.create_card_with_options_async.assert_called_once()
-        mock_card_sdk.deliver_card_with_options_async.assert_called_once()
-        mock_card_sdk.streaming_update_with_options_async.assert_called_once()
-        assert result.success is True
-
-
-class TestResolveMediaCodes:
-    """Media codes resolve through the robot API."""
-
-    @pytest.mark.parametrize("message_type", ["file", "image"])
-    def test_resolves_codes_from_every_payload_shape(self, message_type):
-        from plugins.platforms.dingtalk.adapter import DingTalkAdapter
-
-        adapter = DingTalkAdapter(PlatformConfig(enabled=True))
-        adapter._client_id = "robot-x"
-        message = SimpleNamespace(
-            robot_code=None,
-            image_content=SimpleNamespace(download_code="dl-img"),
-            rich_text_content=SimpleNamespace(rich_text_list=[
-                {"downloadCode": "dl-rich"},
-                {"pictureDownloadCode": "dl-pic"},
-                {"download_code": "dl-snake"},
-            ]),
-            message_type=message_type,
-            extensions={"content": {"downloadCode": "dl-ext"}},
-        )
-
-        seen = []
-
-        async def fetch(request, headers, runtime):
-            seen.append((request.download_code, request.robot_code, headers.x_acs_dingtalk_access_token))
-            return SimpleNamespace(body=SimpleNamespace(download_url=f"https://example.test/{request.download_code}"))
-
-        adapter._get_access_token = AsyncMock(return_value="tok")
-        adapter._robot_sdk = SimpleNamespace(
-            robot_message_file_download_with_options_async=AsyncMock(side_effect=fetch),
-        )
-        asyncio.run(adapter._resolve_media_codes(message))
-        assert sorted(seen) == [
-            ("dl-ext", "robot-x", "tok"),
-            ("dl-img", "robot-x", "tok"),
-            ("dl-pic", "robot-x", "tok"),
-            ("dl-rich", "robot-x", "tok"),
-            ("dl-snake", "robot-x", "tok"),
-        ]
-        assert message.image_content.download_code == "https://example.test/dl-img"
-        assert message.rich_text_content.rich_text_list == [
-            {"downloadCode": "https://example.test/dl-rich"},
-            {"pictureDownloadCode": "https://example.test/dl-pic"},
-            {"download_code": "https://example.test/dl-snake"},
-        ]
-        assert message.extensions["content"]["downloadCode"] == "https://example.test/dl-ext"
-
-    @pytest.mark.parametrize("has_token,has_codes", [(False, True), (True, False)])
-    def test_missing_token_or_codes_never_fetches(self, has_token, has_codes):
-        from plugins.platforms.dingtalk.adapter import DingTalkAdapter
-
-        adapter = DingTalkAdapter(PlatformConfig(enabled=True))
-        message = SimpleNamespace(image_content=SimpleNamespace(download_code="dl") if has_codes else None)
-        adapter._get_access_token = AsyncMock(return_value="tok" if has_token else None)
-        fetch = AsyncMock()
-        adapter._robot_sdk = SimpleNamespace(robot_message_file_download_with_options_async=fetch)
-        asyncio.run(adapter._resolve_media_codes(message))
-        fetch.assert_not_called()

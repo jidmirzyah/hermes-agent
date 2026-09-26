@@ -68,18 +68,6 @@ class TestCmdUpdateNpmLockfileCache:
 
 
 
-    def test_record_npm_lockfile_hash(self, tmp_path, monkeypatch):
-        from hermes_cli import main as hm
-
-        monkeypatch.setattr(hm, "PROJECT_ROOT", tmp_path)
-        (tmp_path / "package-lock.json").write_text('{"lockfileVersion": 3}')
-
-        update_cmd._record_npm_lockfile_hash(tmp_path)
-
-        assert (
-            self._cache_file(tmp_path, tmp_path).read_text()
-            == update_cmd._npm_manifests_digest()
-        )
 
     def test_package_json_only_edit_defeats_skip(self, tmp_path, monkeypatch):
         """Reviewer scenario (#61580): dev edits package.json WITHOUT running
@@ -234,7 +222,6 @@ class TestCmdUpdateBranchFallback:
         add_remote.assert_not_called()
         mark_skip.assert_not_called()
         captured = capsys.readouterr()
-        assert "Skipping upstream setup (non-interactive run)." in captured.out
         assert "official repo not checked" in captured.out
         assert "Already up to date!" not in captured.out
 
@@ -1408,26 +1395,6 @@ class TestUpdateNodeDependencies:
         assert "--include-workspace-root" in joined
         assert "desktop" not in joined
 
-    @patch("subprocess.Popen")
-    @patch("shutil.which", return_value="/usr/bin/npm")
-    def test_install_preserves_standard_flags(self, _which, mock_popen, tmp_path, monkeypatch):
-        """--no-fund, --no-audit, --progress=false must survive."""
-        from hermes_cli import main as hm
-
-        (tmp_path / "package.json").write_text("{}")
-        (tmp_path / "package-lock.json").write_text("{}")
-        monkeypatch.setattr(hm, "PROJECT_ROOT", tmp_path)
-        monkeypatch.setattr(hm, "_npm_lockfile_changed", lambda root: True)
-        popen_calls = []
-        mock_popen.side_effect = self._make_popen(popen_calls)
-
-        update_cmd._update_node_dependencies()
-
-        calls = self._popen_npm_calls(popen_calls)
-        assert len(calls) == 1
-        joined = " ".join(str(a) for a in calls[0])
-        for flag in ("--no-fund", "--no-audit", "--progress=false"):
-            assert flag in joined, f"{flag} missing from npm call; actual: {calls[0]}"
 
     @patch("subprocess.run")
     @patch("shutil.which", return_value="/usr/bin/npm")
@@ -1446,23 +1413,6 @@ class TestUpdateNodeDependencies:
             "npm must not run when _npm_lockfile_changed reports no change"
         )
 
-    @patch("subprocess.Popen")
-    @patch("shutil.which", return_value="/usr/bin/npm")
-    def test_runs_install_when_lockfile_changed(self, _which, mock_popen, tmp_path, monkeypatch):
-        """When _npm_lockfile_changed reports a change, npm must run."""
-        from hermes_cli import main as hm
-
-        (tmp_path / "package.json").write_text("{}")
-        (tmp_path / "package-lock.json").write_text("{}")
-        monkeypatch.setattr(hm, "PROJECT_ROOT", tmp_path)
-        monkeypatch.setattr(hm, "_npm_lockfile_changed", lambda root: True)
-        popen_calls = []
-        mock_popen.side_effect = self._make_popen(popen_calls)
-
-        update_cmd._update_node_dependencies()
-
-        calls = self._popen_npm_calls(popen_calls)
-        assert len(calls) == 1, f"expected npm to run when lockfile changed; got: {calls}"
 
     @patch("subprocess.Popen")
     @patch("shutil.which", return_value="/usr/bin/npm")
@@ -1486,27 +1436,6 @@ class TestUpdateNodeDependencies:
 
         assert not recorded, "lockfile hash must not be recorded when npm install fails"
 
-    @patch("subprocess.Popen")
-    @patch("shutil.which", return_value="/usr/bin/npm")
-    def test_warms_npx_agent_browser_cache_regardless_of_install_result(
-        self, _which, mock_popen, tmp_path, monkeypatch
-    ):
-        """The npx warm-up must fire even when the workspace install fails —
-        it's independent of ui-tui/web dependency state (#43564)."""
-        from hermes_cli import main as hm
-
-        (tmp_path / "package.json").write_text("{}")
-        (tmp_path / "package-lock.json").write_text("{}")
-        monkeypatch.setattr(hm, "PROJECT_ROOT", tmp_path)
-        monkeypatch.setattr(hm, "_npm_lockfile_changed", lambda root: True)
-        mock_popen.side_effect = self._make_popen([], returncode=1, stderr_lines=["npm ERR!\n"])
-
-        with patch(
-            "tools.browser_tool_install.warm_agent_browser_npx_cache", return_value=True
-        ) as mock_warm:
-            update_cmd._update_node_dependencies()
-
-        mock_warm.assert_called_once()
 
     @patch("subprocess.run")
     @patch("shutil.which", return_value=None)

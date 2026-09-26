@@ -3,17 +3,13 @@
 import inspect
 import tempfile
 import threading
+import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from types import SimpleNamespace
 from unittest import mock
 
 from hermes_cli.web_routers import profiles
-
-
-# These guard deadlocks, not response latency on a contended CI worker.
-_THREAD_TIMEOUT = 30
 
 
 class SidebarCacheTests(unittest.TestCase):
@@ -23,24 +19,6 @@ class SidebarCacheTests(unittest.TestCase):
         self.addCleanup(patcher.stop)
         profiles._sidebar_profile_cache_clear()
         self.addCleanup(profiles._sidebar_profile_cache_clear)
-
-    def _concurrent_scans(self, scan, workers, entered, release):
-        ready = threading.Barrier(workers)
-
-        def request():
-            ready.wait(timeout=_THREAD_TIMEOUT)
-            return scan()
-
-        # Expiry has its own test. A descheduled contender must not age out this burst.
-        with mock.patch.object(profiles, "time", SimpleNamespace(monotonic=lambda: 100.0)), \
-                ThreadPoolExecutor(max_workers=workers) as pool:
-            try:
-                futures = [pool.submit(request) for _ in range(workers)]
-                self.assertTrue(entered.wait(timeout=_THREAD_TIMEOUT))
-            finally:
-                # Also unblock the scan when setup/assertions fail, before pool shutdown joins it.
-                release.set()
-            return [future.result(timeout=_THREAD_TIMEOUT) for future in futures]
 
     def test_profile_cache_uses_db_and_wal_fingerprint_and_defensive_copies(self):
         with tempfile.TemporaryDirectory() as root:
@@ -105,10 +83,15 @@ class SidebarCacheTests(unittest.TestCase):
             with calls_lock:
                 calls += 1
             entered.set()
-            self.assertTrue(release.wait(timeout=_THREAD_TIMEOUT))
+            self.assertTrue(release.wait(timeout=2))
             return {"profile": profile, "rows": []}
 
-        results = self._concurrent_scans(lambda: scan("default"), workers, entered, release)
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(scan, "default") for _ in range(workers)]
+            self.assertTrue(entered.wait(timeout=1))
+            time.sleep(0.05)
+            release.set()
+            results = [future.result(timeout=2) for future in futures]
 
         self.assertEqual(calls, 1)
         self.assertEqual(results, [{"profile": "default", "rows": []}] * workers)
@@ -189,36 +172,6 @@ class SidebarCacheTests(unittest.TestCase):
 
         self.assertEqual(inspect.signature(wrapped), inspect.signature(scan))
 
-    def test_projects_tree_coalesces_concurrent_scans_and_returns_copies(self):
-        # /api/profiles/projects/tree fans out over every profile's state.db; desktop
-        # background sync + sidebar refreshes overlap identical requests. One scan must
-        # serve the whole burst, and no two callers may share the same payload object.
-        # The route imports this lazily; cold import time is setup, not scan concurrency.
-        from tui_gateway import server  # noqa: F401
-
-        workers = 8
-        entered = threading.Event()
-        release = threading.Event()
-        scans = 0
-        scans_lock = threading.Lock()
-
-        def fake_read(name, home, errors, fn):
-            nonlocal scans
-            with scans_lock:
-                scans += 1
-            entered.set()
-            self.assertTrue(release.wait(timeout=_THREAD_TIMEOUT))
-            return None
-
-        with mock.patch.object(profiles, "_profile_targets", return_value=[("default", Path("/nonexistent"))]), \
-                mock.patch.object(profiles, "_read_profile_db", side_effect=fake_read):
-            results = self._concurrent_scans(
-                profiles.get_profiles_projects_tree, workers, entered, release)
-
-        self.assertEqual(scans, 1)
-        self.assertEqual(len({id(r) for r in results}), workers)
-        self.assertEqual(results, [results[0]] * workers)
-        self.assertEqual(results[0]["projects"], [])
 
 
 if __name__ == "__main__":

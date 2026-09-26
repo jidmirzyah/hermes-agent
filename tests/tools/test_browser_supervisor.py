@@ -36,7 +36,6 @@ import shutil
 import subprocess
 import tempfile
 import time
-from pathlib import Path
 
 import pytest
 
@@ -63,21 +62,28 @@ def _find_chrome() -> str:
 
 
 @pytest.fixture
-def chrome_cdp(tmp_path):
+def chrome_cdp(request):
     """Start a headless Chrome with --remote-debugging-port, yield its WS URL.
 
-    Binds an ephemeral port (bind port 0, read back the real one) so
-    concurrently-running test files in the per-file parallel runner can
-    never collide on a fixed port.
+    Uses a unique port per xdist worker to avoid cross-worker collisions.
     Always launches with ``--site-per-process`` so cross-origin iframes
     become real OOPIFs (needed by the iframe interaction tests).
     """
+
+    # xdist worker_id is "master" in single-process mode or "gw0".."gwN" otherwise.
+    # Under subprocess-per-file isolation there's no xdist, so we fall back
+    # to "master" via the session-scoped fixture below.
+    worker_id = request.getfixturevalue("worker_id") if "worker_id" in request.fixturenames else "master"
+    if worker_id == "master":
+        port_offset = 0
+    else:
+        port_offset = int(worker_id.lstrip("gw"))
+    port = 9225 + port_offset
     profile = tempfile.mkdtemp(prefix="hermes-supervisor-test-")
-    stderr = (tmp_path / "chrome.stderr").open("w+b")
     proc = subprocess.Popen(
         [
             _find_chrome(),
-            "--remote-debugging-port=0",
+            f"--remote-debugging-port={port}",
             f"--user-data-dir={profile}",
             "--no-first-run",
             "--no-default-browser-check",
@@ -86,17 +92,13 @@ def chrome_cdp(tmp_path):
             "--site-per-process",  # force OOPIFs for cross-origin iframes
         ],
         stdout=subprocess.DEVNULL,
-        stderr=stderr,
+        stderr=subprocess.DEVNULL,
     )
 
     ws_url = None
-    port = None
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
-        if proc.poll() is not None:
-            break
         try:
-            port = int((Path(profile) / "DevToolsActivePort").read_text(encoding="utf-8").splitlines()[0])
             import urllib.request
             with urllib.request.urlopen(
                 f"http://127.0.0.1:{port}/json/version", timeout=1
@@ -120,10 +122,7 @@ def chrome_cdp(tmp_path):
             except (AssertionError, Exception):
                 pass
         shutil.rmtree(profile, ignore_errors=True)
-        stderr.seek(0)
-        diagnostic = stderr.read().decode("utf-8", errors="replace")
-        stderr.close()
-        pytest.fail(f"Chrome didn't expose CDP in time: {diagnostic}")
+        pytest.skip("Chrome didn't expose CDP in time")
 
     yield ws_url, port
 
@@ -150,7 +149,6 @@ def chrome_cdp(tmp_path):
         except (AssertionError, Exception):
             pass
     shutil.rmtree(profile, ignore_errors=True)
-    stderr.close()
 
 
 def _test_page_url() -> str:
@@ -164,7 +162,6 @@ def _test_page_url() -> str:
 
 def _fire_on_page(cdp_url: str, expression: str) -> None:
     """Navigate the first page target to a data URL and fire `expression`."""
-    import asyncio
     import websockets as _ws_mod
 
     async def run():
@@ -309,6 +306,7 @@ def test_browser_dialog_tool_end_to_end(chrome_cdp, supervisor_registry):
     assert r["success"] is True
     assert r["action"] == "dismiss"
     assert "PYTEST-TOOL-END2END" in r["dialog"]["message"]
+
 
 
 

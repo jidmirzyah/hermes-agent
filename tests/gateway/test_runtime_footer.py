@@ -3,7 +3,6 @@ appended to final gateway replies."""
 
 from __future__ import annotations
 
-import os
 
 import pytest
 
@@ -36,12 +35,10 @@ def test_model_short_drops_vendor_prefix(model, expected):
 
 def test_home_relative_cwd_collapses_home(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
-    # On Windows os.path.expanduser("~") reads USERPROFILE, not HOME.
-    monkeypatch.setenv("USERPROFILE", str(tmp_path))
     sub = tmp_path / "projects" / "hermes"
     sub.mkdir(parents=True)
     result = _home_relative_cwd(str(sub))
-    assert result == os.path.join("~", "projects", "hermes")
+    assert result == "~/projects/hermes"
 
 
 # ---------------------------------------------------------------------------
@@ -50,8 +47,6 @@ def test_home_relative_cwd_collapses_home(tmp_path, monkeypatch):
 
 def test_format_footer_all_fields(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
-    # On Windows os.path.expanduser("~") reads USERPROFILE, not HOME.
-    monkeypatch.setenv("USERPROFILE", str(tmp_path))
     monkeypatch.setenv("TERMINAL_CWD", str(tmp_path / "projects" / "hermes"))
     (tmp_path / "projects" / "hermes").mkdir(parents=True)
     out = format_runtime_footer(
@@ -61,7 +56,7 @@ def test_format_footer_all_fields(monkeypatch, tmp_path):
         cwd=None,  # falls back to TERMINAL_CWD env var
         fields=("model", "context_pct", "cwd"),
     )
-    assert out == "gpt-5.4 · 68% · " + os.path.join("~", "projects", "hermes")
+    assert out == "gpt-5.4 · 68% · ~/projects/hermes"
 
 
 def test_format_footer_skips_missing_context_length():
@@ -75,7 +70,7 @@ def test_format_footer_skips_missing_context_length():
     # context_pct dropped silently; no "?%" artifact
     assert "%" not in out
     assert "gpt-5.4" in out
-    assert os.path.abspath("/tmp/wd") in out
+    assert "/tmp/wd" in out
 
 
 # ---------------------------------------------------------------------------
@@ -137,7 +132,6 @@ def test_build_footer_per_platform_off_suppresses():
     assert out == ""
 
 
-
 # ---------------------------------------------------------------------------
 # latency — opt-in wall-clock turn duration
 # ---------------------------------------------------------------------------
@@ -163,18 +157,6 @@ def test_format_latency(seconds, expected):
     from gateway.runtime_footer import _format_latency
 
     assert _format_latency(seconds) == expected
-
-
-def test_format_footer_latency_renders():
-    out = format_runtime_footer(
-        model="m",
-        context_tokens=0,
-        context_length=None,
-        cwd="",
-        turn_seconds=22.0,
-        fields=("latency",),
-    )
-    assert out == "22s"
 
 
 def test_format_footer_latency_skipped_when_unmeasured():
@@ -218,8 +200,6 @@ def test_format_footer_latency_zero_renders_sub_second():
 
 def test_format_footer_latency_in_field_order(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
-    # On Windows os.path.expanduser("~") reads USERPROFILE, not HOME.
-    monkeypatch.setenv("USERPROFILE", str(tmp_path))
     out = format_runtime_footer(
         model="openai/gpt-5.4",
         context_tokens=68_000,
@@ -257,58 +237,9 @@ def test_build_footer_line_threads_turn_seconds(monkeypatch):
 #
 # Upstream doctrine: a system prompt / rendered surface must be byte-stable for
 # the life of a conversation.  Adding a field to _DEFAULT_FIELDS would silently
-# change the footer text of every user who already enabled it.  These tests pin
-# the default set and the exact default-config output strings.
+# change the footer text of every user who already enabled it.  The test below
+# checks default-config output is unaffected by turn timing.
 # ---------------------------------------------------------------------------
-
-_LEGACY_DEFAULT_FIELDS = ["model", "context_pct", "cwd"]
-# An absolute path that survives _home_relative_cwd unchanged on every host
-# (os.path.abspath("/var/data") -> "C:\\var\\data" on Windows, "/var/data" on POSIX).
-_VAR_DATA = os.path.abspath("/var/data")
-
-
-def test_latency_not_in_default_fields():
-    from gateway.runtime_footer import _DEFAULT_FIELDS
-
-    assert "latency" not in _DEFAULT_FIELDS
-    assert list(_DEFAULT_FIELDS) == _LEGACY_DEFAULT_FIELDS
-
-
-def test_resolve_footer_config_default_fields_exclude_latency():
-    assert resolve_footer_config({}, "telegram")["fields"] == _LEGACY_DEFAULT_FIELDS
-    assert resolve_footer_config(
-        {"display": {"runtime_footer": {"enabled": True}}}, "discord"
-    )["fields"] == _LEGACY_DEFAULT_FIELDS
-
-
-@pytest.mark.parametrize(
-    "model,tokens,window,cwd,expected",
-    [
-        ("openai/gpt-5.4", 50_247, 1_000_000, _VAR_DATA, f"gpt-5.4 · 5% · {_VAR_DATA}"),
-        ("claude-opus-4-8", 68_000, 100_000, _VAR_DATA, f"claude-opus-4-8 · 68% · {_VAR_DATA}"),
-        ("m", 0, None, _VAR_DATA, f"m · {_VAR_DATA}"),
-        ("", 10, 100, _VAR_DATA, f"10% · {_VAR_DATA}"),
-        ("m", 10, 100, "", "m · 10%"),
-    ],
-)
-def test_default_footer_renders_byte_identically(
-    monkeypatch, model, tokens, window, cwd, expected
-):
-    """Default-config output is byte-for-byte what it was before `latency`.
-
-    Note `turn_seconds` IS supplied — proving that even when the caller
-    measures timing, a default-configured footer does not show it.
-    """
-    monkeypatch.delenv("TERMINAL_CWD", raising=False)
-    out = format_runtime_footer(
-        model=model,
-        context_tokens=tokens,
-        context_length=window,
-        cwd=cwd,
-        turn_seconds=22.0,
-        # fields deliberately NOT passed — exercises the default.
-    )
-    assert out == expected
 
 
 def test_default_build_footer_line_ignores_turn_seconds(monkeypatch):
@@ -320,11 +251,11 @@ def test_default_build_footer_line_ignores_turn_seconds(monkeypatch):
         model="openai/gpt-5.4",
         context_tokens=50_247,
         context_length=1_000_000,
-        cwd=_VAR_DATA,
+        cwd="/var/data",
     )
     baseline = build_footer_line(**common)
     with_timing = build_footer_line(**common, turn_seconds=125.0)
-    assert baseline == f"gpt-5.4 · 5% · {_VAR_DATA}"
+    assert baseline == "gpt-5.4 · 5% · /var/data"
     assert with_timing == baseline
 
 

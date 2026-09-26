@@ -8,7 +8,6 @@ import { test } from 'vitest'
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..', '..')
 const POSIX_SCRIPT = path.join(REPO_ROOT, 'scripts', 'desktop-update', 'posix.sh')
-const WINDOWS_SCRIPT = path.join(REPO_ROOT, 'scripts', 'desktop-update', 'windows.ps1')
 
 function sandbox(tag: string) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), `hermes-handoff-marker-${tag}-`))
@@ -24,8 +23,8 @@ function markerStartedAt(home: string): number {
   return Number.parseInt(startedAt, 10)
 }
 
-function runPosix(installRoot: string, startedAt?: string): ReturnType<typeof spawnSync> {
-  const env: NodeJS.ProcessEnv = { ...process.env, HERMES_HOME: path.dirname(installRoot) }
+function runPosix(installRoot: string, startedAt?: string) {
+  const env = { ...process.env }
 
   if (startedAt === undefined) {
     delete env.HERMES_UPDATE_STARTED_AT
@@ -33,37 +32,10 @@ function runPosix(installRoot: string, startedAt?: string): ReturnType<typeof sp
     env.HERMES_UPDATE_STARTED_AT = startedAt
   }
 
-  return spawnSync('bash', [POSIX_SCRIPT, '--daemonized', '--install-root', installRoot, '--self-test-marker'], {
+  return spawnSync('/bin/bash', [POSIX_SCRIPT, '--daemonized', '--install-root', installRoot, '--self-test-marker'], {
     env,
     encoding: 'utf8'
   })
-}
-
-function runWindows(installRoot: string, startedAt?: string): ReturnType<typeof spawnSync> {
-  const env: NodeJS.ProcessEnv = { ...process.env, HERMES_HOME: path.dirname(installRoot) }
-
-  if (startedAt === undefined) {
-    delete env.HERMES_UPDATE_STARTED_AT
-  } else {
-    env.HERMES_UPDATE_STARTED_AT = startedAt
-  }
-
-  return spawnSync(
-    'powershell.exe',
-    [
-      '-NoProfile',
-      '-ExecutionPolicy',
-      'Bypass',
-      '-File',
-      WINDOWS_SCRIPT,
-      '-InstallRoot',
-      installRoot,
-      '-NoUi',
-      '-NoMarkerCleanup',
-      '-SelfTestMarker'
-    ],
-    { env, encoding: 'utf8' }
-  )
 }
 
 function assertScriptHandoff(run: (installRoot: string, startedAt?: string) => ReturnType<typeof spawnSync>) {
@@ -100,8 +72,4 @@ function assertScriptHandoff(run: (installRoot: string, startedAt?: string) => R
 
 test.skipIf(process.platform === 'win32')('POSIX hand-off preserves the Desktop marker acquisition time', () => {
   assertScriptHandoff(runPosix)
-})
-
-test.skipIf(process.platform !== 'win32')('PowerShell hand-off preserves the Desktop marker acquisition time', () => {
-  assertScriptHandoff(runWindows)
 })

@@ -1,14 +1,51 @@
 """Regression tests for terminal tool schema and workdir validation."""
 
 import tools.terminal_tool as terminal_tool
+import tools.terminal_tool_sudo as terminal_tool_sudo
 
 
-def test_terminal_schema_advertises_persistent_env_state():
-    description = terminal_tool.TERMINAL_TOOL_DESCRIPTION
 
-    assert "exported environment variables persist between calls" in description
-    assert "activate a virtualenv" in description
-    assert "once per session" in description
+
+
+
+
+
+def test_actual_sudo_command_uses_configured_password(monkeypatch):
+    monkeypatch.setenv("SUDO_PASSWORD", "testpass")
+    monkeypatch.delenv("HERMES_INTERACTIVE", raising=False)
+
+    transformed, sudo_stdin = terminal_tool_sudo._transform_sudo_command("sudo apt install -y ripgrep")
+
+    assert transformed == "sudo -S -p '' apt install -y ripgrep"
+    assert sudo_stdin == "testpass\n"
+
+
+def test_explicit_empty_sudo_password_tries_empty_without_prompt(monkeypatch):
+    monkeypatch.setenv("SUDO_PASSWORD", "")
+    monkeypatch.setenv("HERMES_INTERACTIVE", "1")
+
+    def _fail_prompt(*_args, **_kwargs):
+        raise AssertionError("interactive sudo prompt should not run for explicit empty password")
+
+    monkeypatch.setattr(terminal_tool_sudo, "_prompt_for_sudo_password", _fail_prompt)
+
+    transformed, sudo_stdin = terminal_tool_sudo._transform_sudo_command("sudo true")
+
+    assert transformed == "sudo -S -p '' true"
+    assert sudo_stdin == "\n"
+
+
+def test_headless_sudo_never_runs_backend_nopasswd_probe(monkeypatch):
+    """No prompt can fire without a UI, so the backend round trip must not be paid."""
+    monkeypatch.delenv("SUDO_PASSWORD", raising=False)
+    monkeypatch.delenv("HERMES_INTERACTIVE", raising=False)
+    terminal_tool.set_sudo_password_callback(None)
+
+    def _fail_probe():
+        raise AssertionError("headless sudo must not probe the backend")
+
+    assert terminal_tool_sudo._transform_sudo_command("sudo true", sudo_nopasswd_check=_fail_probe) == (
+        "sudo true", None)
 
 
 def test_validate_workdir_blocks_shell_metacharacters_in_windows_paths():

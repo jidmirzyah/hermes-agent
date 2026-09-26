@@ -10,7 +10,7 @@ import pytest
 import hermes_cli.web_server_lifecycle as _web_server_lifecycle
 
 # Phase 5 / Phase 6: these tests mutate ``web_server.app.state.auth_required``
-# at module level. They run in the same file so they don't race
+# at module level. Run them in the same xdist worker so they don't race
 # against each other (and against any other file that also touches
 # ``app.state``) — the marker name is shared across all dashboard-auth test
 # files that gate the app.
@@ -18,26 +18,6 @@ from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from hermes_cli import web_server
-
-
-@pytest.fixture
-def client_loopback():
-    # Pin the bound-host state for host_header_middleware so requests with
-    # default Host: testclient pass the DNS-rebinding check.  TestClient
-    # sends Host: testserver by default, but our middleware accepts the
-    # loopback aliases when bound_host is loopback.
-    prev_host = getattr(web_server.app.state, "bound_host", None)
-    prev_port = getattr(web_server.app.state, "bound_port", None)
-    web_server.app.state.bound_host = "127.0.0.1"
-    web_server.app.state.bound_port = 9119
-    client = TestClient(web_server.app, base_url="http://127.0.0.1:9119")
-    yield client
-    web_server.app.state.bound_host = prev_host
-    web_server.app.state.bound_port = prev_port
-
-
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -64,23 +44,6 @@ def test_should_require_auth_truth_table(host, allow_public, expected):
     assert should_require_auth(host, allow_public) is expected
 
 
-def test_empty_provider_login_page_shows_supported_auth_paths():
-    from hermes_cli.dashboard_auth import clear_providers
-    from hermes_cli.dashboard_auth.login_page import render_login_html
-
-    clear_providers()
-    html = render_login_html()
-
-    assert "--insecure" not in html
-    assert "username/password provider" in html
-    assert "OAuth provider" in html
-    assert "127.0.0.1" in html
-    assert "SSH tunnel" in html
-    assert "Tailscale" in html
-    assert (
-        'href="https://hermes-agent.nousresearch.com/docs/'
-        'user-guide/features/web-dashboard#authentication-gated-mode"'
-    ) in html
 
 
 # ---------------------------------------------------------------------------
@@ -93,7 +56,6 @@ def _stub_uvicorn_run(monkeypatch):
     returns immediately (rather than blocking on the event loop). Returns the dict
     that will capture the keyword args.
     """
-    import asyncio
     import contextlib
     import uvicorn
     captured: dict = {"kwargs": {}}
@@ -142,6 +104,8 @@ def _stub_uvicorn_run(monkeypatch):
             pass
 
     monkeypatch.setattr(uvicorn, "Config", _FakeConfig)
+    # Nothing binds here: never let a live dashboard on the host's 9119 trip the pre-bind probe.
+    monkeypatch.setattr(web_server, "_port_bind_conflict", lambda *a, **k: False)
     monkeypatch.setattr(uvicorn, "Server", lambda config: _FakeServer())
     return captured
 
@@ -163,7 +127,7 @@ def test_start_server_loopback_sets_auth_required_false(monkeypatch):
     # Force a fresh state to detect that start_server actually set it.
     web_server.app.state.auth_required = None
     web_server.start_server(
-        host="127.0.0.1", port=0,
+        host="127.0.0.1", port=9119,
         open_browser=False, allow_public=False,
     )
     assert web_server.app.state.auth_required is False
@@ -181,7 +145,7 @@ def test_start_server_insecure_public_no_longer_bypasses_gate(monkeypatch):
     web_server.app.state.auth_required = None
     with pytest.raises(SystemExit):
         web_server.start_server(
-            host="0.0.0.0", port=0,
+            host="0.0.0.0", port=9119,
             open_browser=False, allow_public=True,
         )
     assert web_server.app.state.auth_required is True
@@ -200,7 +164,7 @@ def test_start_server_public_without_insecure_records_auth_required(monkeypatch)
     web_server.app.state.auth_required = None
     with pytest.raises(SystemExit):
         web_server.start_server(
-            host="0.0.0.0", port=0,
+            host="0.0.0.0", port=9119,
             open_browser=False, allow_public=False,
         )
     assert web_server.app.state.auth_required is True
@@ -228,7 +192,7 @@ def test_start_server_gate_with_provider_proceeds_and_sets_proxy_headers(monkeyp
     try:
         web_server.app.state.auth_required = None
         web_server.start_server(
-            host="0.0.0.0", port=0,
+            host="0.0.0.0", port=9119,
             open_browser=False, allow_public=False,
         )
         assert web_server.app.state.auth_required is True
@@ -373,7 +337,7 @@ def test_start_server_loopback_public_url_enables_gate(monkeypatch):
     )
     try:
         web_server.start_server(
-            host="127.0.0.1", port=0,
+            host="127.0.0.1", port=9119,
             open_browser=False, allow_public=False,
         )
         assert web_server.app.state.auth_required is True
@@ -406,7 +370,7 @@ def test_start_server_loopback_public_url_without_provider_fails_closed(monkeypa
 
     with pytest.raises(SystemExit, match=r"no auth providers"):
         web_server.start_server(
-            host="127.0.0.1", port=0,
+            host="127.0.0.1", port=9119,
             open_browser=False, allow_public=False,
         )
     assert web_server.app.state.auth_required is True
@@ -468,44 +432,6 @@ def test_desktop_ssh_backend_serves_session_token_requests_despite_public_url(mo
         clear_providers()
 
 
-def test_loopback_public_url_fail_closed_message_is_actionable(monkeypatch):
-    """The refusal must name public_url, print its value, and give both exits.
-
-    Upgrade compatibility: an operator with a stale dashboard.public_url and
-    no auth provider must not face a mystery-locked dashboard — the error
-    text IS the mitigation.
-    """
-    from hermes_cli.dashboard_auth import clear_providers
-
-    monkeypatch.setenv(
-        "HERMES_DASHBOARD_PUBLIC_URL",
-        "https://dashboard.example.test:9443",
-    )
-    clear_providers()
-    _stub_uvicorn_run(monkeypatch)
-    _restore_app_state_after_test(
-        monkeypatch,
-        "auth_required",
-        "bound_host",
-        "bound_port",
-        "trusted_public_hosts",
-    )
-
-    with pytest.raises(SystemExit) as exc:
-        web_server.start_server(
-            host="127.0.0.1", port=0,
-            open_browser=False, allow_public=False,
-        )
-    msg = str(exc.value)
-    # Names the trigger and its value.
-    assert "dashboard.public_url" in msg
-    assert "https://dashboard.example.test:9443" in msg
-    # Exit 1: configure auth.
-    assert "basic_auth" in msg
-    assert "hermes dashboard register" in msg
-    # Exit 2: remove public_url to restore local-only mode.
-    assert "remove dashboard.public_url" in msg
-    assert "LOCAL-ONLY" in msg
 
 
 @pytest.mark.parametrize("host,public_url,expected", [

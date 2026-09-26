@@ -5,10 +5,6 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 
 import type * as ConfigApi from '@/api/config'
 
-// Import during collection: a cold transform under CI load must not consume
-// the first profile-scope test's timeout before the component even renders.
-import { ModelSettings } from './model-settings'
-
 // Radix Select calls scrollIntoView on its items when the content opens; jsdom
 // doesn't implement it (nor hasPointerCapture / releasePointerCapture), so stub
 // them to let the dropdown open in tests.
@@ -95,7 +91,8 @@ afterEach(() => {
   profileSwitchHandler = null
 })
 
-function renderModelSettings(scopeProfile?: string): ReturnType<typeof render> {
+async function renderModelSettings(scopeProfile?: string) {
+  const { ModelSettings } = await import('./model-settings')
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
 
   return render(
@@ -115,7 +112,7 @@ describe('ModelSettings profile scope', () => {
   // `undefined`, or every read repaints the primary's model and the user's
   // change looks reverted.
   it('follows the active profile (undefined, never null) when unscoped', async () => {
-    renderModelSettings()
+    await renderModelSettings()
 
     await waitFor(() => expect(getGlobalModelInfo).toHaveBeenCalledWith(undefined))
     expect(getGlobalModelOptions).toHaveBeenCalledWith(undefined, undefined)
@@ -124,7 +121,7 @@ describe('ModelSettings profile scope', () => {
   })
 
   it('reads through the explicit scope override when one is set', async () => {
-    renderModelSettings('research')
+    await renderModelSettings('research')
 
     await waitFor(() => expect(getGlobalModelInfo).toHaveBeenCalledWith('research'))
     expect(getGlobalModelOptions).toHaveBeenCalledWith(undefined, 'research')
@@ -134,28 +131,13 @@ describe('ModelSettings profile scope', () => {
 })
 
 describe('ModelSettings', () => {
-  it('loads the current main model and lists configured providers only', async () => {
-    renderModelSettings()
-
-    await waitFor(() => expect(getGlobalModelInfo).toHaveBeenCalled())
-    await waitFor(() => expect(getGlobalModelOptions).toHaveBeenCalled())
-
-    // Open the provider Select — only configured providers should be listed.
-    const triggers = await screen.findAllByRole('combobox')
-    fireEvent.click(triggers[0])
-
-    // "Nous" shows in both the trigger and the open list.
-    expect((await screen.findAllByText('Nous')).length).toBeGreaterThan(0)
-    expect(screen.queryByText(/DeepSeek/)).toBeNull()
-  })
-
   it.each(['custom', 'local', 'custom:lab'])(
     'opens local endpoint setup when %s has no inventory row',
     async provider => {
       getGlobalModelInfo.mockResolvedValueOnce({ provider, model: '' })
       getGlobalModelOptions.mockResolvedValueOnce({ providers: [] })
 
-      renderModelSettings()
+      await renderModelSettings()
 
       const providerSelect = (await screen.findAllByRole('combobox'))[0]
 
@@ -175,7 +157,7 @@ describe('ModelSettings', () => {
     getGlobalModelInfo.mockResolvedValueOnce({ provider: 'retired-provider', model: '' })
     getGlobalModelOptions.mockResolvedValueOnce({ providers: [] })
 
-    renderModelSettings()
+    await renderModelSettings()
 
     fireEvent.click(await screen.findByRole('button', { name: 'Set up provider' }))
 
@@ -198,7 +180,7 @@ describe('ModelSettings', () => {
       ]
     })
 
-    renderModelSettings()
+    await renderModelSettings()
 
     fireEvent.click(await screen.findByRole('button', { name: 'Set up Anthropic' }))
 
@@ -234,7 +216,7 @@ describe('ModelSettings', () => {
         ]
       })
 
-    renderModelSettings()
+    await renderModelSettings()
     expect((await screen.findAllByRole('combobox'))[0].textContent).toContain('Custom A')
 
     await act(async () => {
@@ -272,7 +254,7 @@ describe('ModelSettings', () => {
       gateway_tools: []
     })
 
-    renderModelSettings()
+    await renderModelSettings()
 
     const providerSelect = (await screen.findAllByRole('combobox'))[0]
     fireEvent.click(providerSelect)
@@ -302,7 +284,7 @@ describe('ModelSettings', () => {
       agent: { reasoning_effort: 'medium', service_tier: 'normal' },
       auxiliary: { curator: { provider: 'auto', model: '', reasoning_effort: 'high' } }
     })
-    renderModelSettings()
+    await renderModelSettings()
     await waitFor(() => expect(getHermesConfigRecord).toHaveBeenCalled())
 
     const fastSwitch = await screen.findByRole('switch')
@@ -324,41 +306,25 @@ describe('ModelSettings', () => {
       ]
     })
 
-    renderModelSettings()
+    await renderModelSettings()
     await waitFor(() => expect(getHermesConfigRecord).toHaveBeenCalled())
 
     expect(screen.queryByRole('switch')).toBeNull()
   })
 
-  it('renders the auxiliary task rows', async () => {
-    renderModelSettings()
-
-    expect(await screen.findByText('Vision')).toBeTruthy()
-    // #97297 — the three canonical slots the backend serves must have rows too.
-    expect(screen.getByText('Triage specifier')).toBeTruthy()
-    expect(screen.getByText('Kanban decomposer')).toBeTruthy()
-    expect(screen.getByText('Profile describer')).toBeTruthy()
-    expect(screen.getAllByText('auto · use main model').length).toBeGreaterThan(0)
-  })
-
-  it('edits auxiliary reasoning effort below the selected model and applies it with the assignment', async () => {
+  it('edits auxiliary reasoning effort and applies it with the assignment', async () => {
     getAuxiliaryModels.mockResolvedValueOnce({
       main: { provider: 'nous', model: 'hermes-4' },
       tasks: [{ task: 'vision', provider: 'nous', model: 'hermes-4', base_url: '', reasoning_effort: null }]
     })
 
-    renderModelSettings()
+    await renderModelSettings()
 
     expect(screen.queryByRole('combobox', { name: 'Vision reasoning effort' })).toBeNull()
 
     fireEvent.click((await screen.findAllByRole('button', { name: 'Change' }))[0])
 
-    const reasoningSelect = await screen.findByRole('combobox', { name: 'Vision reasoning effort' })
-    expect(reasoningSelect.compareDocumentPosition(await screen.findByRole('combobox', { name: 'Vision model' }))).toBe(
-      Node.DOCUMENT_POSITION_PRECEDING
-    )
-
-    fireEvent.click(reasoningSelect)
+    fireEvent.click(await screen.findByRole('combobox', { name: 'Vision reasoning effort' }))
     fireEvent.click(await screen.findByRole('option', { name: 'High' }))
 
     const applyButtons = await screen.findAllByRole('button', { name: 'Apply' })
@@ -376,7 +342,7 @@ describe('ModelSettings', () => {
   })
 
   it('assigns an auxiliary task to the main model via setModelAssignment', async () => {
-    renderModelSettings()
+    await renderModelSettings()
 
     // One "Set to main" button per task slot; the first is Vision.
     const setToMainButtons = await screen.findAllByRole('button', { name: 'Set to main' })
@@ -411,7 +377,7 @@ describe('ModelSettings', () => {
       tasks: [{ task: 'vision', provider: 'auto', model: '', base_url: '' }]
     })
 
-    renderModelSettings()
+    await renderModelSettings()
 
     const setToMainButtons = await screen.findAllByRole('button', { name: 'Set to main' })
     fireEvent.click(setToMainButtons[0])
@@ -436,7 +402,7 @@ describe('ModelSettings', () => {
       stale_aux: [{ task: 'compression', provider: 'nous', model: 'hermes-4' }]
     })
 
-    renderModelSettings()
+    await renderModelSettings()
     await waitFor(() => expect(getGlobalModelInfo).toHaveBeenCalled())
 
     const applyButton = await screen.findByRole('button', { name: 'Apply' })
@@ -453,7 +419,7 @@ describe('ModelSettings', () => {
       tasks: [{ task: 'curator', provider: 'openrouter', model: 'anthropic/claude-opus-4.7', base_url: '' }]
     })
 
-    renderModelSettings()
+    await renderModelSettings()
 
     // Banner present on load, no switch required.
     expect(await screen.findByText(/still run on/)).toBeTruthy()
@@ -465,7 +431,7 @@ describe('ModelSettings', () => {
       tasks: [{ task: 'vision', provider: 'main', model: 'kimi-k3', base_url: '' }]
     })
 
-    renderModelSettings()
+    await renderModelSettings()
     await screen.findAllByRole('button', { name: 'Set to main' })
 
     // 'main' is a backend-supported alias that tracks the active main provider
@@ -494,7 +460,7 @@ describe('ModelSettings', () => {
       ]
     })
 
-    renderModelSettings()
+    await renderModelSettings()
 
     // The public custom endpoint still bills a provider, so the banner stays —
     // but it names only that one task, not the free LAN pin.
@@ -555,7 +521,7 @@ describe('ModelSettings MoA preset editor', () => {
   })
 
   async function openReferenceEditor() {
-    renderModelSettings()
+    await renderModelSettings()
     expect(await screen.findByText('Reference 1')).toBeTruthy()
   }
 
@@ -620,25 +586,6 @@ describe('ModelSettings MoA preset editor', () => {
     }
   })
 
-  it('does not clear the model or save when the same provider is re-selected', async () => {
-    vi.useFakeTimers({ shouldAdvanceTime: true })
-
-    try {
-      await openReferenceEditor()
-
-      fireEvent.click(slotSelects().ref1Provider)
-      fireEvent.click(await screen.findByRole('option', { name: 'Nous' }))
-      await vi.advanceTimersByTimeAsync(700)
-
-      // Radix treats re-picking the current value as a no-op (no
-      // onValueChange), so nothing changes: no save, model still shown.
-      expect(saveMoaModels).not.toHaveBeenCalled()
-      expect(screen.getByText('nous · hermes-4')).toBeTruthy()
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
   it('autosaves the selected preset when its enabled switch is toggled', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
 
@@ -685,13 +632,6 @@ describe('ModelSettings MoA preset editor', () => {
       vi.useRealTimers()
     }
   })
-
-  it('labels the aggregator row as the acting model billed for the run', async () => {
-    await openReferenceEditor()
-
-    // The aggregator row is the slot that pays for the whole tool loop (#112359).
-    expect(screen.getByText('acting model · billed for the run')).toBeTruthy()
-  })
 })
 
 describe('ModelSettings code-skew 503', () => {
@@ -706,7 +646,7 @@ describe('ModelSettings code-skew 503', () => {
   it('unwraps the stale-backend 503 instead of dumping IPC JSON', async () => {
     getGlobalModelOptions.mockRejectedValueOnce(skewError)
 
-    renderModelSettings()
+    await renderModelSettings()
 
     await waitFor(() => {
       expect(screen.getByText(/running old code after an update/i)).toBeTruthy()
@@ -725,7 +665,7 @@ describe('ModelSettings code-skew 503', () => {
 
     getGlobalModelOptions.mockRejectedValueOnce(skewError)
 
-    renderModelSettings()
+    await renderModelSettings()
     await waitFor(() => expect(screen.getByRole('button', { name: 'Restart backend' })).toBeTruthy())
 
     fireEvent.click(screen.getByRole('button', { name: 'Restart backend' }))

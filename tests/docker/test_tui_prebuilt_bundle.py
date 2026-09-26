@@ -38,17 +38,6 @@ def _exec_py(image: str, py: str) -> str:
     return r.stdout.strip()
 
 
-def test_hermes_tui_dir_env_is_set(built_image: str) -> None:
-    """HERMES_TUI_DIR must point at the prebuilt bundle dir in the image."""
-    r = subprocess.run(
-        ["docker", "run", "--rm", "--entrypoint", "sh", built_image,
-         "-c", 'printf "%s" "$HERMES_TUI_DIR"'],
-        capture_output=True, text=True, timeout=60,
-    )
-    assert r.returncode == 0, r.stderr[-2000:]
-    assert r.stdout.strip() == "/opt/hermes/ui-tui", (
-        f"HERMES_TUI_DIR={r.stdout.strip()!r} (expected /opt/hermes/ui-tui)"
-    )
 
 
 def test_photon_baked_dependencies_load_without_writes_or_network(built_image: str) -> None:

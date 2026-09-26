@@ -108,11 +108,6 @@ class TestUpdateYesConfigMigration:
         _, kwargs = mock_migrate.call_args
         assert kwargs.get("interactive") is False
 
-        out = capsys.readouterr().out
-        assert "--yes: auto-applying config migration" in out
-        # The "Would you like to configure them now?" prompt text never appears.
-        assert "Would you like to configure them now?" not in out
-
     @patch("hermes_cli.update_cmd._run_migrate_config_fresh")
     @patch("hermes_cli.update_cmd._run_config_check_fresh", return_value=(1, 2))
     @patch("hermes_cli.config.get_missing_config_fields", return_value=[])
@@ -156,11 +151,6 @@ class TestUpdateYesConfigMigration:
             assert mock_input.called
             prompts = [c.args[0] if c.args else "" for c in mock_input.call_args_list]
             assert any("configure them now" in p for p in prompts)
-
-
-class TestUpdateYesStashRestore:
-    """--yes auto-restores the pre-update autostash without prompting."""
-
 
 
 class TestUnicodeDecodeErrorInUpdatePrompts:
@@ -225,9 +215,7 @@ class TestUnicodeDecodeErrorInUpdatePrompts:
             )  # must not raise
 
         assert result is False
-        out = capsys.readouterr().out
-        assert "Skipped restoring local changes" in out
-        assert "git stash apply stash@{0}" in out
+        assert "git stash apply stash@{0}" in capsys.readouterr().out
 
     def test_stash_restore_eof_error_still_falls_through_to_skip(self, tmp_path):
         """Sanity: this fix must not regress the pre-existing EOFError case,

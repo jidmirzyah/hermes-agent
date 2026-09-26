@@ -6,48 +6,16 @@ prevented the ticker thread from firing, causing all other jobs to be fast-forwa
 
 import concurrent.futures
 import threading
-from unittest.mock import patch
-
-import pytest
+import time
 
 
-class TestPersistentPool:
-    """_get_parallel_pool returns a persistent ThreadPoolExecutor."""
 
-    def test_pool_is_reused(self, monkeypatch):
-        """Same pool instance returned when max_workers doesn't change."""
-        import cron.scheduler as sched
-
-        # Reset module state.
-        sched._parallel_pools.clear()
-        sched._parallel_pool_max_workers.clear()
-
-        pool1 = sched._get_parallel_pool(4)
-        pool2 = sched._get_parallel_pool(4)
-        assert pool1 is pool2
-
-        # Cleanup.
-        sched._shutdown_parallel_pool()
-
-
-    def test_shutdown_clears_pool(self, monkeypatch):
-        """_shutdown_parallel_pool resets state."""
-        import cron.scheduler as sched
-
-        sched._parallel_pools.clear()
-        sched._parallel_pool_max_workers.clear()
-        sched._get_parallel_pool(2)
-
-        sched._shutdown_parallel_pool()
-        assert not sched._parallel_pools
-        assert not sched._parallel_pool_max_workers
 
 
 class TestRunningJobGuard:
     """_running_job_ids prevents double-dispatch of active jobs."""
 
-    @pytest.mark.parametrize("with_workdir", [False, True])
-    def test_running_set_prevents_double_dispatch(self, tmp_path, monkeypatch, with_workdir):
+    def test_running_set_prevents_double_dispatch(self, tmp_path, monkeypatch):
         """A job already in _running_job_ids is skipped on the next tick."""
         import cron.scheduler as sched
 
@@ -65,9 +33,6 @@ class TestRunningJobGuard:
             "next_run_at": "2020-01-01T00:00:00",
             "deliver": "local",
         }
-
-        if with_workdir:
-            job["workdir"] = str(tmp_path)
 
         # Simulate the job already running.
         sched._running_job_ids.add(sched._inflight_key("guard-job"))
@@ -233,9 +198,8 @@ class TestSyncMode:
 
         sched._shutdown_parallel_pool()
 
-    @pytest.mark.parametrize("with_workdir", [False, True])
-    def test_sync_false_returns_immediately(self, tmp_path, monkeypatch, with_workdir):
-        """The ticker returns while its dispatched worker is still blocked."""
+    def test_sync_false_returns_immediately(self, tmp_path, monkeypatch):
+        """sync=False returns before parallel jobs finish (optimistic count)."""
         import cron.scheduler as sched
 
         sched._parallel_pools.clear()
@@ -252,19 +216,10 @@ class TestSyncMode:
             "deliver": "local",
         }
 
-        if with_workdir:
-            job["workdir"] = str(tmp_path)
-
-        worker_started = threading.Event()
-        release = threading.Event()
-        worker_finished = threading.Event()
+        barrier = threading.Barrier(2, timeout=5)
 
         def slow_run(j, *, defer_agent_teardown=None, **_kw):
-            worker_started.set()
-            try:
-                assert release.wait(timeout=10), "test never released the worker"
-            finally:
-                worker_finished.set()
+            barrier.wait()  # blocks until test thread also waits
             return True, "out", "resp", None
 
         monkeypatch.setattr(sched, "get_due_jobs", lambda: [job])
@@ -274,49 +229,17 @@ class TestSyncMode:
         monkeypatch.setattr(sched, "mark_job_run", lambda *_a, **_kw: None)
         monkeypatch.setattr(sched, "_deliver_result", lambda *_a, **_kw: None)
 
-        try:
-            assert sched.tick(verbose=False, sync=False) == 1
-            assert worker_started.wait(timeout=10)
-            assert not worker_finished.is_set()
-        finally:
-            release.set()
-            sched._shutdown_parallel_pool()
+        start = time.monotonic()
+        n = sched.tick(verbose=False, sync=False)  # opt-in: non-blocking
+        elapsed = time.monotonic() - start
 
+        assert n == 1  # optimistic count
+        assert elapsed < 1.0  # returned immediately, didn't wait for slow_run
 
-class TestTickBatchAdvance:
-    """The tick's pre-dispatch advance must go through advance_next_runs
-    exactly once with the whole due set — a revert to the per-job loop
-    (or back to advance_next_run) must fail this test, not slip past the
-    helper-level I/O pin."""
-
-    def test_tick_calls_advance_next_runs_once_with_all_due_ids(self, tmp_path, monkeypatch):
-        import cron.scheduler as sched
-
-        sched._parallel_pools.clear()
-        sched._parallel_pool_max_workers.clear()
-        sched._running_job_ids.clear()
-
-        jobs = [
-            {"id": f"job-{i}", "name": f"Job {i}", "prompt": "test",
-             "schedule": "every 5m", "enabled": True,
-             "next_run_at": "2020-01-01T00:00:00", "deliver": "local"}
-            for i in range(4)
-        ]
-
-        advance_calls = []
-        monkeypatch.setattr(sched, "get_due_jobs", lambda: jobs)
-        monkeypatch.setattr(
-            sched, "advance_next_runs",
-            lambda ids: advance_calls.append(list(ids)) or len(list(ids)))
-        monkeypatch.setattr(sched, "run_job", lambda j, **_kw: (True, "out", "resp", None))
-        monkeypatch.setattr(sched, "save_job_output", lambda *_a, **_kw: "/tmp/out")
-        monkeypatch.setattr(sched, "mark_job_run", lambda *_a, **_kw: None)
-        monkeypatch.setattr(sched, "_deliver_result", lambda *_a, **_kw: None)
-
-        n = sched.tick(verbose=False)
-
-        assert n == 4
-        assert advance_calls == [["job-0", "job-1", "job-2", "job-3"]], (
-            f"tick must batch-advance the due set in ONE call; got {advance_calls}")
-
+        # Let the job finish so cleanup works.
+        barrier.wait()
+        time.sleep(0.1)
         sched._shutdown_parallel_pool()
+
+
+

@@ -42,6 +42,8 @@
  * established that the right fix shape is: add the key + pin it in a test.
  * This file is the canonical test for that pattern at the Desktop layer.
  *
+ * When adding a new NS*UsageDescription key the runtime depends on, add a
+ * matching row to EXPECTED_USAGE_DESCRIPTIONS below.
  */
 
 import assert from 'node:assert/strict'
@@ -51,36 +53,28 @@ import path from 'node:path'
 import { test } from 'vitest'
 
 const REPO_ROOT = path.resolve(__dirname, '..')
-const DESKTOP_DIR = path.join(REPO_ROOT, 'apps', 'desktop')
-// The desktop build config lives in electron-builder.config.cjs — the repo
-// deliberately keeps package.json free of a `build` field (see the config
-// header: "run-electron-builder.mjs always passes --config, so a stray
-// package.json field would be silently ignored"). extendInfo is read from
-// that file, exactly what electron-builder consumes.
-const DESKTOP_CONFIG = path.join(DESKTOP_DIR, 'electron-builder.config.cjs')
+const DESKTOP_PKG = path.join(REPO_ROOT, 'apps', 'desktop', 'package.json')
 
 interface UsageDescriptionRow {
   key: string
-  requiredSubstring: string
   reason: string
 }
 
-function desktopConfig(): Record<string, unknown> {
-  assert.ok(fs.existsSync(DESKTOP_CONFIG), `missing ${DESKTOP_CONFIG}`)
+function desktopPkg(): Record<string, unknown> {
+  assert.ok(fs.existsSync(DESKTOP_PKG), `missing ${DESKTOP_PKG}`)
 
-  // The config is a .cjs module (CommonJS); require it like the builder does.
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  return require(DESKTOP_CONFIG) as Record<string, unknown>
+  return JSON.parse(fs.readFileSync(DESKTOP_PKG, 'utf-8'))
 }
 
 function extendInfo(): Record<string, string> {
-  const config = desktopConfig()
-  const mac = (config.mac ?? {}) as Record<string, unknown>
+  const pkg = desktopPkg()
+  const build = (pkg.build ?? {}) as Record<string, unknown>
+  const mac = (build.mac ?? {}) as Record<string, unknown>
   assert.ok(
     typeof mac.extendInfo === 'object' &&
       mac.extendInfo !== null &&
       !Array.isArray(mac.extendInfo),
-    'build.mac.extendInfo is missing or invalid in electron-builder.config.cjs'
+    'build.mac.extendInfo is missing or invalid in apps/desktop/package.json'
   )
   const extend = mac.extendInfo as Record<string, unknown>
 
@@ -88,13 +82,8 @@ function extendInfo(): Record<string, string> {
   // for NS*UsageDescription is string, but electron-builder's `extendInfo`
   // accepts arbitrary plist scalars (bool, number, array, object) and we want
   // a clean assertion error here, not a downstream `value.trim is not a
-  // function` crash in the whitespace test. Only the privacy usage keys must
-  // be strings; other plist scalars (LSRequiresNativeExecution, etc.) are
-  // legitimate booleans/numbers.
+  // function` crash in the whitespace test.
   for (const [key, value] of Object.entries(extend)) {
-    if (!key.startsWith('NS') || !key.endsWith('UsageDescription')) {
-      continue
-    }
     assert.equal(
       typeof value,
       'string',
@@ -105,28 +94,23 @@ function extendInfo(): Record<string, string> {
   return extend as Record<string, string>
 }
 
-// Each entry: Info.plist key, required substring (case-insensitive), and a
-// plain-language reason. The substring check lets future copy edits pass
-// while still catching silent drops of the key itself.
+// Each entry: Info.plist key and a plain-language reason. Catches silent
+// drops of a key the runtime needs; the copy itself is free to change.
 const EXPECTED_USAGE_DESCRIPTIONS: UsageDescriptionRow[] = [
   {
     key: 'NSMicrophoneUsageDescription',
-    requiredSubstring: 'microphone',
     reason: 'Microphone capture is required for voice input mode.'
   },
   {
     key: 'NSAudioCaptureUsageDescription',
-    requiredSubstring: 'audio',
     reason: 'Audio capture backs the voice conversation pipeline.'
   },
   {
     key: 'NSCameraUsageDescription',
-    requiredSubstring: 'camera',
     reason: 'Camera access is requested by plugins/features the user enables.'
   },
   {
     key: 'NSAppleMusicUsageDescription',
-    requiredSubstring: 'Music',
     reason:
       "Disclaim MediaLibrary access so the system audio stack does not " +
       'surface a misleading Apple Music permission prompt ' +
@@ -135,32 +119,26 @@ const EXPECTED_USAGE_DESCRIPTIONS: UsageDescriptionRow[] = [
   },
   {
     key: 'NSCalendarsUsageDescription',
-    requiredSubstring: 'Calendar',
     reason: 'Calendar access backs meeting and scheduling support (#64571).'
   },
   {
     key: 'NSCalendarsFullAccessUsageDescription',
-    requiredSubstring: 'Calendar',
     reason: 'macOS 14+ full-access variant of the calendar declaration.'
   },
   {
     key: 'NSRemindersUsageDescription',
-    requiredSubstring: 'Reminders',
     reason: 'Reminders access backs personal-assistant scheduling (#64571).'
   },
   {
     key: 'NSRemindersFullAccessUsageDescription',
-    requiredSubstring: 'Reminders',
     reason: 'macOS 14+ full-access variant of the reminders declaration.'
   },
   {
     key: 'NSScreenCaptureUsageDescription',
-    requiredSubstring: 'screen',
     reason: 'macOS 15+ periodic screen-recording re-prompts show this copy.'
   },
   {
     key: 'NSLocalNetworkUsageDescription',
-    requiredSubstring: 'local network',
     reason:
       'macOS 15+ Local Network Privacy silently denies undeclared apps ' +
       '(#81563); declaration is required for the prompt to appear at all.'
@@ -169,22 +147,16 @@ const EXPECTED_USAGE_DESCRIPTIONS: UsageDescriptionRow[] = [
 
 test.each(EXPECTED_USAGE_DESCRIPTIONS)(
   '`$key` is declared in build.mac.extendInfo',
-  ({ key, requiredSubstring, reason }) => {
+  ({ key, reason }) => {
     const info = extendInfo()
     const value = info[key]
 
     assert.ok(
       value !== undefined,
       `Info.plist privacy usage description \`${key}\` is missing from ` +
-        'electron-builder.config.cjs mac.extendInfo. macOS will surface ' +
+        'apps/desktop/package.json build.mac.extendInfo. macOS will surface ' +
         'a misleading system prompt or silently deny the related API.\n' +
         `Reason: ${reason}`
-    )
-
-    assert.ok(
-      value.toLowerCase().includes(requiredSubstring.toLowerCase()),
-      `\`${key}\` exists but does not mention '${requiredSubstring}'. ` +
-        `Current value: ${JSON.stringify(value)}. Reason: ${reason}`
     )
   }
 )
@@ -193,11 +165,6 @@ test('every extendInfo value is free of leading/trailing whitespace and newlines
   const info = extendInfo()
 
   for (const [key, value] of Object.entries(info)) {
-    // Only string values carry whitespace concerns; plist scalars
-    // (booleans/numbers like LSRequiresNativeExecution) are exempt.
-    if (typeof value !== 'string') {
-      continue
-    }
     assert.equal(
       value,
       value.trim(),

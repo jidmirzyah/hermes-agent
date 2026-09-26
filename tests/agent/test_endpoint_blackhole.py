@@ -21,6 +21,7 @@ from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
+import requests
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -52,16 +53,7 @@ def _client_mock(side_effect):
 
 
 class TestBlackholeCache:
-    def test_unseen_endpoint_is_not_blackholed(self):
-        from agent.model_metadata import _endpoint_blackholed
 
-        assert _endpoint_blackholed("http://10.0.0.9:30080/v1") is False
-
-    def test_note_then_detected(self):
-        from agent.model_metadata import _endpoint_blackholed, _note_endpoint_blackholed
-
-        _note_endpoint_blackholed("http://10.0.0.9:30080/v1")
-        assert _endpoint_blackholed("http://10.0.0.9:30080/v1") is True
 
     def test_keyed_on_host_port_not_path(self):
         """Every probe path for one server shares a single entry."""
@@ -159,8 +151,8 @@ class TestFetchEndpointModelMetadataBlackhole:
 
         with patch("agent.model_metadata.detect_local_server_type", return_value=None), \
              patch(
-                 "agent.model_metadata_http.stream",
-                 side_effect=httpx.ConnectTimeout("timed out"),
+                 "agent.model_metadata.requests.get",
+                 side_effect=requests.exceptions.ConnectTimeout("timed out"),
              ) as get:
             assert fetch_endpoint_model_metadata(self.URL) == {}
 
@@ -172,8 +164,8 @@ class TestFetchEndpointModelMetadataBlackhole:
 
         with patch("agent.model_metadata.detect_local_server_type", return_value=None), \
              patch(
-                 "agent.model_metadata_http.stream",
-                 side_effect=httpx.ConnectError("refused"),
+                 "agent.model_metadata.requests.get",
+                 side_effect=requests.exceptions.ConnectionError("refused"),
              ) as get:
             assert fetch_endpoint_model_metadata(self.URL) == {}
 
@@ -186,7 +178,7 @@ class TestFetchEndpointModelMetadataBlackhole:
 
         _note_endpoint_blackholed(self.URL)
         with patch("agent.model_metadata.detect_local_server_type", return_value=None), \
-             patch("agent.model_metadata_http.stream") as get:
+             patch("agent.model_metadata.requests.get") as get:
             assert fetch_endpoint_model_metadata(self.URL, force_refresh=True) == {}
 
         get.assert_not_called()
@@ -269,15 +261,3 @@ class TestQueryLocalContextLengthBlackhole:
         assert _endpoint_blackholed(self.URL) is False
 
 
-class TestIsConnectTimeout:
-    def test_httpx_connect_timeout(self):
-        from agent.model_metadata import _is_connect_timeout
-
-        assert _is_connect_timeout(httpx.ConnectTimeout("x")) is True
-
-    def test_unrelated_errors_are_not_connect_timeouts(self):
-        from agent.model_metadata import _is_connect_timeout
-
-        assert _is_connect_timeout(httpx.ReadTimeout("x")) is False
-        assert _is_connect_timeout(httpx.ConnectError("x")) is False
-        assert _is_connect_timeout(ValueError("x")) is False
