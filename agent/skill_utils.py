@@ -13,7 +13,6 @@ from hermes_constants import (
     get_config_path,
     get_skills_dir,
     get_subprocess_home,
-    is_termux,
 )
 
 logger = logging.getLogger(__name__)

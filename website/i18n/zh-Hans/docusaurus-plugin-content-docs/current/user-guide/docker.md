@@ -274,6 +274,7 @@ docker run -d \
 
 官方镜像基于 Debian 13.4，包含：
 
+
 - 按提交的 `uv.lock` 同步的 Python 3.14 环境，然后无依赖地安装 Hermes 源码。
 - 选定的 extras：`all`、`messaging`、`otlp`、`anthropic`、`bedrock`、`azure-identity`、`hindsight` 和 `matrix`，不是 `--all-extras`。
 - 从摘要固定的 Node 镜像提供的 Node.js 26 和 npm。

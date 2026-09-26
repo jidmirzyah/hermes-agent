@@ -16,44 +16,11 @@ from scripts.build.launchers import posix_launcher
 from scripts.bundles.desktop import release_version
 
 
-def test_snapshot_preserves_declared_entries_in_both_layouts(tmp_path):
-    source = tmp_path / "source"
-    source.mkdir()
-    subprocess.run(["git", "init", str(source)], check=True, capture_output=True)
-    project = '[project]\nname="fixture"\nversion="1.2.3"\n[project.scripts]\ncustom="entry:run"\n'
-    (source / "pyproject.toml").write_text(project, encoding="utf-8")
-    subprocess.run(["git", "add", "."], cwd=source, check=True)
-    subprocess.run(["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-m", "fixture"], cwd=source, check=True, capture_output=True)
-    (source / "untracked").write_text("must not ship", encoding="utf-8")
-    for repo_name, target in [("app", "linux-arm64-bionic"), ("hermes-agent", "win32-arm64")]:
-        root = tmp_path / repo_name
-        root.mkdir()
-        snapshot(source, "HEAD", root / repo_name)
-        assert project_entries(root / repo_name / "pyproject.toml") == {"custom": "entry:run"}
-        assert not (root / repo_name / "untracked").exists()
-        assert not (root / repo_name / ".git").exists()
-    assert release_version(source, "v1.2.3") == "1.2.3"
+def test_release_version_must_match_project(tmp_path):
+    (tmp_path / "pyproject.toml").write_text('[project]\nversion="1.2.3"\n', encoding="utf-8")
+    assert release_version(tmp_path, "v1.2.3") == "1.2.3"
     with pytest.raises(ValueError):
-        release_version(source, "v1.2.4")
-
-
-def test_surfaces_require_complete_outputs_and_replace_stale_files(tmp_path):
-    source, repo = tmp_path / "build", tmp_path / "payload"
-    tui = source / "tui/dist"
-    web = source / "hermes_cli/web_dist"
-    tui.mkdir(parents=True)
-    web.mkdir(parents=True)
-    (tui / "entry.js").write_text("built tui", encoding="utf-8")
-    (tui.parent / "package.json").write_text('{"type":"module"}', encoding="utf-8")
-    (web / "index.html").write_text("built web", encoding="utf-8")
-    plant_surfaces(repo, {"tui": tui.parent, "web": web})
-    (repo / "hermes_cli/web_dist/stale").write_text("old", encoding="utf-8")
-    plant_surfaces(repo, {"tui": tui.parent, "web": web})
-    assert not (repo / "hermes_cli/web_dist/stale").exists()
-    assert (repo / "hermes_cli/tui_dist/entry.js").read_text(encoding="utf-8-sig") == "built tui"
-    (web / "index.html").unlink()
-    with pytest.raises(FileNotFoundError):
-        plant_surfaces(repo, {"tui": tui.parent, "web": web})
+        release_version(tmp_path, "v1.2.4")
 
 
 def test_wrapper_rejects_unresolved_template_fields(tmp_path, monkeypatch):

@@ -10,7 +10,7 @@ import pytest
 
 import pm.extras as extras
 import pm.features as features
-from hermes_cli.runtime_paths import site_packages
+from pm.environments import site_packages
 
 
 def test_inventory_uses_the_target_and_requires_every_anchor(tmp_path, monkeypatch):

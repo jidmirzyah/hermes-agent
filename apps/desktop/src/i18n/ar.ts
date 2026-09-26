@@ -175,7 +175,8 @@ export const ar = defineLocale({
     }
   },
   notifications: {
-    sharedProfileWarning: 'تستخدم نسخة أخرى من Hermes هذا الملف الشخصي. تتشارك النسختان إعداداته وبياناته، لذا قد تتعارض التغييرات. يمكنك المتابعة أو إغلاق النسخة الأخرى قبل إجراء تغييرات.',
+    sharedProfileWarning:
+      'تستخدم نسخة أخرى من Hermes هذا الملف الشخصي. تتشارك النسختان إعداداته وبياناته، لذا قد تتعارض التغييرات. يمكنك المتابعة أو إغلاق النسخة الأخرى قبل إجراء تغييرات.',
     region: 'الإشعارات',
     hide: 'إخفاء',
     show: 'إظهار',
@@ -857,7 +858,7 @@ export const ar = defineLocale({
         'عندما يحدّث Hermes نفسه من التطبيق دون موجه طرفية، احتفظ بتعديلات المصدر المحلية أو تجاهلها.'
     },
     about: {
-      updates: 'التحديثات',
+      updates: 'التحديثات'
     },
 
     config: {
@@ -2367,7 +2368,8 @@ export const ar = defineLocale({
   updates: {
     channels: { stable: 'مستقر', canary: 'تجريبي' },
     bundleSwapPending: 'أعد التشغيل لإكمال التحديث',
-    bundleSwapPendingDesc: 'تم تثبيت التطبيق المحدَّث بالفعل — يكفي إعادة تشغيل Hermes لتحميله. لن تتأثر المحادثات أو الإعدادات.',
+    bundleSwapPendingDesc:
+      'تم تثبيت التطبيق المحدَّث بالفعل — يكفي إعادة تشغيل Hermes لتحميله. لن تتأثر المحادثات أو الإعدادات.',
     bundleSwapPendingAction: 'إعادة تشغيل Hermes',
     stages: {
       idle: 'جار التحضير...',
@@ -2418,6 +2420,10 @@ export const ar = defineLocale({
     versionDetailsBuildOrigin: 'مصدر البناء',
     versionDetailsDistribution: 'التوزيع',
     versionDetailsDistributionDesktop: 'تطبيق سطح المكتب',
+    versionDetailsDistributionDesktopMsix: 'تطبيق سطح المكتب (MSIX)',
+    versionDetailsDistributionDesktopInstaller: 'تطبيق سطح المكتب (المُثبِّت)',
+    versionDetailsDistributionSourceInstaller: 'المصدر (سكربت التثبيت)',
+    versionDetailsDistributionSource: 'المصدر',
     versionDetailsDistributionStore: 'Microsoft Store',
     versionDetailsRuntimeEmbedded: 'وقت تشغيل مضمّن',
     versionDetailsRuntimeExternal: 'خارجي (يستخدم وقت تشغيل الجهاز)',

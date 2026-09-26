@@ -9,14 +9,13 @@ brand-new files show as additions instead of being invisible.
 
 from __future__ import annotations
 
-import functools
 import os
 import shutil
 import subprocess
 from contextlib import suppress
-from typing import Dict, List, Optional
+from typing import Dict, List
 
-from hermes_cli._subprocess_compat import harden_git_argv, noninteractive_git_env
+from hermes_cli._subprocess_compat import harden_git_argv, noninteractive_git_env, selected_git_env
 
 _GIT_TIMEOUT = 15
 _MAX_UNTRACKED_FILES = 50  # sanity cap so a node_modules explosion can't hang us
@@ -29,30 +28,6 @@ _MODE_ARGS = {
 VALID_MODES = tuple(_MODE_ARGS)
 
 
-@functools.lru_cache(maxsize=1)
-def _git_command() -> Optional[List[str]]:
-    """Resolve the git invocation: pm's pinned Git first, then system git.
-
-    pm's git package is the canonical Windows git (Git for Windows,
-    pinned in pm/lock.json) — it wins over PATH so a stale or broken
-    system git never breaks diff collection. On POSIX pm deliberately
-    gaps git (system git by choice), and when pm can't provide it for any
-    other reason we fall back to bare ``git`` on PATH. None when git is
-    nowhere — the caller reports it unavailable.
-    """
-    try:
-        import pm
-
-        runner = pm.ensure("git")
-        for candidate in ("git.exe", "git"):
-            resolved = shutil.which(candidate, path=runner.env.get("PATH"))
-            if resolved:
-                return [resolved]
-    except Exception:
-        pass
-    return ["git"] if shutil.which("git") else None
-
-
 def _run(args: List[str], cwd: str, timeout: int = _GIT_TIMEOUT):
     """Run git, returning (returncode, stdout). Never raises on git failure.
 
@@ -62,14 +37,15 @@ def _run(args: List[str], cwd: str, timeout: int = _GIT_TIMEOUT):
     the diff-rendering subcommands so attribute-scoped diff/textconv drivers
     can't execute either.
     """
-    command = _git_command()
+    env = noninteractive_git_env(selected_git_env())
+    command = shutil.which("git", path=env.get("PATH", ""))
     if command is None:
         return 127, ""
     proc = subprocess.run(
-        [*command, "-c", "core.quotePath=false", *harden_git_argv(args)],
+        [command, "-c", "core.quotePath=false", *harden_git_argv(args)],
         cwd=cwd, capture_output=True, text=True, timeout=timeout,
         encoding="utf-8", errors="replace",
-        stdin=subprocess.DEVNULL, env=noninteractive_git_env(),
+        stdin=subprocess.DEVNULL, env=env,
     )
     return proc.returncode, proc.stdout
 
@@ -109,12 +85,12 @@ def collect_working_diff(cwd: str, mode: str = "working",
         return {"success": False,
                 "error": f"Unknown mode '{mode}'. Use: {', '.join(VALID_MODES)}"}
 
-    if _git_command() is None:
-        return {"success": False, "error": "git is not installed or not on PATH."}
     try:
         code, _ = _run(["rev-parse", "--is-inside-work-tree"], cwd, timeout=5)
     except (subprocess.TimeoutExpired, OSError) as e:
         return {"success": False, "error": f"git failed: {e}"}
+    if code == 127:
+        return {"success": False, "error": "git is not installed or not on PATH."}
     if code != 0:
         return {"success": False, "error": "Not a git repository."}
 

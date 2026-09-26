@@ -29,11 +29,28 @@ import json
 import os
 import re
 import urllib.request
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Iterator, Optional
 
 from pm.network import retry_network
-from pm.registry import get_package
+
+
+# The context holds no data outside a resolve/pin call, including failed calls.
+# Keep the Package hooks unchanged while sharing their nested index requests.
+_index_responses: ContextVar[dict | None] = ContextVar("pm_index_responses", default=None)
+
+
+@contextmanager
+def reuse_index_responses() -> Iterator[None]:
+    """Share successful index reads only within this resolve or pin operation."""
+    token = _index_responses.set({})
+    try:
+        yield
+    finally:
+        _index_responses.reset(token)
+
 
 # ---------------------------------------------------------------------------
 # Version parsing / comparison (pure)
@@ -63,10 +80,6 @@ def minor_of(version: str) -> Optional[tuple[int, int]]:
     if len(nums) < 2:
         return None
     return (nums[0], nums[1])
-
-
-def version_in_minor(version: str, minor: tuple[int, int]) -> bool:
-    return minor_of(version) == minor
 
 
 def best_in_minor(versions: list[str], minor: tuple[int, int]) -> Optional[str]:
@@ -108,7 +121,6 @@ class Resolved:
 
 def resolve_best(
     name: str,
-    targets: list[str],
     latest_by_target: dict[str, list[str]],
     locked: Optional[str],
     style: str,
@@ -150,13 +162,14 @@ def resolve_best(
     return Resolved(name, locked, style, version=version, per_target={t: version for t in present})
 
 
+@reuse_index_responses()
 def resolve_package(package, targets: list[str], locked: Optional[str], *, artifacts: dict | None = None) -> Resolved:
     """Resolve versions and detect new artifacts within a shared minor."""
     latest = {
         t: list(package.latest_versions(t, locked=locked) or [])
         for t in targets
     }
-    decision = resolve_best(package.name, targets, latest, locked, package.version_style)
+    decision = resolve_best(package.name, latest, locked, package.version_style)
     if decision.style == "minor" and decision.version is not None and artifacts is not None:
         for target, version in decision.per_target.items():
             current = artifacts.get(target, artifacts.get("any", []))
@@ -202,10 +215,18 @@ def _get_json(url: str) -> dict | list:
     from hermes_cli.urllib_security import open_credentialed_url
 
     def request():
+        headers = _index_headers(url)
+        key = (url, tuple(sorted(headers.items())), "json")
+        responses = _index_responses.get()
+        if responses is not None and key in responses:
+            return responses[key]
         with open_credentialed_url(
-            urllib.request.Request(url, headers=_index_headers(url)), timeout=60
+            urllib.request.Request(url, headers=headers), timeout=60
         ) as resp:
-            return json.load(resp)
+            result = json.load(resp)
+        if responses is not None:
+            responses[key] = result
+        return result
 
     return retry_network(request)
 
@@ -218,10 +239,17 @@ def _get_text(url: str, headers: Optional[dict] = None) -> str:
         hdrs.update(headers)
 
     def request():
+        key = (url, tuple(sorted(hdrs.items())), "text")
+        responses = _index_responses.get()
+        if responses is not None and key in responses:
+            return responses[key]
         with open_credentialed_url(
             urllib.request.Request(url, headers=hdrs), timeout=60
         ) as resp:
-            return resp.read().decode("utf-8", "replace")
+            result = resp.read().decode("utf-8", "replace")
+        if responses is not None:
+            responses[key] = result
+        return result
 
     return retry_network(request)
 
@@ -325,7 +353,7 @@ def github_release_tags(repo: str, *, strip_prefix: str = "") -> list[str]:
 
 
 def npm_dist_tags(name: str) -> dict:
-    return _get_json(f"https://registry.npmjs.org/{name}").get("dist-tags", {})
+    return _get_json(f"https://registry.npmjs.org/-/package/{name}/dist-tags")
 
 
 def node_latest_versions() -> list[str]:
@@ -341,7 +369,7 @@ def node_latest_versions() -> list[str]:
 
 
 def martin_riedl_index() -> dict[str, dict[str, str]]:
-    """ffmpeg.martin-riedl.de index, cached: target -> {version: epoch}.
+    """ffmpeg.martin-riedl.de index: target -> {version: epoch}.
 
     The site has no directory listing or API — the root page is the index,
     and it lists the CURRENT build per platform (both snapshot builds like
@@ -349,13 +377,9 @@ def martin_riedl_index() -> dict[str, dict[str, str]]:
     <epoch>_<semver> download dir; snapshots never match the numeric
     pattern. The epoch is needed to reconstruct the download URL at pin
     time, so the index maps version -> epoch per target."""
-    cached = _martin_cache.get()
-    if cached is not None:
-        return cached
     try:
         page = _get_text("https://ffmpeg.martin-riedl.de/")
     except Exception:
-        _martin_cache.set({})
         return {}
     out: dict[str, dict[str, str]] = {}
     # /download/<os>/<arch>/<epoch>_<version>/ffmpeg.zip
@@ -369,7 +393,6 @@ def martin_riedl_index() -> dict[str, dict[str, str]]:
         versions = out.setdefault(target, {})
         if version not in versions or int(epoch) > int(versions[version]):
             versions[version] = epoch
-    _martin_cache.set(out)
     return out
 
 
@@ -379,14 +402,11 @@ def martin_riedl_versions(target: str) -> list[str]:
 
 
 def btbn_index() -> dict[str, dict[str, tuple[str, str]]]:
-    """Newest static GPL Windows asset per target/version, as (tag, name).
+    """Newest static GPL asset per target/version, as (tag, name).
 
-    Releases also contain Linux, shared and LGPL builds. Retain target
+    Releases also contain macOS, shared and LGPL builds. Retain target
     identity here so discovery and pinning select the same artifact.
     """
-    cached = _btbn_cache.get()
-    if cached is not None:
-        return cached
     out: dict[str, dict[str, tuple[str, str]]] = {}
     for page in range(1, 4):
         data = _get_json(f"https://api.github.com/repos/BtbN/FFmpeg-Builds/releases?per_page=30&page={page}")
@@ -400,21 +420,26 @@ def btbn_index() -> dict[str, dict[str, tuple[str, str]]]:
                 continue
             for asset in release.get("assets", []):
                 name = asset.get("name", "")
+                # Windows ships .zip, Linux .tar.xz. `gpl-shared`/`lgpl` differ
+                # in the segment after the arch, so requiring "-gpl-<ver>" right
+                # after it excludes both.
                 m = re.fullmatch(
-                    r"ffmpeg-n(\d+\.\d+\.\d+)-.+-win(64|arm64)-gpl-\d+\.\d+\.zip", name
+                    r"ffmpeg-n(\d+\.\d+\.\d+)-.+-"
+                    r"(win|linux)(64|arm64)-gpl-\d+\.\d+\.(?:zip|tar\.xz)",
+                    name,
                 )
                 if m:
-                    version, arch = m.groups()
-                    target = "win32-x64" if arch == "64" else "win32-arm64"
+                    version, osname, arch = m.groups()
+                    os_key = "win32" if osname == "win" else "linux"
+                    target = f"{os_key}-{'x64' if arch == '64' else 'arm64'}"
                     out.setdefault(target, {}).setdefault(version, (tag, name))
         if len(data) < 30:
             break
-    _btbn_cache.set(out)
     return out
 
 
 def btbn_versions(target: str) -> list[str]:
-    """Release versions with a supported Windows asset for this target."""
+    """Release versions with a supported BtbN asset for this target."""
     return list(btbn_index().get(target, {}))
 
 
@@ -438,22 +463,3 @@ def pbs_versions(minor: str, triple: str) -> list[str]:
         if len(data) < 30:
             break
     return []
-
-
-class _TTL:
-    """Tiny per-process cache so --check and the pin step share one fetch."""
-
-    def __init__(self) -> None:
-        self._value: object = None
-        self._set = False
-
-    def get(self):
-        return self._value if self._set else None
-
-    def set(self, value: object) -> None:
-        self._value = value
-        self._set = True
-
-
-_martin_cache = _TTL()
-_btbn_cache = _TTL()

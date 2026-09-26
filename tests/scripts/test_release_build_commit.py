@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import sys
 
-from scripts.releases import commit_build
+import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -16,6 +16,7 @@ def git(repo, *args):
                           text=True, encoding='utf-8', timeout=30).stdout.strip()
 
 
+@pytest.fixture
 def fixture_repo(tmp_path):
     upstream = tmp_path / 'upstream.git'
     subprocess.run(['git', 'init', '--bare', '-q', '-b', 'main', str(upstream)], check=True)
@@ -30,9 +31,11 @@ def fixture_repo(tmp_path):
     git(repo, 'remote', 'set-url', 'origin', 'https://github.com/fixture-owner/fixture-repo.git')
     for relative in ('scripts/release.py', 'scripts/releases/commit_build.py',
                      'scripts/releases/bundle_env.py',
-                     'scripts/releases/r2.py', 'scripts/release-content-types.json',
+                     'scripts/releases/channel_build.py', 'scripts/releases/channels.py',
+                     'scripts/releases/r2.py', 'scripts/releases/r2_scope.py', 'scripts/release-content-types.json',
                      'hermes_cli/__init__.py', 'hermes_cli/update_channel.py',
-                     'hermes_cli/runtime_paths.py', 'hermes_constants.py'):
+                     'hermes_cli/release_channels.py',
+                     'pm/paths.py', 'pm/environments.py', 'hermes_constants.py'):
         dest = repo / relative
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(ROOT / relative, dest)
@@ -50,7 +53,7 @@ def run(argv, *args, **kwargs):
             raise FileNotFoundError('fixture gh is absent')
         if argv[1:3] == ['repo', 'view']:
             assert '--repo' not in argv, 'gh repo view requires a positional repository'
-            assert 'fixture-owner/fixture-repo' in argv
+            assert argv[-1].count('/') == 1, argv
             value = 'main\\n'
         elif argv[1:3] == ['workflow', 'run']:
             value = 'fixture dispatch accepted\\n'
@@ -63,8 +66,10 @@ def run(argv, *args, **kwargs):
     assert pathlib.Path(kwargs.get('cwd') or pathlib.Path.cwd()).resolve() == root.resolve()
     if argv[1] in ('fetch', 'ls-remote'):
         # Only the transport points at a local fixture. Identity reads stay real.
-        rewrite = 'url.' + os.environ['PROBE_REMOTE'] + '.insteadOf=https://github.com/fixture-owner/fixture-repo.git'
-        argv = ['git', '-c', rewrite, *argv[1:]]
+        rewrites = ['-c', 'url.' + os.environ['PROBE_REMOTE'] + '.insteadOf=https://github.com/fixture-owner/fixture-repo.git']
+        if os.environ.get('PROBE_UPSTREAM_URL'):
+            rewrites += ['-c', 'url.' + os.environ['PROBE_REMOTE'] + '.insteadOf=' + os.environ['PROBE_UPSTREAM_URL']]
+        argv = ['git', *rewrites, *argv[1:]]
     return actual(argv, *args, **kwargs)
 subprocess.run = run
 if sys.argv[2] == 'admit':
@@ -90,26 +95,60 @@ else:
     return repo, upstream, invoke
 
 
-def test_commit_build_cli_dispatches_only_the_resolved_remote_commit(tmp_path):
-    repo, upstream, invoke = fixture_repo(tmp_path)
+def test_commit_build_cli_dispatches_only_the_resolved_remote_commit(fixture_repo):
+    repo, upstream, invoke = fixture_repo
     tip = git(repo, 'rev-parse', 'HEAD')
     before = git(repo, 'show-ref', '--heads', '--tags')
     for revision in (tip[:8], 'main'):
         result, calls = invoke('--build-commit', revision)
         assert result.returncode == 0, result.stderr
-        assert f'Commit: {tip}' in result.stdout and f'releases/commit/{tip}/' in result.stdout
-        # The commit build's downloads page is named before anything is
-        # dispatched, so the URL can be opened once the matrix finishes.
-        assert 'Page: http' in result.stdout and f'releases/commit/{tip}/index.html' in result.stdout
+        assert tip in result.stdout
+        assert f'https://hermes-assets.nousresearch.com/releases/commit/{tip}/index.html' in result.stdout
         assert not any(call[1:3] == ['workflow', 'run'] for call in calls)
     result, calls = invoke('--build-commit', tip, '--publish')
     assert result.returncode == 0, result.stderr
+    # Repository identity no longer selects the dispatch: every commit build
+    # is the same direct dispatch (disposable mode is an explicit opt-in).
     dispatches = [call for call in calls if call[1:3] == ['workflow', 'run']]
-    assert dispatches == [commit_build.dispatch_command(tip, 'fixture-owner/fixture-repo', 'main')]
-    assert f'build_commit={tip}' in dispatches[0] and 'upload_release=false' in dispatches[0]
+    assert len(dispatches) == 1
+    assert f'build_commit={tip}' in dispatches[0]
+    assert not any(field.startswith('disposable_channel=') for field in dispatches[0])
     assert git(repo, 'show-ref', '--heads', '--tags') == before
     assert git(upstream, 'rev-parse', 'refs/heads/main') == tip
 
+
+def test_commit_build_dispatch_is_repository_independent(fixture_repo):
+    repo, _, invoke = fixture_repo
+    tip = git(repo, 'rev-parse', 'HEAD')
+    expected = ['gh', 'workflow', 'run', 'desktop-bundled-release.yml',
+                '--ref', 'main', '--repo', 'fixture-owner/fixture-repo',
+                '-f', f'build_commit={tip}', '-f', 'tag=', '-f', 'upload_release=false',
+                '-f', 'termux_only=false', '-f', 'termux_upgrade_from_tag=']
+    result, calls = invoke('--build-commit', tip, '--publish')
+    assert result.returncode == 0, result.stderr
+    dispatches = [call for call in calls if call[1:3] == ['workflow', 'run']]
+    assert dispatches == [expected]
+    assert 'disposable' not in result.stdout.lower()
+    # The upstream URL used to select a different command shape; it no longer does.
+    git(repo, 'remote', 'set-url', 'origin', 'https://github.com/NousResearch/hermes-agent.git')
+    result, calls = invoke('--build-commit', tip, '--publish',
+                           extra={'PROBE_UPSTREAM_URL': 'https://github.com/NousResearch/hermes-agent.git'})
+    assert result.returncode == 0, result.stderr
+    dispatches = [call for call in calls if call[1:3] == ['workflow', 'run']]
+    assert dispatches == [['gh', 'workflow', 'run', 'desktop-bundled-release.yml',
+                           '--ref', 'main', '--repo', 'NousResearch/hermes-agent',
+                           '-f', f'build_commit={tip}', '-f', 'tag=', '-f', 'upload_release=false',
+                           '-f', 'termux_only=false', '-f', 'termux_upgrade_from_tag=']]
+
+
+# (Fork-conditional removal) The disposable routing test retired with it: a
+# commit build dispatch does not branch on repository identity. Disposable
+# channels remain reachable via explicit --channel-request / CI allocation.
+
+
+def test_commit_bundle_environment_is_literal_and_validated(fixture_repo):
+    repo, _, invoke = fixture_repo
+    tip = git(repo, 'rev-parse', 'HEAD')
     values = {'HERMES_GUEST_ONBOARDING': '1', 'HERMES_DATA_DIR_SUFFIX': 'magic-test',
               'EMPTY': '', 'LITERAL': 'a=b "quote"\n$(not-a-command)'}
     flags = [part for key, value in values.items() for part in ('--bundle-env', f'{key}={value}')]
@@ -138,6 +177,9 @@ def test_commit_build_cli_dispatches_only_the_resolved_remote_commit(tmp_path):
     result, calls = invoke('--bundle-unset', 'HERMES_HOME')
     assert result.returncode == 2 and not calls
 
+def test_commit_build_requires_pushed_refs_and_github_origin(tmp_path, fixture_repo):
+    repo, upstream, invoke = fixture_repo
+    tip = git(repo, 'rev-parse', 'HEAD')
     git(repo, 'checkout', '-qb', 'feature')
     (repo / 'feature').write_text('pushed feature', encoding='utf-8')
     git(repo, 'add', 'feature')
@@ -149,7 +191,7 @@ def test_commit_build_cli_dispatches_only_the_resolved_remote_commit(tmp_path):
     for revision in (feature[:8], 'origin/feature', 'fixture-tag'):
         result, calls = invoke('--build-commit', revision)
         assert result.returncode == 0, result.stderr
-        assert f'Commit: {feature}' in result.stdout
+        assert feature in result.stdout
         assert git(repo, 'rev-parse', 'HEAD') == tip
         assert not any(call[1:3] == ['workflow', 'run'] for call in calls)
 
@@ -176,8 +218,8 @@ def test_commit_build_cli_dispatches_only_the_resolved_remote_commit(tmp_path):
         assert result.returncode != 0 and 'GitHub remote' in result.stderr and not calls
 
 
-def test_workflow_admission_checks_trust_before_publishing_outputs(tmp_path):
-    repo, _, invoke = fixture_repo(tmp_path)
+def test_workflow_admission_checks_trust_before_publishing_outputs(tmp_path, fixture_repo):
+    repo, _, invoke = fixture_repo
     tip = git(repo, 'rev-parse', 'HEAD')
     output = tmp_path / 'output'
     env = {'BUILD_COMMIT': tip, 'DEFAULT_BRANCH': 'main',

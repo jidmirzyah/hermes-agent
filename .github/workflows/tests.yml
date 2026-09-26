@@ -49,7 +49,7 @@ jobs:
       - name: Set up locked Python and test dependencies
         uses: ./.github/actions/setup-pm
         with:
-          extras: '["all", "dev", "anthropic", "mistral", "fal", "modal", "daytona", "hindsight", "parallel-web"]'
+          extras: '["all", "dev", "anthropic", "bedrock", "mistral", "fal", "modal", "daytona", "hindsight", "parallel-web"]'
           prune-python-cache: true
 
       - name: Restore per-file duration cache
@@ -138,7 +138,7 @@ jobs:
       - name: Set up locked Python and test dependencies
         uses: ./.github/actions/setup-pm
         with:
-          extras: '["all", "dev", "anthropic", "mistral", "fal", "modal", "daytona", "hindsight", "parallel-web"]'
+          extras: '["all", "dev", "anthropic", "bedrock", "mistral", "fal", "modal", "daytona", "hindsight", "parallel-web"]'
           prune-python-cache: true
 
       - name: Run e2e tests

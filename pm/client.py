@@ -3,15 +3,16 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 import json
-import os
 from pathlib import Path
 import subprocess
+import sys
 import threading
 import uuid
 
 from pm import paths
 from pm.package import InstallError, Runner, StatePackage
 from pm.runtime import is_runtime, runtime_command, runtime_environment
+from pm.worker_operations import OPERATIONS
 
 
 def _members(value):
@@ -24,7 +25,7 @@ def _members(value):
 
 
 def _missing_or_refuse(name):
-    from pm.ensure import _refuse_lazy, is_installed, lazy_installs_allowed
+    from pm.install import _refuse_lazy, is_installed, lazy_installs_allowed
     from pm.registry import walk
 
     missing = [package.name for package in walk([name]) if not is_installed(package.name)]
@@ -35,19 +36,15 @@ def _missing_or_refuse(name):
 
 def _request(operation, arguments, *, callbacks=None, pause_event=None, project_root=None):
     from pm import receipt
-    from pm.ensure import lazy_installs_allowed
+    from pm.install import lazy_installs_allowed
     from pm.registry import get_package, package_definitions
 
     request_id = uuid.uuid4().hex
     update_id = receipt._ambient_update_id()
     callbacks = callbacks or {}
-    names = ([arguments["name"]] if operation in ("ensure", "stage_only") else
-             {"sync_venv": ["venv"], "venv_is_current": ["venv"],
-              "build_environment": ["uv"], "lock_project": ["uv"],
-              "ensure_environment": ["uv"], "ensure_python_tool": ["uv"],
-              "stage_manager_runtime": ["uv"], "check_project_lock": ["uv"],
-              "export_requirements": ["uv"], "build_requirements_environment": ["uv"],
-              "prune_cache": ["uv"]}.get(operation, []))
+    spec = OPERATIONS[operation]
+    names = list(spec.packages) if spec.packages is not None else (
+        arguments["names"] if "names" in arguments else [arguments["name"]])
     message = {
         "id": request_id, "operation": operation, "arguments": arguments,
         "update_id": update_id,
@@ -57,17 +54,17 @@ def _request(operation, arguments, *, callbacks=None, pause_event=None, project_
                     "lockfile": str(paths.lockfile_path())},
     }
     worker = Path(__file__).with_name("worker.py").resolve()
+    # Bootstrap precedes dispatch and must share the operation's selected cache.
+    cache = Path(arguments["cache"]) if arguments.get("cache") is not None else None
     environment = runtime_environment()
-    state_sync = operation in ("sync_venv", "build_environment", "lock_project",
-                               "ensure_environment", "ensure_python_tool", "check_project_lock",
-                               "export_requirements", "build_requirements_environment") or (
-        operation == "ensure" and isinstance(get_package(arguments["name"]), StatePackage))
+    state_sync = spec.bootstrap == "policy" or (
+        spec.bootstrap == "state" and isinstance(get_package(arguments["name"]), StatePackage))
     if (state_sync and not arguments.get("explicit") and not arguments.get("repair")
             and not lazy_installs_allowed()):
         # A ready PM still decides no-op/refusal under its install lock. A cold
         # PM is itself a missing prerequisite, not permission to bootstrap tools.
         try:
-            command = runtime_command(worker, bootstrap=False)
+            command = runtime_command(worker, bootstrap=False, cache=cache)
         except InstallError as exc:
             token = receipt.begin("sync")
             try:
@@ -77,10 +74,10 @@ def _request(operation, arguments, *, callbacks=None, pause_event=None, project_
                 receipt.finalize("failed", 1, token=token)
             raise
         environment["HERMES_DISABLE_LAZY_INSTALLS"] = "1"
-    elif operation == "venv_is_current":
-        command = runtime_command(worker, bootstrap=False)
+    elif spec.bootstrap == "never":
+        command = runtime_command(worker, bootstrap=False, cache=cache)
     else:
-        command = runtime_command(worker)
+        command = runtime_command(worker, cache=cache)
     callback_error = None
     stopped = threading.Event()
     write_lock = threading.Lock()
@@ -122,10 +119,8 @@ def _request(operation, arguments, *, callbacks=None, pause_event=None, project_
                     break
                 name = response["callback"]
                 try:
-                    value = callbacks[name](*response.get("args", []))
-                    if name not in ("plugin_dirs", "before_publish"):
-                        value = None
-                    send({"type": "callback_result", "call": response["call"], "result": value})
+                    callbacks[name](*response.get("args", []))
+                    send({"type": "callback_result", "call": response["call"], "result": None})
                 except BaseException as exc:
                     if callback_error is None:
                         callback_error = exc
@@ -164,11 +159,11 @@ def _request(operation, arguments, *, callbacks=None, pause_event=None, project_
 
 
 def ensure(name, *, base_env=None, explicit=False, progress=None, pause_event=None, download_progress=None) -> Runner:
-    from pm.ensure import env_for
+    from pm.install import env_for
     from pm.registry import get_package
 
     if is_runtime():
-        from pm.ensure import ensure as direct
+        from pm.install import ensure as direct
         return direct(name, base_env=base_env, explicit=explicit, progress=progress,
                       pause_event=pause_event, download_progress=download_progress)
     if not explicit and not isinstance(get_package(name), StatePackage):
@@ -187,48 +182,46 @@ def ensure(name, *, base_env=None, explicit=False, progress=None, pause_event=No
     return Runner(name, env_for(name, base_env=base_env))
 
 
-def sync_venv(extras=None, *, explicit=False, plugin_dirs=None, before_publish=None, repair=False,
+def sync_venv(extras=None, *, explicit=False, plugin_dirs=None, extra_plugin_dirs=(), selection=None, staged_plugin=None, repair=False,
               project_root: Path | None = None) -> None:
+    from pm.environments import running_from_selected_environment
+
+    if extras and not explicit and not repair and not running_from_selected_environment(
+            paths.repo_root() if project_root is None else Path(project_root)):
+        # A lazy extra may only extend the environment this process runs from. From any other
+        # interpreter (a build_environment test venv, a developer venv, a Nix Python) the sync would
+        # commit a selection this process never activates while every process booted afterwards
+        # swaps onto it — a generation without whatever the foreign interpreter carried.
+        from pm.install import _refuse_lazy
+        raise _refuse_lazy(
+            "venv",
+            f"{list(extras)}: this process is not running from the install's dependency environment "
+            f"({sys.prefix}); only an explicit install may change what later processes boot into",
+        )
+    if selection is not None and "expected_config" not in selection:
+        from hermes_cli.runtime_state import _digest
+        selection = {**selection, "expected_config": _digest(Path(selection["home"]) / "config.yaml") or "missing"}
     foreign = project_root is not None and Path(project_root).resolve() != paths.repo_root().resolve()
     if is_runtime() and not foreign:
-        from pm.ensure import sync_venv as direct
+        from pm.install import sync_venv as direct
         return direct(extras, explicit=explicit, plugin_dirs=plugin_dirs,
-                      before_publish=before_publish, repair=repair)
-    callbacks = {}
-    if callable(plugin_dirs):
-        callbacks["plugin_dirs"] = lambda: _members(plugin_dirs())
-        members = None
-    else:
-        members = _members(plugin_dirs)
-    if before_publish is not None:
-        def publish():
-            publication = before_publish()
-            if publication is not None:
-                callbacks["undo"] = publication
-            if hasattr(publication, "finish"):
-                callbacks["finish"] = publication.finish
-            return {"undo": publication is not None, "finish": hasattr(publication, "finish")}
-        callbacks["before_publish"] = publish
+                      selection=selection, staged_plugin=staged_plugin, extra_plugin_dirs=extra_plugin_dirs, repair=repair)
     _request("sync_venv", {"extras": extras, "explicit": explicit, "repair": repair,
-                          "plugin_dirs": members}, callbacks=callbacks, project_root=project_root)
+                          "plugin_dirs": _members(plugin_dirs), "selection": selection, "staged_plugin": staged_plugin,
+                          "extra_plugin_dirs": [str(Path(p).absolute()) for p in extra_plugin_dirs]}, project_root=project_root)
 
 
 def stage_only(name, target, *, progress=None) -> Path:
     if is_runtime():
-        from pm.ensure import stage_only as direct
+        from pm.install import stage_only as direct
         return direct(name, target, progress=progress)
     callbacks = {"progress": progress} if progress is not None else {}
     return Path(_request("stage_only", {"name": name, "target": target}, callbacks=callbacks))
 
 
 def _python_operation(operation: str, arguments: dict):
-    from pm import operations
-    implementation = getattr(operations, operation, None)
-    if implementation is None:
-        from pm import build_operations
-        implementation = getattr(build_operations, operation)
     if is_runtime():
-        return implementation(**arguments)
+        return OPERATIONS[operation].resolve(operation)(**arguments)
     payload = {key: str(value.absolute()) if isinstance(value, Path) else value
                for key, value in arguments.items()}
     return _request(operation, payload)
@@ -302,13 +295,17 @@ def ensure_python_tool(
     }))
 
 
-def venv_is_current(*, project_root: Path | None = None) -> bool:
+def venv_is_current(*, extras: list[str] | None = None, plugin_dirs=None, extra_plugin_dirs=(),
+                    project_root: Path | None = None) -> bool:
     """Check through a ready PM, never bootstrap dependencies for a probe."""
     if is_runtime() and (project_root is None or Path(project_root).resolve() == paths.repo_root().resolve()):
-        from pm.ensure import venv_is_current as direct
-        return direct(project_root=project_root)
+        from pm.install import venv_is_current as direct
+        return direct(extras=extras, plugin_dirs=plugin_dirs, extra_plugin_dirs=extra_plugin_dirs, project_root=project_root)
+    members = plugin_dirs
     try:
-        return bool(_request("venv_is_current", {}, project_root=project_root))
+        return bool(_request("venv_is_current", {"extras": extras, "plugin_dirs": _members(members),
+                            "extra_plugin_dirs": [str(Path(p).absolute()) for p in extra_plugin_dirs]},
+                             project_root=project_root))
     except InstallError as exc:
         if exc.package == "pm-runtime":
             return False  # Without its checker, currency cannot be established.
@@ -345,6 +342,25 @@ def build_requirements_environment(requirements: Sequence[str], *, out: Path,
         "requirements": list(requirements), "out": Path(out), "python": python, "cache": cache,
         "env": dict(env) if env is not None else None, "wheelhouse": wheelhouse,
         "offline": offline, "sealed": sealed, "explicit": explicit,
+    }))
+
+
+def prepare_tools(names: Sequence[str], *, out: Path, target: str,
+                  cache: Path | None = None) -> Path:
+    """Realize build tools without selecting application or profile state."""
+    if isinstance(names, str):
+        raise TypeError("names must be a sequence, not a string")
+    return Path(_python_operation("prepare_tools", {
+        "names": list(names), "out": Path(out), "target": target, "cache": cache,
+    }))
+
+
+def stage_tools(names: Sequence[str], *, source_store: Path, out: Path, target: str) -> Path:
+    """Independently copy verified pins through a ready PM; never bootstrap."""
+    if isinstance(names, str):
+        raise TypeError("names must be a sequence, not a string")
+    return Path(_python_operation("stage_tools", {
+        "names": list(names), "source_store": Path(source_store), "out": Path(out), "target": target,
     }))
 
 

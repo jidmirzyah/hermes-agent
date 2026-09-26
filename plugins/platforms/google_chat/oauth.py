@@ -19,8 +19,11 @@ import os
 import re
 import stat
 import sys
+from importlib.metadata import version as _distribution_version
 from pathlib import Path
 from typing import Any, List, NoReturn, Optional, Tuple
+
+from packaging.requirements import Requirement
 
 from hermes_constants import display_hermes_home, get_hermes_home
 from utils import atomic_write_text
@@ -36,7 +39,18 @@ _EMAIL_FS_RE = re.compile(r"[^a-z0-9._@-]+")
 # subsequent messages.create; no drive.file or other scopes.
 SCOPES: List[str] = ["https://www.googleapis.com/auth/chat.messages.create"]
 
+# Declared extras (pyproject) and the exact pins they carry; the pins double as the
+# staleness probe so a half-synced interpreter is repaired instead of trusted.
 _DEPENDENCY_EXTRAS = ["google", "google-chat"]
+_REQUIRED_PACKAGES = [
+    "google-cloud-pubsub==2.39.0",
+    "google-api-python-client==2.194.0",
+    "google-auth==2.55.1",
+    "google-auth-oauthlib==1.3.1",
+    "google-auth-httplib2==0.3.1",
+    "httplib2==0.32.0",
+    "pyasn1==0.6.4",
+]
 
 # Google deprecated the ``oob`` flow: use a localhost redirect that is expected
 # to FAIL; the user pastes the code from the failed browser URL back into chat.
@@ -199,29 +213,44 @@ def _fail(*lines: str) -> NoReturn:
 
 
 def _ensure_deps() -> None:
-    """Auth must stop if new dependencies need a fresh process to activate."""
-    try:
-        import pm
+    """Check exact dependency versions; install if stale; exit on failure."""
+    if _missing_required_packages() and not install_deps():
+        sys.exit(1)
 
-        for extra in _DEPENDENCY_EXTRAS:
-            pm.ensure_import(extra)
-    except Exception as exc:
-        _fail(f"ERROR: Google Chat dependencies unavailable: {exc}")
+
+def _missing_required_packages() -> List[str]:
+    """Return exact requirements absent or stale in this interpreter."""
+    missing = []
+    for spec in _REQUIRED_PACKAGES:
+        requirement = Requirement(spec)
+        try:
+            installed = _distribution_version(requirement.name)
+            satisfied = requirement.specifier.contains(installed, prereleases=True)
+        except Exception:
+            satisfied = False
+        if not satisfied:
+            missing.append(spec)
+    return missing
 
 
 def install_deps() -> bool:
-    """Install the declared dependency graph without mutating the booted environment."""
+    missing = _missing_required_packages()
+    if not missing:
+        print("Dependencies already installed.")
+        return True
     print("Installing Google Chat dependencies...")
     try:
         import pm
-
         pm.sync_venv(_DEPENDENCY_EXTRAS, explicit=True)
+        remaining = _missing_required_packages()
+        if remaining:
+            raise RuntimeError("dependencies remain stale after install: " + " ".join(remaining))
+        print("Dependencies installed. Restart Hermes to activate any new dependency environment.")
+        return True
     except Exception as exc:
         print(f"ERROR: Failed to install dependencies: {exc}")
         print("Run `hermes setup` to repair the managed installation, then retry.")
         return False
-    print("Dependencies installed. Restart Hermes to activate any new dependency environment.")
-    return True
 
 
 def check_auth(email: Optional[str] = None) -> bool:

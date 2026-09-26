@@ -20,35 +20,6 @@ from logging.handlers import QueueHandler, QueueListener
 from pathlib import Path
 from typing import Optional, Sequence
 
-# Windows-ONLY swap (#44873): stdlib ``RotatingFileHandler.doRollover()`` calls
-# ``os.rename()``, which fails with ``PermissionError [WinError 32]`` whenever
-# another process holds an append handle on ``agent.log`` — essentially always
-# in Hermes (TUI, gateway, hy_memory, MCP servers, CLI commands all log) —
-# pinning the file at the size threshold and spamming stderr on every emit.
-# ``concurrent-log-handler`` serializes rollover with a cross-process lock.
-# POSIX keeps stdlib: renames of open files work, and managed mode (NixOS)
-# relies on stdlib's exact ``_open()``/``doRollover()`` lifecycle for the
-# 0660 chmod and eager file creation; CLH opens lazily and rotates differently.
-if sys.platform == "win32":
-    if _portalocker_probe():
-        from concurrent_log_handler import (  # noqa: E402
-            ConcurrentRotatingFileHandler as RotatingFileHandler,
-        )
-    else:
-        # portalocker cannot take a lock on this box (typical cause: a sealed
-        # bundle whose venv never processed pywin32.pth, so `import pywintypes`
-        # fails and portalocker's Win32Locker has no msvcrt fallback). CLH
-        # would silently drop every record through the suppressed lock-timeout
-        # below; fall back to stdlib rotation instead. Rollover is disabled in
-        # the fallback: multi-process appends make Windows renames fail with
-        # WinError 32, the exact #44873 trap CLH exists to avoid.
-        from logging.handlers import RotatingFileHandler  # noqa: E402
-
-        _WINDOWS_CLH_FALLBACK = True
-else:
-    from logging.handlers import RotatingFileHandler  # noqa: E402
-
-
 from hermes_constants import get_config_path, get_hermes_home, mkdir_under_hermes_home
 
 # setup_logging() is idempotent: a second call is a no-op unless ``force=True``.
@@ -85,7 +56,7 @@ def _portalocker_probe() -> bool:
         return False
     fd, path = tempfile.mkstemp(prefix="hermes-portalocker-")
     try:
-        with os.fdopen(fd, "r+") as stream:
+        with os.fdopen(fd, "r+b") as stream:
             portalocker.lock(stream, portalocker.LOCK_EX)
             portalocker.unlock(stream)
     except Exception as exc:
@@ -97,6 +68,35 @@ def _portalocker_probe() -> bool:
         except OSError:
             pass
     return True
+
+
+# Windows-ONLY swap (#44873): stdlib ``RotatingFileHandler.doRollover()`` calls
+# ``os.rename()``, which fails with ``PermissionError [WinError 32]`` whenever
+# another process holds an append handle on ``agent.log`` — essentially always
+# in Hermes (TUI, gateway, hy_memory, MCP servers, CLI commands all log) —
+# pinning the file at the size threshold and spamming stderr on every emit.
+# ``concurrent-log-handler`` serializes rollover with a cross-process lock.
+# POSIX keeps stdlib: renames of open files work, and managed mode (NixOS)
+# relies on stdlib's exact ``_open()``/``doRollover()`` lifecycle for the
+# 0660 chmod and eager file creation; CLH opens lazily and rotates differently.
+if sys.platform == "win32":
+    if _portalocker_probe():
+        from concurrent_log_handler import (  # noqa: E402
+            ConcurrentRotatingFileHandler as RotatingFileHandler,
+        )
+    else:
+        # portalocker cannot take a lock on this box (typical cause: a sealed
+        # bundle whose venv never processed pywin32.pth, so `import pywintypes`
+        # fails and portalocker's Win32Locker has no msvcrt fallback). CLH
+        # would silently drop every record through the suppressed lock-timeout
+        # below; fall back to stdlib rotation instead. Rollover is disabled in
+        # the fallback: multi-process appends make Windows renames fail with
+        # WinError 32, the exact #44873 trap CLH exists to avoid.
+        from logging.handlers import RotatingFileHandler  # noqa: E402
+
+        _WINDOWS_CLH_FALLBACK = True
+else:
+    from logging.handlers import RotatingFileHandler  # noqa: E402
 
 # Thread-local per-conversation session context.
 _session_context = threading.local()
@@ -963,7 +963,7 @@ def _read_logging_config():
             config_path = get_config_path()
             cfg = {}
             if config_path.exists():
-                with open(config_path, "r", encoding="utf-8") as f:
+                with open(config_path, "r", encoding="utf-8-sig") as f:
                     cfg = fast_safe_load(f) or {}
         if not cfg:
             return (None, None, None)

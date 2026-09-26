@@ -46,11 +46,12 @@ async function nativeProof() {
   const desktop = path.join(work, 'apps/desktop')
   const copied = [
     'apps/desktop/product-identity.cjs', 'apps/desktop/electron-builder.config.cjs',
-    'apps/desktop/package.json', 'apps/desktop/update-feed.cjs', 'apps/desktop/update-feed.json',
+    'apps/desktop/package.json', 'apps/desktop/update-feed.cjs',
     'apps/desktop/assets/msix-manifest.xml',
-    ...['before-build', 'gen-msix-manifest', 'gen-appinstaller', 'mac-sign', 'payload-digests', 'write-build-stamp', 'utils']
+    ...['before-build', 'gen-msix-manifest', 'mac-sign', 'payload-digests', 'write-build-stamp', 'utils']
       .map(name => `apps/desktop/scripts/${name}.mjs`),
     'scripts/msix-shared.mjs', 'scripts/release-content-types.json', 'scripts/build/python.mjs',
+    'scripts/bundles/desktop_prepare.py', 'scripts/releases/bundle_env.py', 'hermes_cli/release_channels.py', 'hermes_cli/__init__.py',
   ]
   for (const file of copied) {
     fs.mkdirSync(path.dirname(path.join(work, file)), { recursive: true })
@@ -73,7 +74,7 @@ foreach ($asset in @(@('Square44x44Logo.png',44,44), @('Square150x150Logo.png',1
   checked('powershell.exe', ['-NoProfile', '-NonInteractive', '-File', iconsScript, '-Dir', path.join(desktop, 'assets/appx')])
   fs.symlinkSync(path.join(repo, 'node_modules'), path.join(work, 'node_modules'), 'junction')
   const env = { ...process.env, HERMES_HOME: path.join(root, 'home'), HERMES_RUNTIME_DIR: path.join(root, 'runtime') }
-  for (const key of ['HERMES_BUILD_COMMIT', 'HERMES_PAYLOAD_TAG', 'HERMES_PAYLOAD_VERSION', 'HERMES_DESKTOP_VARIANT', 'BUILD_NUMBER']) delete env[key]
+  for (const key of ['_HERMES_CHANNEL_REQUEST_JSON', 'HERMES_BUILD_COMMIT', 'HERMES_PAYLOAD_TAG', 'HERMES_PAYLOAD_VERSION', 'HERMES_DESKTOP_VARIANT', 'BUILD_NUMBER']) delete env[key]
   const gitEnv = { ...env, GIT_AUTHOR_NAME: 'Native fixture', GIT_AUTHOR_EMAIL: 'fixture@example.invalid', GIT_COMMITTER_NAME: 'Native fixture', GIT_COMMITTER_EMAIL: 'fixture@example.invalid', GIT_AUTHOR_DATE: '2026-09-01T00:00:00Z', GIT_COMMITTER_DATE: '2026-09-01T00:00:00Z' }
   const git = (...args) => checked('git', args, { cwd: work, env: gitEnv })
   git('init', '-q')
@@ -83,12 +84,23 @@ foreach ($asset in @(@('Square44x44Logo.png',44,44), @('Square150x150Logo.png',1
   git('-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-qm', 'Second commit fixture')
   const commitB = git('rev-parse', 'HEAD')
   assert.notEqual(commitA, commitB)
+  const channelRequest = sequence => ({
+    schema: 1, buildId: 'a'.repeat(32), channel: 'sdk-preview', sequence,
+    repository: 'fixture/project', commit: commitB, sourceVersion: '1.2.4', version: `0.0.${sequence}`,
+    windowsVersion: `0.${Math.floor(sequence / 65536)}.${sequence % 65536}.0`,
+    identity: { token: 'ab12cd34ef56ab78', displayName: 'Hermes sdk-preview',
+      appId: 'ai.hermes.channel.hab12cd34ef56ab78', appNamePascal: 'HermesChannelab12cd34ef56ab78',
+      artifactNamePascal: 'HermesChannelab12cd34ef56ab78', cliName: 'hermes-sdk-preview',
+      windowsExecutableName: 'HermesChannelab12cd34ef56ab78', msixAppIdWithOrg: 'NousResearch.HermesChannelab12cd34ef56ab78' },
+    bundleEnv: {}, publicBase: 'https://example.invalid'
+  })
   const cases = [
     ['stable', { HERMES_PAYLOAD_TAG: 'v1.2.3' }],
     ['canary', { HERMES_PAYLOAD_TAG: 'v1.2.4-canary.20260902000000' }],
     ['canary-update', { HERMES_PAYLOAD_TAG: 'v1.2.4-canary.20260903000000' }],
     ['commit-a', { HERMES_BUILD_COMMIT: commitA, HERMES_PAYLOAD_VERSION: '1.2.4' }],
     ['commit-b', { HERMES_BUILD_COMMIT: commitB, HERMES_PAYLOAD_VERSION: '1.2.4' }],
+    ...[65535, 65536, 0xffffffff].map(sequence => [`channel-${sequence}`, { _HERMES_CHANNEL_REQUEST_JSON: JSON.stringify(channelRequest(sequence)) }]),
   ]
   const rows = []
   const failures = []
@@ -121,7 +133,8 @@ foreach ($asset in @(@('Square44x44Logo.png',44,44), @('Square150x150Logo.png',1
       const metadata = { ...JSON.parse(fs.readFileSync(${JSON.stringify(path.join(desktop, 'package.json'))}, 'utf8')), ...config.extraMetadata };
       const executable = new AppInfo({ config, metadata }, null, config.win).productFilename + '.exe';
       const payload = stageDesktopLaunchers(${JSON.stringify(manifestDir)});
-      await beforeBuild();
+      if (typeof config.beforeBuild === "function") await config.beforeBuild();
+      else await beforeBuild();
       console.log(JSON.stringify({identity, config, payload, executable, app: appIdentity(${JSON.stringify(desktop)})}));
     `, path.join(root, 'native-probe.mjs')]))
     const xml = node([path.join(desktop, 'scripts/gen-msix-manifest.mjs'), 'bundled', process.arch])
@@ -159,13 +172,24 @@ foreach ($asset in @(@('Square44x44Logo.png',44,44), @('Square150x150Logo.png',1
       }
     }
     const descriptor = path.join(root, `${label}.appinstaller`)
-    const generated = run(process.execPath, [path.join(desktop, 'scripts/gen-appinstaller.mjs'), '--out', descriptor, '--base-url', 'https://example.invalid/fixture'], { cwd: work, env: childEnv })
-    if (flavorEnv.HERMES_BUILD_COMMIT) {
-      check(generated.status !== 0 && !fs.existsSync(descriptor), `${label}: commit build emitted App Installer feed`)
-      check(facts.config.publish === null, `${label}: commit build config still publishes`)
+    if (facts.identity.channel && !flavorEnv._HERMES_CHANNEL_REQUEST_JSON) {
+      const publisher = attribute(roundtrip, 'Identity', 'Publisher')
+      const selfUri = `https://example.invalid/fixture/${facts.identity.channel}.appinstaller`
+      const artifactUri = `https://example.invalid/fixture/${facts.app.name}-${version}-win.msixbundle`
+      checked(process.env.HERMES_PYTHON || 'python', [
+        '-m', 'scripts.bundles.release_artifacts', 'appinstaller', '--root', root, '--out', descriptor,
+        '--identity', name, '--publisher', publisher, '--version', version,
+        '--self-uri', selfUri, '--artifact-uri', artifactUri,
+      ], { cwd: repo, env: childEnv })
+      const feed = fs.readFileSync(descriptor, 'utf8')
+      check(attribute(feed, 'MainBundle', 'Name') === name, `${label}: App Installer targets another family`)
+      check(attribute(feed, 'MainBundle', 'Publisher') === publisher, `${label}: App Installer changed publisher`)
+      check(attribute(feed, 'MainBundle', 'Version') === version, `${label}: App Installer changed version`)
+      check(attribute(feed, 'AppInstaller', 'Uri') === selfUri, `${label}: App Installer changed subscription`)
+      check(attribute(feed, 'MainBundle', 'Uri') === artifactUri, `${label}: App Installer changed artifact`)
     } else {
-      assert.equal(generated.status, 0, generated.output)
-      check(attribute(fs.readFileSync(descriptor, 'utf8'), 'MainBundle', 'Name') === name, `${label}: App Installer targets another family`)
+      check(!fs.existsSync(descriptor), `${label}: commit build emitted App Installer feed`)
+      check(facts.config.publish === null, `${label}: commit build config still publishes`)
     }
     const row = { label, name, version, aliases, packageDir, cliName: facts.identity.cliName, commit: flavorEnv.HERMES_BUILD_COMMIT || null }
     rows.push(row)
@@ -176,6 +200,11 @@ foreach ($asset in @(@('Square44x44Logo.png',44,44), @('Square150x150Logo.png',1
   check(new Set([stable, canary, a, b].flatMap(row => row.aliases)).size === 8, 'Flavor execution aliases collide')
   check(canary.name === update.name && canary.name !== stable.name, 'Canary upgrade does not stay in its own family')
   check(canary.version.localeCompare(update.version, undefined, { numeric: true }) < 0, 'Canary version does not increase')
+  const channelRows = rows.filter(row => row.label.startsWith('channel-'))
+  check(channelRows.every(row => row.name === channelRows[0].name && row.name !== stable.name), 'Channel update identity changed or collides with stable')
+  for (let index = 1; index < channelRows.length; index++) {
+    check(channelRows[index - 1].version.localeCompare(channelRows[index].version, undefined, { numeric: true }) < 0, 'Channel version did not increase across rollover')
+  }
   fs.writeFileSync(path.join(root, 'rows.json'), JSON.stringify(rows, null, 2))
   fs.writeFileSync(path.join(root, 'contracts.json'), JSON.stringify({ failures }, null, 2))
   assert.deepEqual(failures, [], 'Generated packaging contract failures')

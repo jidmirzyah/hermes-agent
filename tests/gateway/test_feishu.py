@@ -202,8 +202,8 @@ class TestFeishuAdapterMessaging(unittest.TestCase):
         "FEISHU_APP_ID": "cli_app",
         "FEISHU_APP_SECRET": "secret_app",
     }, clear=False)
-    def test_connect_websocket_sets_channel_ua_tag(self):
-        """Verify that FeishuWSClient receives extra_ua_tags=["channel"].
+    def test_connect_websocket_sets_channel_ua_tag_and_uses_owned_executor(self):
+        """Verify the WebSocket client uses the channel tag and owned executor.
 
         Without this UA tag the Feishu server does not push group @mention
         events over the WebSocket transport. The long-lived client must also

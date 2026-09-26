@@ -172,7 +172,7 @@ def _persisted_oauth_heal_fingerprint(provider_id: str) -> Optional[list]:
     if path is None:
         return None
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
     except Exception:
         return None
     if not isinstance(data, dict):
@@ -194,7 +194,7 @@ def _persist_oauth_heal_clean_mark(provider_id: str, fingerprint: tuple) -> None
         from utils import atomic_json_write
 
         try:
-            existing = json.loads(path.read_text(encoding="utf-8"))
+            existing = json.loads(path.read_text(encoding="utf-8-sig"))
         except Exception:
             existing = {}
         if not isinstance(existing, dict):

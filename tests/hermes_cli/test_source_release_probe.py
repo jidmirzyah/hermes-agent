@@ -15,11 +15,11 @@ def test_invalid_config_refuses_desktop_channel_probe(tmp_path, content):
     config.write_bytes(content.encode() if isinstance(content, str) else content)
     root = Path(__file__).resolve().parents[2]
     result = subprocess.run(
-        [sys.executable, "-m", "hermes_cli.source_releases", "--install-root", str(root)],
+        [sys.executable, "-m", "hermes_cli.source_check", "--install-root", str(root), "--home", str(home)],
         cwd=root, env={**os.environ, "HERMES_HOME": str(home), "HERMES_IGNORE_USER_CONFIG": "0"},
         capture_output=True, text=True, timeout=30,
     )
     assert result.returncode != 0, result.stdout + result.stderr
     assert '"channel": "main"' not in result.stdout
-    assert "invalid" in result.stderr
+    assert "config" in result.stderr
     assert config.read_bytes() == (content.encode() if isinstance(content, str) else content)

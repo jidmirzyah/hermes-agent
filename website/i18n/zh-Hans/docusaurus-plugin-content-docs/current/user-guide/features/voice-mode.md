@@ -41,7 +41,7 @@ Hermes Agent 支持在 CLI 和消息平台上进行完整的语音交互。通�
 通过 `hermes tools` 配置语音提供商。缺失的内置功能依赖由 PM 按策略和目标平台支持准备。
 如果选择的环境改变，请按提示重启 Hermes。
 桌面包预装其支持的引擎；Docker 使用较小集合并关闭按需安装。
-不要修改签名载荷或系统 Python。手动开发环境参见[开发配置](/developer-guide/contributing)。
+不要修改签名载荷或系统 Python。手动开发环境参见[开发配置](../../developer-guide/contributing.md)。
 
 | Extra | 包 | 用途 |
 |---|---|---|

@@ -15,7 +15,6 @@ Resolution order:
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -62,14 +61,11 @@ def _resolve_repo_dir() -> Path | None:
     repo_dir = Path(__file__).parent.parent.resolve()
     if (repo_dir / ".git").exists():
         return repo_dir
-    try:
-        from hermes_constants import get_hermes_home
+    from hermes_constants import get_hermes_home
 
-        candidate = get_hermes_home() / "hermes-agent"
-        if (candidate / ".git").exists():
-            return candidate
-    except Exception:
-        pass
+    candidate = get_hermes_home() / "hermes-agent"
+    if (candidate / ".git").exists():
+        return candidate
     return None
 
 
@@ -89,13 +85,10 @@ def _parse_nonnegative(value: str | None) -> int | None:
 # HERMES_INSTALL_ROOT (the Nix wrapper points it at the store path's
 # share/hermes-agent, where the stamp is baked). One resolution path for
 # every steward; no stamp-specific env override.
-_CODE_ROOT = Path(__file__).parent.parent
-
-
 def _resolve_stamp_file() -> Path | None:
-    root = os.environ.get("HERMES_INSTALL_ROOT")
-    base = Path(root) if root else _CODE_ROOT
-    p = base / "install-stamp.json"
+    from pm.paths import install_root
+
+    p = install_root() / "install-stamp.json"
     return p if p.is_file() else None
 
 

@@ -146,38 +146,30 @@ function repairOneFramework(frameworkDir) {
   return repaired
 }
 
-export function parseDeveloperId(identityList) {
+export function parseDeveloperId(identityList, qualifier = null) {
   const line = String(identityList || '')
     .split(/\r?\n/)
-    .find(l => l.includes('Developer ID Application:'))
+    .find(l => l.includes('Developer ID Application:') && (!qualifier || l.includes(qualifier)))
   if (!line) return null
-  const quoted = line.match(/"([^"]+)"/)
-  return quoted ? quoted[1] : null
+  // Match electron-builder's selector: a certificate fingerprint, not the
+  // display name shared by renewed certificates or identities in other keychains.
+  const identity = line.match(/^\s*\d+\)\s+([\dA-Fa-f]{40})\s+"Developer ID Application:[^"]+"/)
+  return identity ? identity[1] : null
 }
 
 export function findDeveloperId(exec = execFileSync, keychain = null) {
-  if (process.env.CSC_NAME) return process.env.CSC_NAME
   const args = ['find-identity', '-v', '-p', 'codesigning']
   if (keychain) args.push(keychain)
-  let out
-  try {
-    out = exec('security', args, { encoding: 'utf8' })
-  } catch {
-    return null
+  const out = exec('security', args, { encoding: 'utf8' })
+  const identity = parseDeveloperId(out, process.env.CSC_NAME?.trim())
+  if (!identity && (keychain || process.env.CSC_NAME)) {
+    throw new Error(`sign-nested-chromium: no matching Developer ID Application identity in ${keychain || 'the default keychain'}`)
   }
-  return parseDeveloperId(out)
+  return identity
 }
 
 export async function resolveSigningIdentity(packager, exec = execFileSync) {
-  if (!packager?.codeSigningInfo?.value) {
-    return { identity: findDeveloperId(exec), keychain: null }
-  }
-  let info
-  try {
-    info = await packager.codeSigningInfo.value
-  } catch {
-    return { identity: findDeveloperId(exec), keychain: null }
-  }
+  const info = await packager?.codeSigningInfo?.value
   const keychain = info?.keychainFile || process.env.CSC_KEYCHAIN || null
   return { identity: findDeveloperId(exec, keychain), keychain }
 }

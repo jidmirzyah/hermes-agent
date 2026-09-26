@@ -7,7 +7,7 @@ description: "Configure Hermes Agent — config.yaml, providers, models, API key
 # Hermes Agent Configuration
 
 Python dependency commands on this page use a
-[PM-prepared source checkout](/reference/package-management#developer-workflow).
+[PM-prepared source checkout](../reference/package-management.md#developer-workflow).
 After a dependency change, reactivate the checkout and restart Hermes.
 
 All settings are stored in the `~/.hermes/` directory for easy access.

@@ -8,7 +8,7 @@ rely on that early (no jq guarantee; python is what uv installs on Windows).
 Instead, this script derives a plain-data fragment from pm/lock.json — the
 SAME authority the pm package manager uses for every managed tool — and
 splices it between markers in each installer. The bytes are stored, the
-truth is derived, and the drift test (tests/test_bootstrap_pins_fragment.py)
+truth is derived, and the drift test (tests/scripts/test_bootstrap_pins_fragment.py)
 fails when they disagree.
 
 Run after bumping a bootstrapped tool in pm/lock.json:

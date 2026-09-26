@@ -25,7 +25,7 @@ import sys
 from pathlib import Path
 from tools import checkpoint_manager as c
 c.CHECKPOINT_BASE = Path(sys.argv[1])
-c._managed_git = lambda: None
+
 run = c._run_git
 def paused(args, *rest, **kwargs):
     result = run(args, *rest, **kwargs)

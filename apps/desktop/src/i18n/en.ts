@@ -34,9 +34,12 @@ export const en: Translations = {
     search: 'Find an app',
     empty: 'No matching apps',
     disclaimer: 'Connecting is optional. Only authorize the apps you want Hermes to use.',
-    connectTitle: app => `Connect ${app}?`,
-    describe: app => `Hermes signs in to ${app} in your browser and asks before reading anything there.`,
-    execution: 'Connector tools'
+    execution: 'Connector tools',
+    setup: server => `Set up ${server}`,
+    openInBrowser: 'Open in browser',
+    setupCancel: 'Cancel',
+    authorizedToolsUnavailable: 'Authorized. Tools unavailable.',
+    required: 'Required'
   },
   sessionImport: {
     title: 'Continue from another app',
@@ -218,7 +221,8 @@ export const en: Translations = {
   },
 
   notifications: {
-    sharedProfileWarning: 'Another Hermes installation is using this profile. Both installations share its settings and data, so changes can conflict. You can continue, or close the other installation before making changes.',
+    sharedProfileWarning:
+      'Another Hermes installation is using this profile. Both installations share its settings and data, so changes can conflict. You can continue, or close the other installation before making changes.',
     region: 'Notifications',
     hide: 'Hide',
     show: 'Show',
@@ -236,8 +240,7 @@ export const en: Translations = {
     updateReadyTitle: 'Update ready',
     updateReadyMessage: count => `${count} new change${count === 1 ? '' : 's'} available.`,
     updateReadyMessageUnknown: 'A new update is available.',
-    updateReadyMessageAppInstaller:
-      'A new version of Hermes is ready. Update now and Windows will finish it for you.',
+    updateReadyMessageAppInstaller: 'A new version of Hermes is ready. Update now and Windows will finish it for you.',
     seeWhatsNew: "See what's new",
     mcp: {
       needsAuthTitle: 'MCP server needs re-authentication',
@@ -264,7 +267,6 @@ export const en: Translations = {
       openaiTtsNeedsKey: 'Voice needs an OpenAI key. Add one in Settings → Keys.',
       codeSkewRestartRequired:
         'Hermes was updated but is still running the old version. Restart it to finish the update.',
-      rpcOutOfSync: 'The app and the backend are on different versions. Update both.',
       restartHermesFailed: "Couldn't restart Hermes"
     },
     actions: {
@@ -431,7 +433,6 @@ export const en: Translations = {
       'view.toggleStatusbar': 'Toggle status bar',
       'view.toggleTabStrip': 'Toggle tabs',
       'view.toggleProfileRail': 'Toggle profile rail',
-      'view.toggleSimpleMode': 'Toggle Simple mode',
       'view.showFiles': 'Show file browser',
       'view.showBrowser': 'Open browser',
       'view.toggleHud': 'Toggle HUD mode',
@@ -584,7 +585,7 @@ export const en: Translations = {
       blurb:
         'Extend this app, not an agent — installed once for the whole app, whichever profile, gateway, or machine you connect to. Bundled or dropped into the desktop-plugins folder; toggles apply live.',
       count: n => `${n} installed`,
-      openFolder: 'Open Desktop plugins folder',
+      openFolder: 'Open plugins folder',
       rescan: 'Rescan',
       reveal: 'Reveal in file manager',
       enable: 'Enable',
@@ -605,7 +606,6 @@ export const en: Translations = {
         includesHeading: 'This package includes',
         agentLabel: 'Agent plugin',
         desktopLabel: 'Desktop UI',
-        profileLabel: 'Install for profile',
         agentTargetLocal: (profile, dir) => `Installs into the ${profile} backend (${dir})`,
         agentTargetRemote: profile => `Installs into the connected ${profile} backend`,
         catalogPinned: (name, sha) =>
@@ -613,10 +613,8 @@ export const en: Translations = {
         reviewedHeading: 'Reviewed catalog entry',
         reviewedIntro:
           'This entry was human-reviewed at its pinned commit. You can still inspect the exact code below.',
-        toolsConnected: n => (n === 1 ? '1 tool connected' : `${n} tools connected`),
-        skillsReady: names => (names.length === 1 ? `skill ${names[0]} ready` : `${names.length} skills ready`),
-        nextChat: 'more tools available in your next chat',
-        serverNotConnected: (server, reason) => `MCP server ${server} is not connected${reason ? `: ${reason}` : '.'}`,
+        restartToApply: 'Restart the gateway for the plugin to take effect.',
+        restartNow: 'Restart gateway',
         missingEnvAction: 'Set it up',
         alreadyInstalled: (name: string) => `${name} is already installed.`,
         desktopTarget: "Installs into this app's local desktop-plugins folder",
@@ -973,7 +971,7 @@ export const en: Translations = {
       driverHealth: 'Driver health'
     },
     about: {
-      updates: 'Updates',
+      updates: 'Updates'
     },
     config: {
       minimizeToTrayTitle: 'Minimize to tray',
@@ -1320,24 +1318,59 @@ export const en: Translations = {
     },
     mcp: {
       loading: 'Loading MCP servers...',
+      failedLoad: 'MCP config failed to load',
+      nameRequiredTitle: 'Name required',
+      nameRequiredMessage: 'Give this MCP server a config key.',
+      objectRequired: 'Server config must be a JSON object',
       invalidJson: 'Invalid MCP JSON',
       saveFailed: 'Save failed',
       removeFailed: 'Remove failed',
+      gatewayUnavailableTitle: 'Gateway unavailable',
+      gatewayUnavailableMessage: 'Reconnect the gateway before reloading MCP.',
+      reloadedTitle: 'MCP tools reloaded',
+      reloadedMessage: 'New tool schemas apply to fresh turns.',
       reloadFailed: 'MCP reload failed',
       savedTitle: 'MCP server saved',
       savedMessage: name => `${name} applies after MCP reload.`,
+      newServer: 'New server',
+      reload: 'Reload MCP',
+      reloading: 'Reloading...',
+      emptyTitle: 'No MCP servers',
+      emptyDesc: 'Add a stdio or HTTP server to expose MCP tools.',
       disabled: 'disabled',
+      editServer: 'Edit server',
       name: 'Name',
       serverJson: 'Server JSON',
       remove: 'Remove',
+      saveServer: 'Save server',
       test: 'Test connection',
+      testing: 'Testing...',
+      testOk: count => `Connected — ${count} tool${count === 1 ? '' : 's'} available`,
+      testFailed: 'Connection failed',
+      enableServer: name => `Enable ${name}`,
+      disableServer: name => `Disable ${name}`,
+      serverEnabled: name => `${name} enabled — applies to new sessions.`,
+      serverDisabled: name => `${name} disabled — applies to new sessions.`,
+      toggleFailed: (name, enabled) => `Failed to turn ${name} ${enabled ? 'on' : 'off'}`,
+      tabServers: 'Servers',
+      tabCatalog: 'Catalog',
       catalogLoading: 'Loading MCP catalog...',
+      catalogLoadFailed: 'MCP catalog failed to load',
+      catalogEmpty: 'No catalog entries available.',
+      catalogInstalled: 'Installed',
+      catalogEnabled: 'Enabled',
+      catalogNeedsInstall: 'Needs build',
+      catalogInstall: 'Install',
+      catalogInstalling: 'Installing...',
+      catalogInstallStarted: name => `Installing ${name}... applies to new sessions when done.`,
       catalogInstallFailed: name => `Failed to install ${name}`,
+      catalogEnvPrompt: name => `${name} requires credentials`,
       catalogEnvRequired: 'Fill in the required values before installing.',
       capabilitySummary: (tools, prompts, resources) =>
         `${[`${tools} tools`, ...(prompts ? [`${prompts} prompts`] : []), ...(resources ? [`${resources} resources`] : [])].join(', ')} enabled`,
       costTokens: tokens => `~${tokens} tok/call`,
       usage30d: uses => `${uses} uses/30d`,
+      unusedPill: 'unused',
       statusConnecting: 'Connecting…',
       statusNeedsAuth: 'Needs authentication',
       statusError: 'Error',
@@ -1345,7 +1378,11 @@ export const en: Translations = {
       allServers: 'All servers',
       authenticatedTitle: 'Authenticated',
       authenticatedMessage: (server, count) => `${server}: ${count} tools`,
+      waitingForBrowser: 'Waiting for browser…',
       authenticate: 'Authenticate',
+      unsavedConnect: 'Unsaved — save mcp.json to connect.',
+      enableTool: tool => `Enable ${tool}`,
+      disableTool: tool => `Disable ${tool}`,
       noOutput: 'No output yet.',
       deepLinkTitle: 'Add MCP server?',
       deepLinkDescription:
@@ -1360,7 +1397,12 @@ export const en: Translations = {
       deepLinkErrorConfig: 'The link\u2019s config is not valid base64-encoded JSON.',
       deepLinkErrorShape: 'The config must be a JSON object with a string `url` or `command` field.',
       deepLinkErrorUrl: 'Only http:// and https:// server URLs are allowed.',
-      deepLinkErrorTooLarge: 'The config payload exceeds the 32KB limit.'
+      deepLinkErrorTooLarge: 'The config payload exceeds the 32KB limit.',
+      importButton: 'Import',
+      importPlaceholder: 'Paste an mcp.json snippet, npx/docker command, claude mcp add line, URL, or Cursor link…',
+      importNoMatch: 'No server config recognized in the pasted text.',
+      importConfirm: 'Add to mcp.json',
+      importConfirmMany: count => `Add ${count} servers to mcp.json`
     },
     model: {
       loading: 'Loading model configuration...',
@@ -1448,6 +1490,9 @@ export const en: Translations = {
       downloaded: 'Downloaded',
       downloadAction: size => `Download · ${size}`,
       downloadProgress: (done, total) => `${done} of ${total}`,
+      downloadStatusRunning: 'Downloading',
+      downloadSpeed: rate => `${rate}`,
+      downloadEta: time => `~${time} left`,
       downloadPausedLabel: 'Paused',
       downloadPauseAction: 'Pause',
       downloadResumeAction: 'Resume',
@@ -1473,7 +1518,7 @@ export const en: Translations = {
       updateAction: 'Update engine',
       updating: 'Updating engine…',
       upToDateTitle: 'Engine up to date',
-      upToDateDetail: (tag, backend) => `Running llama.cpp ${tag} (${backend}) — the configured build.`,
+      upToDateDetail: (tag, backend) => `Running llama.cpp ${tag} (${backend}).`,
       activeDetail: 'New chats use this model — it loads when you send your first message',
       activeNotLoaded: 'Loads on your first message',
       loadedPill: 'In memory',
@@ -1716,6 +1761,7 @@ export const en: Translations = {
     tabSkills: 'Skills',
     tabToolsets: 'Tools',
     configuringProfile: 'Configuring:',
+    tabMcp: 'MCP',
     all: 'All',
     searchSkills: 'Search skills...',
     searchToolsets: 'Search tools...',
@@ -1799,15 +1845,6 @@ export const en: Translations = {
       toggleFailed: (name: string) => `Could not toggle ${name}`,
       legacyBackend: 'This backend predates key-addressed plugin toggles — update Hermes to manage it here.',
       portableBadge: 'portable',
-      serverStates: {
-        connected: 'connected',
-        app_not_running: 'app not running',
-        endpoint_unavailable: 'endpoint unavailable',
-        no_interactive_session: 'no interactive session',
-        version_too_old: 'version too old',
-        missing_app: 'app missing',
-        unknown: 'status unknown'
-      },
       catalogTitle: 'Plugin catalog',
       catalogBrowse: 'Browse',
       catalogHide: 'Hide the catalog browser',
@@ -1823,10 +1860,6 @@ export const en: Translations = {
       updateToPin: (sha: string) => `Update to ${sha}`,
       updateFailed: (name: string) => `Could not update ${name}`,
       updated: (name: string) => `${name} updated to the current catalog pin. Restart the gateway to apply.`,
-      updateConsentTitle: (name: string) => `${name} asks for more`,
-      updateConsentBody: (name: string, sha: string) =>
-        `The new catalog pin of ${name} (${sha}) adds surfaces the installed version does not have. Apply it only if you trust them:`,
-      updateConsentConfirm: 'Apply update',
       uninstall: 'Uninstall',
       uninstallTip: (name: string, profile: string) => `Uninstall ${name} from ${profile}`,
       uninstallConfirmTitle: (name: string) => `Uninstall ${name}?`,
@@ -1843,17 +1876,7 @@ export const en: Translations = {
       deepLinkCatalogUnknown: (name: string) =>
         `\u201C${name}\u201D is not in the Hermes plugin catalog. Nothing was installed.`,
       deepLinkCatalogUnavailable:
-        'Could not load the Hermes plugin catalog. Check your connection and open the link again.',
-      settingsToggle: (name: string) => `Settings: ${name}`,
-      settingsForm: {
-        save: 'Save settings',
-        saved: (name: string) => `${name} settings saved.`,
-        saveFailed: (name: string) => `Could not save ${name} settings`,
-        optional: '(optional)',
-        secretSet: '•••••••• (set)',
-        secretStoredAs: (env: string) =>
-          `Stored in the profile's .env as ${env}, never in config.yaml; leave blank to keep the current value.`
-      }
+        'Could not load the Hermes plugin catalog. Check your connection and open the link again.'
     },
     officialCatalog: 'Available to install',
     officialPill: 'Official',
@@ -3307,9 +3330,13 @@ export const en: Translations = {
   },
 
   updates: {
+    discontinuedTitle: 'This build of Hermes is no longer supported',
+    discontinuedBody:
+      'This build of Hermes is no longer supported and may break — uninstall it. Your data stays on disk.',
     channels: { stable: 'Stable', canary: 'Canary' },
     bundleSwapPending: 'Restart to finish the update',
-    bundleSwapPendingDesc: 'The updated app is already installed — Hermes only needs to restart to load it. Chats and settings are untouched.',
+    bundleSwapPendingDesc:
+      'The updated app is already installed — Hermes only needs to restart to load it. Chats and settings are untouched.',
     bundleSwapPendingAction: 'Restart Hermes',
     stages: {
       idle: 'Getting ready…',
@@ -3429,13 +3456,16 @@ export const en: Translations = {
     checkingShort: 'Checking…',
     releaseAvailable: tag => `Version ${tag} is available.`,
     versionDetailsTitle: 'Version details',
-    versionDetailsBody:
-      'This install is managed outside the app. Update it the same way you installed it.',
+    versionDetailsBody: 'This install is managed outside the app. Update it the same way you installed it.',
     versionDetailsVersion: 'Version',
     versionDetailsCommit: 'Commit',
     versionDetailsBuildOrigin: 'Build Origin',
     versionDetailsDistribution: 'Distribution',
-    versionDetailsDistributionDesktop: 'Desktop app (MSIX)',
+    versionDetailsDistributionDesktop: 'Desktop app',
+    versionDetailsDistributionDesktopMsix: 'Desktop app (MSIX)',
+    versionDetailsDistributionDesktopInstaller: 'Desktop app (installer)',
+    versionDetailsDistributionSourceInstaller: 'Source (install script)',
+    versionDetailsDistributionSource: 'Source',
     versionDetailsDistributionStore: 'Microsoft Store',
     versionDetailsRuntime: 'Runtime',
     versionDetailsRuntimeEmbedded: 'Embedded runtime',
@@ -3477,8 +3507,7 @@ export const en: Translations = {
     setupChoiceTitle: 'Set up Hermes Desktop',
     setupChoiceDesc:
       'Connect this app to a Hermes gateway you already run, or install Hermes locally on this computer.',
-    setupChoiceDescLocal:
-      'Install Hermes on this computer, or connect to a Hermes gateway you already run.',
+    setupChoiceDescLocal: 'Install Hermes on this computer, or connect to a Hermes gateway you already run.',
     connectExistingTitle: 'Connect to existing Hermes',
     connectExistingShort: 'Connect existing',
     connectExistingDesc: 'Use a remote backend with a session token or browser sign-in. No local install will start.',
@@ -4026,20 +4055,6 @@ export const en: Translations = {
     }
   },
 
-  interfaceMode: {
-    title: 'Interface mode',
-    hint: 'Changes what is shown, not what Hermes can do.',
-    sessionNote: 'Set by Simple mode. A change here lasts for this session; switch to Advanced to make it yours.',
-    simple: {
-      label: 'Simple',
-      description: 'For talking to Hermes. Sidebar and chat; no terminal, file or diff panes.'
-    },
-    advanced: {
-      label: 'Advanced',
-      description: 'For developers. Terminal, files, diffs, statusbar and layouts, as you set them.'
-    }
-  },
-
   zones: {
     showTabStrip: 'Show tabs',
     hideTabStrip: 'Hide tabs',
@@ -4385,29 +4400,6 @@ export const en: Translations = {
       lateAnswer: (question, choice) => `Re: "${question}" — my answer: ${choice}`,
       lateAnswerTip: 'Draft this answer as a follow-up message',
       lateAnswerHint: 'This prompt is no longer waiting. Pick an option to draft it as a follow-up message.'
-    },
-    catalogInstall: {
-      preparing: 'Preparing the install…',
-      install: 'Install',
-      advanced: 'Advanced',
-      skip: 'Skip',
-      installing: 'Installing…',
-      installed: 'Installed',
-      notInstalled: 'Not installed',
-      failed: 'Failed',
-      showNames: 'show names',
-      hideNames: 'hide names',
-      skill: name => `skill ${name}`,
-      kind: { plugin: 'plugin', skill: 'skill' },
-      tier: { official: 'official', community: 'community' },
-      targetProfile: profile => `Installs into your ${profile} profile`,
-      sendFailed: 'Could not send your answer. Try again.',
-      commitLabel: 'Commit',
-      subdirLabel: 'Folder',
-      securityHeading: 'Security',
-      scan: { passed: 'Scan passed', warnings: 'Scan found warnings', failed: 'Scan failed' },
-      requirementsLabel: 'Requires',
-      credentialsHeading: 'Credentials'
     },
     mcpSetup: {
       installTitle: 'Add MCP servers',

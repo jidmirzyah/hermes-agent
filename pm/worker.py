@@ -1,7 +1,6 @@
 """One stdlib JSON-line PM request per isolated process."""
 from __future__ import annotations
 
-import importlib
 import json
 import os
 from pathlib import Path
@@ -18,12 +17,12 @@ def _members(value):
     return [Path(path) for path in value["paths"]]
 
 
-def _read_controls(messages, pause):
+def _read_controls(messages, pause, fd):
     # Raw reads avoid a daemon thread holding sys.stdin's buffered lock at exit.
     pending = b""
     request_id = None
     try:
-        while block := os.read(0, 65536):
+        while block := os.read(fd, 65536):
             pending += block
             while b"\n" in pending:
                 line, pending = pending.split(b"\n", 1)
@@ -39,6 +38,7 @@ def _read_controls(messages, pause):
     except (OSError, ValueError, KeyError) as exc:
         messages.put(exc)
     finally:
+        os.close(fd)
         pause.set()
         messages.put(None)
 
@@ -51,9 +51,15 @@ def main():
     wire = os.fdopen(os.dup(sys.stdout.fileno()), "w", encoding="utf-8", buffering=1)
     os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    # A pending read on inherited control stdin can block child Python startup
+    # on Windows. Keep the protocol private and give every ordinary child EOF.
+    controls = os.dup(0)
+    os.set_inheritable(controls, False)
+    with open(os.devnull, "rb") as null:
+        os.dup2(null.fileno(), 0)
     messages = queue.Queue()
     pause = threading.Event()
-    threading.Thread(target=_read_controls, args=(messages, pause), daemon=True).start()
+    threading.Thread(target=_read_controls, args=(messages, pause, controls), daemon=True).start()
 
     def receive():
         message = messages.get()
@@ -67,10 +73,11 @@ def main():
     from pm import paths, receipt
     from pm.package import InstallError
     from pm.registry import load_package_definitions
+    from pm.worker_operations import OPERATIONS
     context = request["context"]
     paths.repo_root = lambda: Path(context["repo"])
     paths.lockfile_path = lambda: Path(context["lockfile"])
-    engine = importlib.import_module("pm.ensure")
+
     call = 0
     callback_lock = threading.Lock()
 
@@ -92,47 +99,20 @@ def main():
             raise RuntimeError(reply["error"])
         return reply["result"]
 
-    def sync_venv(**arguments):
-        if "plugin_dirs" in request["callbacks"]:
-            arguments["plugin_dirs"] = lambda: _members(callback("plugin_dirs"))
-        else:
-            arguments["plugin_dirs"] = _members(arguments["plugin_dirs"])
-        if "before_publish" in request["callbacks"]:
-            def publish():
-                hooks = callback("before_publish")
-                if not any(hooks.values()):
-                    return None
-                def undo():
-                    if hooks["undo"]:
-                        callback("undo")
-                if hooks["finish"]:
-                    undo.finish = lambda: callback("finish")
-                return undo
-            arguments["before_publish"] = publish
-        return engine.sync_venv(**arguments)
-
     with receipt.worker_context(request.get("update_id")):
         try:
             load_package_definitions(request.get("packages", []))
-            from pm import operations as python
-            operations = {"ensure": engine.ensure, "sync_venv": sync_venv,
-                          "stage_only": engine.stage_only, "venv_is_current": engine.venv_is_current,
-                          "build_environment": python.build_environment, "lock_project": python.lock_project,
-                          "stage_manager_runtime": python.stage_manager_runtime,
-                          "ensure_environment": python.ensure_environment,
-                          "ensure_python_tool": python.ensure_python_tool}
+            operation = request["operation"]
+            implementation = OPERATIONS[operation].resolve(operation)
             arguments = request["arguments"]
+            if request["operation"] in ("sync_venv", "venv_is_current"):
+                arguments["plugin_dirs"] = _members(arguments.get("plugin_dirs"))
             if request["operation"] == "ensure":
                 arguments["pause_event"] = pause
             for name in ("progress", "download_progress"):
                 if name in request["callbacks"]:
                     arguments[name] = lambda *args, name=name: callback(name, *args)
-            if request["operation"] in ("check_project_lock", "export_requirements",
-                                        "build_requirements_environment", "prune_cache"):
-                from pm import build_operations
-                result = getattr(build_operations, request["operation"])(**arguments)
-            else:
-                result = operations[request["operation"]](**arguments)
+            result = implementation(**arguments)
             if request["operation"] == "ensure":
                 result = None  # Runner is reconstructed from the caller's base env.
             if isinstance(result, Path):

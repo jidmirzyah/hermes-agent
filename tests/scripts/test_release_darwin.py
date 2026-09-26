@@ -19,7 +19,6 @@ from scripts.releases.darwin import (
     mac_feed_references,
     merge_mac_feeds,
     parse_mac_feed,
-    publish_mac_feed,
 )
 
 
@@ -53,21 +52,6 @@ def _inputs(version="0.28.0", light=False):
 def base64_sha512(data: bytes) -> str:
     return __import__("base64").b64encode(hashlib.sha512(data).digest()).decode("ascii")
 
-
-def test_never_overwrites_a_published_macos_artifact_on_same_tag_rerun(r2_server):
-    name = "HermesBundled-0.28.0-mac-arm64.zip"
-    existing = b"already published artifact"
-    key = f"releases/tag/v0.28.0/{name}"
-    r2_server.store[key] = (existing, '"etag-1"')
-    with tempfile.NamedTemporaryFile(delete=False) as handle:
-        handle.write(existing)
-        path = handle.name
-    try:
-        r2.put("v0.28.0", name, path, immutable=True)
-    finally:
-        os.unlink(path)
-    # The immutable bytes are untouched and the conflict was verified, not ignored.
-    assert r2_server.store[key][0] == existing
 
 
 def test_real_prune_protects_live_macos_artifacts_and_fails_closed(r2_server, monkeypatch):
@@ -152,62 +136,6 @@ def test_semver_grammar_rejects_non_release_versions():
         compare("nonsense", "0.28.0")
 
 
-def test_publish_verifies_artifacts_before_conditional_write_and_readback():
-    plan = merge_mac_feeds(_inputs()[0], "v0.28.0")
-    live = {"text": merge_mac_feeds(_inputs("0.27.0")[0], "v0.27.0")["text"], "etag": "old"}
-    events = []
-
-    def read(_key):
-        return live
-
-    def verify(key, _file=None):
-        events.append(key)
-
-    def write(key, text, etag):
-        assert etag == "old"
-        events.append(key)
-        live.clear()
-        live.update({"text": text, "etag": "new"})
-
-    publish_mac_feed(plan, {"read": read, "verify": verify, "write": write})
-    assert events[-1] == plan["key"]
-    assert len(events) == 3
-
-    write_calls = []
-
-    def fail_write(key, text, etag):
-        write_calls.append(key)
-
-    # Downgrade rejection: nothing written.
-    with pytest.raises(ValueError, match="backward"):
-        publish_mac_feed(
-            merge_mac_feeds(_inputs("0.27.0")[0], "v0.27.0"),
-            {"read": read, "verify": verify, "write": fail_write},
-        )
-    assert write_calls == []
-    # Corrupt bytes abort before the pointer write.
-    def corrupt_verify(_key, _file=None):
-        raise ValueError("corrupt bytes")
-
-    with pytest.raises(ValueError, match="corrupt bytes"):
-        publish_mac_feed(plan, {"read": lambda _k: None, "verify": corrupt_verify, "write": fail_write})
-    assert write_calls == []
-
-
-def test_same_version_identical_feed_is_a_noop():
-    plan = merge_mac_feeds(_inputs()[0], "v0.28.0")
-    live = {"text": plan["text"], "etag": "same"}
-    calls = []
-    publish_mac_feed(
-        plan,
-        {
-            "read": lambda _k: live,
-            "verify": lambda k: calls.append(k),
-            "write": lambda k, t, e: calls.append(("write", k)),
-        },
-    )
-    assert calls == []  # identical published version → no writes at all
-
 
 def test_finalize_uses_the_real_signed_transport_and_publishes_last(r2_server):
     with tempfile.TemporaryDirectory() as dir_path:
@@ -259,3 +187,43 @@ def test_finalize_rejects_a_downgrade_over_the_live_feed(r2_server):
 def test_finalize_rejects_unknown_variant():
     with pytest.raises(ValueError, match="variant"):
         darwin.finalize(tag="v0.28.0", dir=".", variant="dark")
+
+
+@pytest.mark.parametrize('fault', ['identical', 'different', 'corrupt-artifact', 'stale-etag', 'readback', 'upgrade'])
+def test_finalize_live_feed_faults(tmp_path, r2_server, fault):
+    legs, content = _inputs()
+    for name, text in legs.items():
+        (tmp_path / name).write_text(text, encoding='utf-8')
+    r2_server.store.update({key: (value, '"e"') for key, value in content.items()})
+    key = 'releases/darwin/stable/stable-mac.yml'
+    live = merge_mac_feeds(_inputs('0.28.0' if fault in {'identical', 'different'} else '0.27.0')[0],
+                           'v0.28.0' if fault in {'identical', 'different'} else 'v0.27.0')['text']
+    if fault == 'different':
+        live = live.replace('two lines', 'other notes')
+    r2_server.store[key] = (live.encode(), '"live"')
+    if fault == 'corrupt-artifact':
+        r2_server.store[next(iter(content))] = (b'corrupt', '"e"')
+    if fault == 'stale-etag':
+        r2_server.race_key = key
+    if fault == 'readback':
+        r2_server.corrupt_put = key
+    errors = {'different': (ValueError, 'different artifacts'),
+              'corrupt-artifact': (ValueError, 'checksum mismatch'),
+              'stale-etag': (r2.R2RequestError, '412'), 'readback': (ValueError, 'readback differs')}
+    if fault in errors:
+        error, message = errors[fault]
+        with pytest.raises(error, match=message):
+            darwin.finalize(tag='v0.28.0', dir=str(tmp_path))
+    else:
+        darwin.finalize(tag='v0.28.0', dir=str(tmp_path))
+    puts = [headers for method, _, headers in r2_server.requests if method == 'PUT']
+    if fault in {'identical', 'different', 'corrupt-artifact'}:
+        assert puts == [] and r2_server.store[key][0] == live.encode()
+    else:
+        assert len(puts) == 1 and puts[0]['If-Match'] == '"live"'
+        if fault == 'stale-etag':
+            assert r2_server.store[key] == (live.encode(), '"raced"')
+        elif fault == 'upgrade':
+            assert parse_mac_feed(r2_server.store[key][0].decode())['version'] == '0.28.0'
+        elif fault == 'readback':
+            assert [method for method, path, _ in r2_server.requests if path.endswith(key)] == ['GET', 'PUT', 'HEAD', 'GET']

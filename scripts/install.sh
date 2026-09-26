@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
-# Hermes Agent bootstrap: git checkout + venv + hermes command on PATH.
-# Heavy dependencies (tool binaries, browsers, node) are pm's job after
-# this: `hermes pm install`. Stage protocol kept for Hermes-Setup:
+# Hermes Agent bootstrap: clone, acquire uv/Python, then hand the checkout to
+# the same completion an update runs -- command publication, product builds and
+# post-build maintenance -- so a fresh install and a finished update land in one
+# state. Heavy dependencies (tool binaries, browsers, node) are pm's job:
+# `hermes pm install`.
+#
+# Stage protocol kept for Hermes-Setup:
 #   --manifest            print the stage list as JSON
 #   --stage NAME [--json] run one stage
 #   --non-interactive     skip stages that need input
-#   --include-desktop     add the desktop build stage
+#   --include-desktop     build the desktop app too (products stage)
 set -u
 
 # Prevent uv from discovering config files (uv.toml, pyproject.toml) from the
@@ -131,6 +135,7 @@ ensure_uv() {
     if [ ! -x "$UV_CMD" ]; then
         log "staging pinned uv $UV_PIN_VERSION ($_target) into the pm store"
         local _tmp
+        # no-tmp: ok — last-resort fallback when mktemp itself is missing
         _tmp="$(mktemp -d 2>/dev/null || echo "/tmp/hermes-uv-bootstrap.$$")"
         mkdir -p "$_tmp"
         local _fetched_from="$UV_PIN_URL"
@@ -227,12 +232,22 @@ stage_result() {
 }
 
 # The single authoritative stage list: emit_manifest prints it AND the
-# no-flag ladder runs it, so --include-desktop affects the real run
-# exactly as the manifest advertises.
+# no-flag ladder runs it. `products` is the shared completion tail -- the same
+# call `hermes update` makes -- so the manifest and the run cannot disagree.
+# `desktop` stays directly dispatchable via --stage for external callers, but
+# is never listed: --include-desktop selects the desktop product inside
+# `products` instead of adding a second build stage.
 stage_names() {
-    printf '%s\n' prerequisites repository venv python-deps node-deps path config setup gateway
-    [ "$INCLUDE_DESKTOP" = true ] && printf '%s\n' desktop
-    printf '%s\n' complete
+    printf '%s\n' prerequisites repository venv python-deps config products setup gateway complete
+}
+
+# "title|category|needs_user_input".
+products_record() {
+    if [ "$INCLUDE_DESKTOP" = true ]; then
+        echo "Install command and app + desktop|runtime|false"
+    else
+        echo "Install command and app|runtime|false"
+    fi
 }
 
 # "$1" stage name -> its manifest record fields (title|category|needs_user_input).
@@ -242,9 +257,8 @@ stage_record() {
         repository)    echo "Download Hermes Agent|runtime|false" ;;
         venv)          echo "Create Python environment|runtime|false" ;;
         python-deps)   echo "Install Python dependencies|runtime|false" ;;
-        node-deps)     echo "Install tool dependencies|runtime|false" ;;
-        path)          echo "Install hermes command|runtime|false" ;;
         config)        echo "Prepare config and skills|configuration|false" ;;
+        products)      products_record ;;
         setup)         echo "Configure API keys and settings|configuration|true" ;;
         gateway)       echo "Configure gateway service|configuration|true" ;;
         desktop)       echo "Build desktop app|runtime|false" ;;
@@ -275,7 +289,27 @@ stage_repository() {
         log "updating $INSTALL_DIR"
         git -C "$INSTALL_DIR" fetch origin "$BRANCH" || fail "git fetch failed"
         git -C "$INSTALL_DIR" checkout "$BRANCH" || fail "git checkout failed"
-        git -C "$INSTALL_DIR" pull --ff-only origin "$BRANCH" || log "not fast-forwardable; keeping local state"
+        if ! git -C "$INSTALL_DIR" merge --ff-only "origin/$BRANCH"; then
+            # A release cut off the main line, a force-pushed remote, or the
+            # user's own commits cannot fast-forward. Every stage below reads
+            # files only the new tree has (pm/), so an install left on the old
+            # tree cannot finish -- match the remote the way `hermes update`
+            # does, after parking the old tip and any local work.
+            local stamp prior rescue
+            stamp="$(date -u +%Y%m%d-%H%M%S)"
+            prior="$(git -C "$INSTALL_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+            rescue="refs/hermes-install-backup/$stamp-$prior"
+            if [ -n "$(git -C "$INSTALL_DIR" status --porcelain)" ]; then
+                git -C "$INSTALL_DIR" stash push --include-untracked -m "hermes-install-autostash-$stamp" \
+                    && log "local changes stashed as hermes-install-autostash-$stamp" \
+                    || log "could not stash local changes; they are overwritten below"
+            fi
+            git -C "$INSTALL_DIR" update-ref "$rescue" HEAD 2>/dev/null \
+                && log "previous HEAD backed up to $rescue" \
+                || log "could not back up the previous HEAD"
+            git -C "$INSTALL_DIR" reset --hard "origin/$BRANCH" || fail "git reset failed"
+            log "not fast-forwardable; reset to origin/$BRANCH"
+        fi
     else
         log "cloning $REPO_URL ($BRANCH) into $INSTALL_DIR"
         mkdir -p "$(dirname "$INSTALL_DIR")"
@@ -337,9 +371,17 @@ bootstrap_python() {
         path[2] == "packages" && path[3] == "python" && $2 == "version" && depth == 3 { print $4; exit }
     ' "$INSTALL_DIR/pm/lock.json" | cut -d+ -f1 | cut -d. -f1,2)"
     [ -n "$_py" ] || _py="3.14"
-    "$UV_CMD" python install --no-bin "$_py" || fail "bootstrap Python installation failed"
-    boot_py="$("$UV_CMD" python find --managed-python "$_py")" || fail "bootstrap Python lookup failed"
+    # Only base interpreters qualify: an activated app venv must not become
+    # PM's bootstrap parent. Prefer the existing managed Python, then a host
+    # Python of the same supported minor before attempting a download (#10778).
+    # This interpreter only boots PM; PM still owns the exact runtime pin.
+    if ! boot_py="$(UV_SYSTEM_PYTHON=1 UV_NO_PROJECT=1 "$UV_CMD" python find --managed-python "$_py" 2>/dev/null)" \
+        && ! boot_py="$("$UV_CMD" python find --system --no-project "$_py" 2>/dev/null)"; then
+        "$UV_CMD" python install --no-bin "$_py" || fail "bootstrap Python installation failed"
+        boot_py="$(UV_SYSTEM_PYTHON=1 UV_NO_PROJECT=1 "$UV_CMD" python find --managed-python "$_py")" || fail "bootstrap Python lookup failed"
+    fi
     boot_py="${boot_py%$'\r'}"
+    [ -x "$boot_py" ] && "$boot_py" --version >/dev/null 2>&1 || fail "bootstrap Python is not executable: $boot_py"
 }
 
 # uv exits before PM can replace its tool entry. pm.cli then prepares and
@@ -355,22 +397,41 @@ stage_python_deps() {
     bootstrap_pm
 }
 
-stage_node_deps() {
-    # Tool binaries, node, browsers: pm packages, installed on demand or
-    # via `hermes pm install`. Nothing to do at bootstrap time.
-    log "tool dependencies are managed by pm (hermes pm install)"
+desktop_product_present() {
+    # Does this checkout already carry a built desktop app? A plain repair or
+    # upgrade rerun on a desktop install must REBUILD it rather than leave a
+    # bundle built from the previous code: the app is part of that install, and
+    # the artifacts live inside the tree (gitignored), so an update makes them
+    # stale instead of removing them.
+    local release="$INSTALL_DIR/apps/desktop/release"
+    [ -d "$release/linux-unpacked" ] || [ -d "$release/mac" ] \
+        || [ -d "$release/mac-arm64" ] || [ -d "$release/win-unpacked" ]
 }
 
-stage_path() {
-    local link_dir="$HOME/.local/bin"
+stage_products() {
+    # The whole tail in one place, by calling the completion an update calls:
+    # publish the commands, build the products (tui/web, plus the desktop app),
+    # then run the post-build maintenance that syncs bundled skills and migrates
+    # config. Node, browsers and the frontend build tools arrive through pm as
+    # the build asks for them; the bootstrap interpreter itself only re-enters
+    # the tree on PM's selected Python.
     local boot_py
+    local args=(--source "$INSTALL_DIR")
     bootstrap_python
-    (cd "$INSTALL_DIR" && "$boot_py" -I -X utf8 hermes_cli/_launchers.py "$link_dir") || fail "launcher publication failed"
-    case ":$PATH:" in
-        *":$link_dir:"*) : ;;
-        *) log "add $link_dir to your PATH to use the hermes command" ;;
-    esac
-    log "hermes command installed at $link_dir/hermes"
+    if [ "$INCLUDE_DESKTOP" = true ] || desktop_product_present; then
+        args+=(--desktop)
+    fi
+    (cd "$INSTALL_DIR" && "$boot_py" -I -B -X utf8 hermes_cli/source_completion.py "${args[@]}") \
+        || fail "app products or command publication failed"
+    log "app products and hermes command ready"
+}
+
+stage_desktop() {
+    # External-caller contract: `--stage desktop` stays dispatchable on its own
+    # (the manifest never lists it now -- --include-desktop selects the desktop
+    # product inside `products`). Same completion call, desktop selected.
+    INCLUDE_DESKTOP=true
+    stage_products
 }
 
 stage_config() {
@@ -389,18 +450,12 @@ stage_config() {
 
 stage_setup() {
     if [ "$NON_INTERACTIVE" = true ]; then return 0; fi
-    "$INSTALL_DIR/venv/bin/python" "$INSTALL_DIR/hermes" setup || true
+    "$INSTALL_DIR/.hermes/bin/hermes" setup || fail "setup failed"
 }
 
 stage_gateway() {
     if [ "$NON_INTERACTIVE" = true ]; then return 0; fi
-    "$INSTALL_DIR/venv/bin/python" "$INSTALL_DIR/hermes" gateway install || true
-}
-
-stage_desktop() {
-    # `hermes desktop --build-only` is the current authority (same path as
-    # `hermes gui` / the update flow); no installer-local node/electron code.
-    "$INSTALL_DIR/venv/bin/python" "$INSTALL_DIR/hermes" desktop --build-only || fail "desktop build failed"
+    "$INSTALL_DIR/.hermes/bin/hermes" gateway install || fail "gateway installation failed"
 }
 
 stage_complete() {
@@ -432,9 +487,8 @@ run_stage() (
         repository) stage_repository ;;
         venv) stage_venv ;;
         python-deps) stage_python_deps ;;
-        node-deps) stage_node_deps ;;
-        path) stage_path ;;
         config) stage_config ;;
+        products) stage_products ;;
         setup) stage_setup ;;
         gateway) stage_gateway ;;
         desktop) stage_desktop ;;

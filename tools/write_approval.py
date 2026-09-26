@@ -194,10 +194,11 @@ def get_pending(subsystem: str, pending_id: str) -> Optional[Dict[str, Any]]:
     path = _pending_path(subsystem, pending_id)
     if not path.exists():
         return None
-    with suppress(Exception):
+    try:
         data = json.loads(path.read_text(encoding="utf-8-sig"))
         return data if isinstance(data, dict) else None
-    return None
+    except Exception:
+        return None
 
 
 def discard_pending(subsystem: str, pending_id: str) -> bool:

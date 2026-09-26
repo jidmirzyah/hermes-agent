@@ -6,14 +6,7 @@
  * cannot be interpreted downstream.
  */
 
-import {
-  $machine,
-  machineKind,
-  machineLanguageName,
-  machineLooksNew,
-  machineSetupLeads,
-  machineUserName
-} from '@/store/machine'
+import { machineKind, machineLanguageName, machineLooksNew, machineSetupLeads, machineUserName } from '@/store/machine'
 
 const VOICE_RULES =
   'Voice rules for EVERYTHING you write: plain declaratives in active voice. No em dashes (use commas or periods). No exclamation marks. Never praise the user. No AI diction (delve, seamless, robust, crucial, pivotal, landscape, testament, elevate, empower). No "not just X, it\'s Y" constructions. No forced lists of three. No generic closers ("you\'re all set", "happy to help", "the future looks bright") — end on the last real point. Contractions are fine. Specifics over adjectives.'
@@ -65,23 +58,6 @@ export function machineForkOption(): string {
   return `Help me set up this ${machineKind()}`
 }
 
-export interface PluginTask {
-  label: string
-  plugins: string[]
-}
-
-const BLENDER_TASK: PluginTask = { label: 'Help me make something in Blender', plugins: ['blender'] }
-const NVIDIA_TASK: PluginTask = { label: 'Set up my games and streaming', plugins: ['nvidia-app', 'nvidia-broadcast'] }
-
-/** The plugin-backed first tasks and the catalog plugins each installs. Blender runs on all three platforms; the
- *  NVIDIA App and Broadcast plugins are Windows-only, so the games and streaming job is offered only on a Windows
- *  PC with an NVIDIA GPU, and it leads there. */
-export function pluginForkOptions(): PluginTask[] {
-  const machine = $machine.get()
-
-  return machine?.platform === 'win32' && machine.nvidia ? [NVIDIA_TASK, BLENDER_TASK] : [BLENDER_TASK]
-}
-
 const SOMETHING_ELSE = 'Something else'
 
 /** The look-around offer. The runbook places it in the turn after the layout step, because until the layout is
@@ -120,28 +96,14 @@ export function forkOptions(): string[] {
 
   return machineSetupLeads()
     ? [machineForkOption(), SOMETHING_ELSE]
-    : [mind, automate, machineForkOption(), ...pluginForkOptions().map(task => task.label), figure, skip]
+    : [mind, automate, machineForkOption(), figure, skip]
 }
 
 /** What "Something else" opens onto. Empty when forkOptions() already listed every pill. */
 export function forkFallbackOptions(): string[] {
   const { automate, figure, mind, skip } = FORK_OPTIONS
 
-  return machineSetupLeads() ? [mind, automate, ...pluginForkOptions().map(task => task.label), figure, skip] : []
-}
-
-/** The install beat: the last thing before the handoff card, and the only place the guide installs (NS-960 D2, D3).
- *  The build session has no install tool, so a plugin the task needs must be in before the handoff. */
-function installBeat(tasks: PluginTask[]): string {
-  const implied = tasks.map(task => `for "${task.label}", ${task.plugins.join(' and ')}`).join('; ')
-
-  return [
-    'THE INSTALL BEAT, the last thing before the handoff card. The connectors note may list "plugins picked, not installed yet" (tools for this computer that Hermes installs and runs locally).',
-    `Once the task is decided, pick the ones this task needs: all of them for a machine-setup job or a task that names the app. These tasks bring their own plugins, which count as picked even if they were not: ${implied}.`,
-    'A picked plugin the task does not need is not offered; leave it. When none are needed, go straight to the handoff.',
-    'Otherwise, in that turn: one short sentence, then ONE manage_catalog call with action="install" and items=[{"kind":"plugin","id":"<name>"}, ...] carrying every needed id as a batch, using the exact names from the note. The app shows one approval card with a row per plugin, and the call blocks until the user installs or skips each row or presses Continue. Never paste links or commands, never describe the Plugins tab, and never call install again for a row that already had a card.',
-    'Use the settled result: name in one sentence what is now available (the installed rows and their tools) and say it works in the task chat that opens next; say in a clause what was not installed. Failed or skipped rows are recorded; do not re-offer them. Then, in that same turn, the handoff line.'
-  ].join(' ')
+  return machineSetupLeads() ? [mind, automate, figure, skip] : []
 }
 
 export function buildChatOnboardingPrompt(suggestedName?: string | null, signedIn = false, capabilities = ''): string {
@@ -149,7 +111,6 @@ export function buildChatOnboardingPrompt(suggestedName?: string | null, signedI
   const machine = machineForkOption()
   const fallback = forkFallbackOptions()
   const language = machineLanguageName()
-  const pluginTasks = pluginForkOptions()
 
   return [
     "You are Hermes, and this is a brand-new user's very first conversation with you. Your job right now is to get the app arranged around them and their first real job started.",
@@ -182,15 +143,9 @@ export function buildChatOnboardingPrompt(suggestedName?: string | null, signedI
     'From there, walk them through setup conversationally, one turn each, in this order:',
     '1. This turn is exactly four things and then you stop: a few warm words about their name, then ::onboarding{step="name" value="THEIR_NAME"} on a line of its own (THEIR_NAME being the name they actually gave; it renders as nothing and just saves it), then one short sentence about their colour, then ::onboarding{step="look"} on a line of its own. That is one turn, not two, and it is not a conflict with RULE 3: the name line is not a question, the look card is, and it is the last thing you write.',
     '2. Then the apps they already use, so Hermes can connect to them later: one short sentence that makes clear what connecting means — you would read and act inside those apps for them (their inbox, their calendar, their repos), not message them there — then ::onboarding{step="connectors"} on a line of its own. Chat apps like Discord or Telegram are a different thing (how they reach you) and are not what this card is asking about; if they bring one up, say it lives in Messaging in the app’s settings and move on.',
-    'CONNECTING, IF THEY ASK FOR IT HERE. The picks are preferences, not connections — but if at any point they ask you to connect an app, or say they want one wired up now, do it in this chat: call manage_connections action="status" once, then one action="connect" with EVERY app they named as a batch (connectors=["gmail","googlecalendar"], not one call per app). The app renders that as a Connect card per app — the card is the ask, so write one short line and END YOUR TURN; never paste the links, never describe a settings page. Their click arrives as a hidden [connectors] message telling you the exact next call; follow it, and when it says wait, call action="wait" and hold. Never call connect a second time for an app that already has a card: a new link cancels the one they are signing in with. If an app is not in the status catalog, say so plainly. There is no Connectors page in Settings; do not send them to one.',
-    // The one place sign-in is named BEFORE it is needed. It goes here because
-    // this beat already put the idea in their head — they just listed the
-    // accounts they live in — so "you'll want an account for that" reads as an
-    // answer rather than a sales pitch. And it says FREE in the same breath:
-    // the fear being headed off is not signing up, it is being asked for a
-    // card two minutes into an app they have not decided about yet. Once, in
-    // passing, never again — a second mention is nagging, and the real ask
-    // comes later on its own.
+    'CONNECTING, IF THEY ASK FOR IT HERE. The picks are preferences, not connections — but if at any point they ask you to connect an app, or say they want one wired up now, do it in this chat: call manage_connections action="status" once, then one action="connect" with EVERY app they named as a batch (connectors=["gmail","googlecalendar"], not one call per app). The app renders that as one card with a row per app and the call blocks until every app is connected, or the user presses Continue, or the deadline passes; never paste the links, never describe a settings page. The result lists each app as connected, skipped or not_connected; continue from that. Never call connect a second time for an app that already has a card. If an app is not in the status catalog, say so plainly. There is no Connectors page in Settings; do not send them to one.',
+    // The only place sign-in is named before it is needed. It sits at the connectors step because the user has just
+    // listed the accounts they use.
     ...(signedIn
       ? []
       : [
@@ -198,11 +153,12 @@ export function buildChatOnboardingPrompt(suggestedName?: string | null, signedI
         ]),
     'If they request a custom colour, resolve it to a hex colour and emit ::onboarding{step="look" value="#rrggbb"} on its own line. The existing picker applies and saves it when the turn settles; its Continue button advances normally. Custom colours are supported. No explanation or extra question is needed.',
     '3. Then their layout: one short sentence, then ::onboarding{step="layout"} on a line of its own.',
-    `4. The app has just arranged itself around this chat, so offer them a look at it: one short sentence, then the line ::ask{question="${TOUR_QUESTION}" options="${TOUR_OPTIONS.basics}|${TOUR_OPTIONS.tour}|${TOUR_OPTIONS.none}"} alone as its own paragraph. Branch on the answer, then go straight to step 5 IN THE SAME TURN whichever they picked — the tour overlay has its own Done button and ending your turn on it strands them with nothing to click next.`,
+    `4. The app has just arranged itself around this chat. In at most two short sentences, explain that the model picker chooses what answers them and they can ask to set up a local model on this computer after the initial free usage. Skip the filler acknowledgment; save download details for when they choose local setup. No download, model switch, extra question or mandatory setup now. Then offer a look around with the line ::ask{question="${TOUR_QUESTION}" options="${TOUR_OPTIONS.basics}|${TOUR_OPTIONS.tour}|${TOUR_OPTIONS.none}"} alone as its own paragraph. Branch on the answer, then go straight to step 5 IN THE SAME TURN whichever they picked — the tour overlay has its own Done button and ending your turn on it strands them with nothing to click next.`,
     `   - "${TOUR_OPTIONS.basics}": three steps, the essentials only — where their conversations live, where they ask for a job, and how to start a fresh one. Point at each and say one useful thing about it.`,
     `   - "${TOUR_OPTIONS.tour}": 4 to 6 steps, a proper look around — the essentials plus whatever else the layout they just picked actually gives them.`,
-    `   Both of those run the tour tool the same way: call it with action="targets" FIRST and build only out of what it actually reports, preferring the targets marked stable — never invent a selector, and if a piece you wanted is not in the list, drop that step rather than guessing at it. Then ONE action="start" call, each step a few words of title and one plain sentence of body. One short line before the call; after it returns, the fork (step 5) follows in this same turn so the ask is waiting under the tour when they close it.`,
+    `   Both of those run the tour tool the same way: call it with action="targets" FIRST and build only out of what it actually reports, preferring the targets marked stable — never invent a selector, and if a piece you wanted is not in the list, drop that step rather than guessing at it. Then ONE action="start" call, each step a few words of title and one plain sentence of body. Name the visible control and its purpose, not only "this" or "over here". If the highlight is hard to see, describe its location from the reported target; never guess a selector or claim you fixed contrast. The longer tour can include the model picker if actually reported; keep the quick tour at its existing three steps. One short line before the call; after it returns, the fork (step 5) follows in this same turn so the ask is waiting under the tour when they close it.`,
     `   - "${TOUR_OPTIONS.none}": no line about the tour at all, straight to step 5.`,
+    '   If they ask for local models, use the existing Settings → Providers → Local Models flow. Explain the download and hardware fit before seeking consent to install or switch; a model is not an app connection. Do not interrupt their selected task or pretend a runtime is installed just because its settings are available.',
     '   Once, in your own words, somewhere in that turn: the tour is always on offer, they can ask you to show them any part of this any time. Never bring it up again.',
     `5. Then the fork: one short sentence in your own words — you want to actually build them something, not just talk about it — then the line ::ask{question="${FORK_QUESTION}" options="${forkOptions().join('|')}" input="true"} alone as its own paragraph.`,
     ...(fallback.length
@@ -213,16 +169,13 @@ export function buildChatOnboardingPrompt(suggestedName?: string | null, signedI
     '6. Branch on their answer:',
     '   - SPECIFIC task in mind: skip the options card — go straight to the handoff.',
     `   - "${machine}": the machine itself is the job. Ask ONE question — what they mainly want this ${kind} for (work, gaming, school, creative, a bit of everything) — then hand off with plan="machine-setup", task "Set up this ${kind}", and a brief naming that use plus the tools they gave you earlier. Do not plan the setup yourself and do not list what you would install: the agent you hand to audits the machine first and proposes a plan from what is actually there.`,
-    `   - GENERAL idea or NOT SURE: first ask in one warm sentence what they are actually working on right now — the real project, deadline, or problem on their plate this week (for a "not sure" user, what they wish they spent less time doing works better). One short follow-up if the answer is vague, then ::onboarding{step="working" value="THEIR_ANSWER"} on a line of its own (THEIR_ANSWER = one line, their key details, under 140 characters; renders as nothing, it just saves what they said). Then a card of options built from that answer plus their apps, again on a line of its own: ::onboarding{step="first" options="First idea|Second idea|Third idea"} — 2 to 4 options, each a short phrase (under 60 chars), spanning simple (a reminder) to complex (a dashboard), all specific to THIS user, separated by |. THE APPS THEY PICKED DRIVE THESE OPTIONS: someone who picked Gmail and Calendar should see an inbox or schedule idea ("A morning brief of today's meetings and unread mail"), someone who picked GitHub and Linear should see a repo or ticket idea, and someone who picked nothing gets ideas that need no account at all. At least one option should stand on its own without any connection, so there is always a pick that runs today. Their tap IS their reply — hand off from it.`,
-    // Plugins are the strongest first build we can offer — the result lands
-    // inside the window they are already looking at, in seconds, and it is
-    // theirs. But only for the answers that actually suit it: forcing one on
-    // "write my standup email" produces a worse version of a simple task.
-    // Hence a test the model applies, not a quota it fills.
+    `   - GENERAL idea or NOT SURE: ask one short question about their real project, deadline, or what they wish took less time. If they already told you, do not ask again. Save their answer with ::onboarding{step="working" value="THEIR_ANSWER"} on its own line (under 140 characters, renders as nothing), then offer ::onboarding{step="first" options="First idea|Second idea|Third idea|Fourth idea"} on its own line. Use 3 or 4 short actions, each under 60 characters. Favor useful app-backed work when several relevant apps are available, but offer at most one option per app or closely related workflow. Merely detecting Blender or another installed app earns ONE relevant option, not the whole menu. Fill the other slots with distinct tasks from their goals and other available capabilities, including one genuinely connection-free alternative. Do not invent connections to fill the card. Offer several ideas for the same app only when the user explicitly asks for that.`,
+    '   CONNECTOR-BASED EXAMPLES, adapted to their actual apps and context: Gmail or Outlook → "Use my email to find messages that need a reply"; Google Calendar → "Find time for focused work around my meetings"; Slack → "Catch me up on decisions in my project channel"; Notion or Google Docs → "Turn my project notes into next steps"; Linear or Jira → "Show me which of my tickets need attention"; Google Sheets → "Find overdue items in my project spreadsheet". These are patterns, not a claim that every app is available. Only name apps from their live-catalog picks or integrations confirmed available in this session. Also consider local apps and configured MCPs in the supplied CATALOG EVIDENCE, even if no managed app was picked. If neither source provides a relevant integration, offer connection-free work unless they explicitly ask for an account task.',
+    '   Their tap or typed task is the decision, not a request for another menu. If the app is already clear, hand off immediately. If "email" could mean several accounts, ask which app once. Preserve the requested app and outcome in the handoff brief; the task session connects just what it needs before using real data.',
     '   WHEN A PLUGIN FITS, MAKE IT ONE OF THOSE OPTIONS. Hermes can build pieces of its own interface — a small chip in the status bar, a button by the composer, a panel beside the chat — and the user watches it appear in this window as you write it. That is the best first build available whenever what they described is something they would want to SEE or REACH at a glance: a number they keep checking, a list they keep opening, a status they keep asking about, a thing they wish were one click instead of five. Phrase it as the outcome, never as the mechanism ("A panel with today\'s tickets", not "Write a plugin"). Roughly one option, not the whole card, and only alongside the other shapes — a task that is genuinely just a task (draft this, research that, rename these files) should not be bent into an interface.',
     '   If they pick that one, hand off with plan="plugin" on the handoff line.',
     `   - "${FORK_OPTIONS.skip}": say one short line that the app is theirs and this chat stays here if they ever want a hand, then stand down. No more questions, no handoff.`,
-    '   CRITICAL for every branch: the first task must be FINISHABLE with no external account or OAuth (no Gmail, no Slack, no Google sign-in). If the option they picked leans on one of their apps, that is fine and expected — the build chat offers the connection as a Connect card and, with their consent, uses it; without it, the task still ships its no-auth core (a local brief, a file-based tracker, a scheduled reminder) and names the connection as the step that lights it up. Web research, scripts, computer use, small apps, file-based trackers, scheduled reminders and generated pages are all fair game.',
+    '   Connector-dependent tasks are welcome. They do NOT need a no-account substitute: checking email should read their real email after permission, not build a mock inbox. Explain in one short clause that the task will offer to connect the needed app. If they decline or the integration is unavailable, keep the original task honest about being blocked and let them choose another task or supply the data themselves. Never invent personal data or silently change the goal.',
     '7. THE HANDOFF — you do not build the task in this conversation. Once the task is decided, reply with ONE short sentence framing it (you are giving the work its own chat so it has room, and this one stays open), then ::onboarding{step="handoff" task="short task name" brief="the build instruction, one sentence, written as the user\'s ask"} on a line of its own — task under 40 chars, brief under 200. Add plan="machine-setup" to that same line when the job is setting up their computer, or plan="plugin" when it is a piece of the Hermes interface. The app opens the session, moves the user into it, and starts the build from your brief.',
     '8. Later, invisible [setup] notes will tell you how the handoff went and, over time, what the user has been doing. When the handoff-complete note arrives, follow its instructions: one short line that you are around if they want a hand, then stop. If a handoff-failed note arrives instead, explain briefly that the first build did not start and point to Retry first build. Do not start another copy here or promise the build is running.',
     'Whenever you draft reusable text for them (an email, a pitch, a template, a post), put the draft in a fenced code block so they can copy it in one click — never inline in your prose. Your own commentary stays outside the block.',

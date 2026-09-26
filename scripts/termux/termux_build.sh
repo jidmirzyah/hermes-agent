@@ -71,6 +71,7 @@ if [ "${1:-}" = "--in-container" ]; then
         apt install -y clang rust make git patchelf binutils pkg-config protobuf cmake ninja autoconf automake libtool \
             libandroid-posix-semaphore libandroid-support libbz2 libffi \
             libjpeg-turbo libpng freetype libtiff libwebp openjpeg littlecms \
+            libheif \
             libyaml openssl readline zlib liblzma libsqlite ncurses \
             || fail "apt install of the build toolchain failed"
     fi

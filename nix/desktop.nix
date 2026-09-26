@@ -4,7 +4,7 @@
 # `hermes` binary with the venv, runtime PATH, bundled skills/plugins, etc.
 # already wired up.  We point the desktop at it via the existing
 # `HERMES_DESKTOP_HERMES` override env var, so the desktop's resolver
-# uses our fully wrapped binary at step 4 ("existing Hermes CLI").
+# uses our fully wrapped binary before the mutable managed install.
 # No reimplementation of the agent resolution in this wrapper.
 {
   pkgs,
@@ -71,7 +71,12 @@ let
       "apps/desktop"
       "apps/shared"
       "scripts/build/desktop.mjs"
+      "scripts/build/freshness.mjs"
       "scripts/build/frontend-common.mjs"
+      # product-identity.cjs resolves the channel request through the
+      # packaging helper (and its content-types table).
+      "scripts/msix-shared.mjs"
+      "scripts/release-content-types.json"
     ];
     pname = "hermes-desktop-renderer";
 
@@ -170,8 +175,8 @@ stdenv.mkDerivation {
 
     # Wrap the nixpkgs electron binary to launch our app.  Set
     # HERMES_DESKTOP_HERMES to the absolute path of the nix-built `hermes`
-    # binary so the desktop's resolver step 4 ("existing Hermes CLI on
-    # PATH") uses our fully wrapped binary — venv with all deps,
+    # binary so the deployment override selects our fully wrapped binary
+    # before any mutable managed install — venv with all deps,
     # bundled skills/plugins, runtime PATH (ripgrep/git/ffmpeg/etc).
     # No reimplementation of the agent resolver in the wrapper.
     makeWrapper ${lib.getExe electron} $out/bin/hermes-desktop \

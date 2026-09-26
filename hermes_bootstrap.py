@@ -302,6 +302,21 @@ def harden_import_path(src_root: str | None = None) -> None:
     sys.path.insert(0, root)
 
 
+def export_scratch_tmp_env() -> None:
+    """Point ``TMPDIR``/``TMP``/``TEMP`` at ``HERMES_HOME/cache/scratch`` unless the user set them.
+
+    System temp is tmpfs on most Linux hosts and containers; Hermes' browser profiles, PTY
+    probes and every ``tempfile`` default a child script makes would eat RAM there. Runs at
+    import so every entry point and every child they spawn inherits it; ``hermes_cli.main``
+    re-runs it after ``--profile`` re-homes the process. Never raises.
+    """
+    try:
+        from hermes_constants import export_scratch_tmp_env as _export
+        _export()
+    except Exception:
+        pass  # a missing/unwritable home just leaves the system temp dir in place
+
+
 # Apply on import — entry points just need ``import hermes_bootstrap``
 # (or ``from hermes_bootstrap import apply_windows_utf8_bootstrap``) at
 # the very top of their module, before importing anything else.  The
@@ -311,11 +326,19 @@ suppress_platform_ver_console()
 
 # Every entry point imports this module before its dependency graph.
 from pathlib import Path
-from hermes_cli.runtime_paths import activate_dependencies
+
+_root = Path(__file__).resolve().parent
+try:
+    os.getcwd()
+except FileNotFoundError:
+    # Reaped workspaces leave children in a deleted cwd. PM resolves relative
+    # import paths before the CLI's guards, so recover before any PM work.
+    os.chdir(_root)
+
+from pm.environments import activate_dependencies
 from hermes_cli._early_recovery import recover_if_needed
 
 from hermes_cli._parser import command_argv
-
 
 def activate_durable_lazy_target() -> None:
     """Put the durable lazy-install dir (HERMES_LAZY_INSTALL_TARGET) on sys.path.
@@ -334,29 +357,6 @@ def activate_durable_lazy_target() -> None:
         pass  # a failed activation just leaves the backend reporting itself unavailable
 
 
-def export_scratch_tmp_env() -> None:
-    """Point ``TMPDIR``/``TMP``/``TEMP`` at ``HERMES_HOME/cache/scratch`` unless the user set them.
-
-    System temp is tmpfs on most Linux hosts and containers; Hermes' browser profiles, PTY
-    probes and every ``tempfile`` default a child script makes would eat RAM there. Runs at
-    import so every entry point and every child they spawn inherits it; ``hermes_cli.main``
-    re-runs it after ``--profile`` re-homes the process. Never raises.
-    """
-    try:
-        from hermes_constants import export_scratch_tmp_env as _export
-        _export()
-    except Exception:
-        pass  # a missing/unwritable home just leaves the system temp dir in place
-
-
-# Apply on import — entry points only need ``import hermes_bootstrap`` first.
-apply_windows_utf8_bootstrap()
-suppress_platform_ver_console()
-activate_durable_lazy_target()
-install_happy_eyeballs_socket_connect()
-export_scratch_tmp_env()
-
-_root = Path(__file__).resolve().parent
 # Repair needs only stdlib. Do not activate the damaged tree to reach it.
 _pm_repair = command_argv(sys.argv[1:])[:2] == ["pm", "repair"]
 if not _pm_repair:
@@ -385,3 +385,6 @@ if not _pm_repair:
         if command_argv(sys.argv[1:])[:1] != ["pm"]:
             print(f"hermes: {exc}; run `hermes pm repair`", file=sys.stderr)
             raise SystemExit(1) from None
+activate_durable_lazy_target()
+install_happy_eyeballs_socket_connect()
+export_scratch_tmp_env()

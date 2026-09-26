@@ -4,12 +4,12 @@ import logging
 import os
 import re
 import shutil
-import subprocess
 import sys
 import threading
-import time
 from pathlib import Path
-from urllib.parse import urlparse
+from hermes_cli import source_check
+# Historical updater import (tests/compat/old_updater_surface.json). In-tree callers use the owner.
+from hermes_cli.source_check import _github_compare_behind  # noqa: F401
 from hermes_constants import get_hermes_home
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
@@ -521,7 +521,7 @@ def get_latest_release_tag(repo_dir: Optional[Path] = None) -> Optional[tuple]:
     """
     def _compute():
         rd = repo_dir or _resolve_repo_dir()
-        tag = _git_stdout(["describe", "--tags", "--abbrev=0"], cwd=rd, timeout=3) if rd else None
+        tag = source_check._git_stdout(["describe", "--tags", "--abbrev=0"], cwd=rd, timeout=3) if rd else None
         return (tag, f"{_RELEASE_URL_BASE}/{tag}") if tag else None
     return _memo("_latest_release_cache", _compute)
 
@@ -541,6 +541,11 @@ def format_banner_version_label() -> str:
         if stamp.get("tag"):
             channel = "canary" if is_canary_tag(stamp["tag"]) else "stable"
             return f"{label} · {channel}"
+        if stamp.get("payload") == "bootstrap":
+            # The old installer shell's CLI backend: the shell never updates
+            # itself (`self`), the managed checkout under it does. Name the
+            # shell so it doesn't read as a plain packaged build.
+            return f"{label} · installer"
         return label
 
     base = f"Hermes Agent v{VERSION} ({RELEASE_DATE})"
@@ -548,8 +553,8 @@ def format_banner_version_label() -> str:
     from hermes_cli.update_channel import resolve_update_channel
 
     channel = resolve_update_channel(_quiet(load_config), get_project_root())
-    if channel in {"stable", "canary"}:
-        head = _git_stdout(["rev-parse", "HEAD"], cwd=get_project_root())
+    if channel != "main":
+        head = source_check._git_stdout(["rev-parse", "HEAD"], cwd=get_project_root())
         return f"{base} · {channel}" + (f" · local {head[:12]}" if head else "")
     state = get_git_banner_state()
     if not state:
@@ -602,7 +607,7 @@ def prefetch_update_check():
 
     def _run():
         global _update_result
-        _update_result = check_for_updates(passive=True)
+        _update_result = source_check.check_for_updates(passive=True).get("behind")
         _update_check_done.set()
     _daemon(None, _run)
 
@@ -749,8 +754,8 @@ def banner_snapshot_fingerprint() -> Optional[str]:
 
 def load_banner_snapshot(enabled_toolsets: List[str] = None) -> Optional[Dict[str, Any]]:
     """Return the stored banner snapshot when its fingerprint is current."""
-    blob = _read_json(_banner_snapshot_path())
-    if blob is None:
+    blob = _quiet(lambda: json.loads(_banner_snapshot_path().read_text(encoding="utf-8-sig")))
+    if not isinstance(blob, dict):
         return None
     fp = banner_snapshot_fingerprint()
     if (not fp or blob.get("fingerprint") != fp

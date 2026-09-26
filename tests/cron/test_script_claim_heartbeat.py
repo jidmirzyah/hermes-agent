@@ -2,7 +2,6 @@
 
 from datetime import datetime, timedelta, timezone
 import contextlib
-import sys
 import threading
 import time
 from unittest.mock import MagicMock, patch
@@ -10,178 +9,65 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
-_SPAWNABLE_PY: "str | None" = None
-
-
-def _spawnable_python() -> str:
-    global _SPAWNABLE_PY
-    if _SPAWNABLE_PY is not None:
-        return _SPAWNABLE_PY
-
-    """An interpreter that can actually CreateProcess children. The hermetic
-    runner's sys.executable can be an emulated x64 binary on an arm64 host
-    (WinError 5 on every spawn); the WindowsApps packaged python works by
-    full path. Falls back to sys.executable."""
+@pytest.mark.platforms("posix")
+@pytest.mark.live_system_guard_bypass
+@pytest.mark.parametrize("trigger", ["cancel", "timeout"])
+@pytest.mark.parametrize("topology", ["detached", "stubborn-pipe"])
+def test_script_termination_reaps_descendants(tmp_path, monkeypatch, trigger, topology):
     import os
-    import subprocess as sp
-
-    for cand in (os.environ.get("HERMES_TEST_PYTHON"), sys.executable):
-        if not cand:
-            continue
-        try:
-            # The candidate must run AND spawn its own child — these tests
-            # execute scripts that Popen grandchildren, and an emulated
-            # interpreter can run -c while its own subprocess.Popen fails.
-            r = sp.run(
-                [cand, "-c", "import subprocess; subprocess.run(['cmd','/c','exit 0'] if __import__('os').name=='nt' else ['true'])"],
-                capture_output=True, timeout=30,
-            )
-            if r.returncode == 0:
-                _SPAWNABLE_PY = cand
-                return cand
-        except Exception:
-            continue
-    _SPAWNABLE_PY = sys.executable
-    return _SPAWNABLE_PY
-
-@pytest.mark.platforms("linux")
-def test_cancel_event_terminates_script_process_tree(tmp_path, monkeypatch):
-    """Losing a fire claim must stop both the script and its descendants."""
-    import cron.scheduler as scheduler
-    from cron import scheduler_script as sched_script
+    import psutil
+    from cron import scheduler, scheduler_script
 
     monkeypatch.setattr(scheduler, "_get_hermes_home", lambda: tmp_path)
-    # Under the hermetic runner sys.executable can be an emulated binary
-    # whose children fail to spawn; cron resolves the script interpreter
-    # from sys.executable, so pin it to one that actually works here.
-    monkeypatch.setattr(scheduler.sys, "executable", _spawnable_python())
-    scripts_dir = tmp_path / "scripts"
-    scripts_dir.mkdir()
-    PY = _spawnable_python()  # interpreter the spawned script uses for grandchildren
-    started = tmp_path / "started"
-    child_done = tmp_path / "child-done"
-    script = scripts_dir / "blocking.py"
-    child_code = (
-        "import time; from pathlib import Path; "
-        # Long sleep: the descendant must outlive the tree-kill's worst-case
-        # latency under load — child_done within the assertion window can
-        # then ONLY mean the kill missed it, never that it finished on its
-        # own (which a 1s sleep would allow under 36-way CPU contention).
-        f"time.sleep(10); Path({str(child_done)!r}).write_text('done')"
-    )
-    script.write_text(
-        "import subprocess, sys, time\n"
-        f"subprocess.Popen([{PY!r}, '-c', {child_code!r}])\n"
-        f"open({str(started)!r}, 'w').close()\n"
-        "time.sleep(30)\n",
-        encoding="utf-8",
-    )
-
-    cancel = threading.Event()
-    result = []
-    errors = []
-
-    def _run() -> None:
+    monkeypatch.setattr(scheduler_script, "_get_script_timeout", lambda: 3 if trigger == "timeout" else 60)
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    ready = tmp_path / "child.pid"
+    child = ("import os, signal, time; from pathlib import Path; "
+             + ("signal.signal(signal.SIGTERM, signal.SIG_IGN); " if topology == "stubborn-pipe" else "")
+             + f"Path({str(ready)!r}).write_text(str(os.getpid())); time.sleep(60)")
+    script = scripts / "blocking.py"
+    script.write_text("import subprocess, sys, time\n"
+                      + f"subprocess.Popen([sys.executable, '-c', {child!r}], start_new_session={topology == 'detached'})\n"
+                      + "time.sleep(60)\n", encoding="utf-8")
+    cancel, results, errors = threading.Event(), [], []
+    def run():
         try:
-            result.append(
-                sched_script._run_job_script(
-                    str(script),
-                    workdir=str(tmp_path),
-                    cancel_event=cancel,
-                )
-            )
-        except Exception as exc:
+            results.append(scheduler_script._run_job_script(str(script), workdir=str(tmp_path), cancel_event=cancel))
+        except BaseException as exc:
             errors.append(exc)
-
-    thread = threading.Thread(target=_run)
-    thread.start()
-    # Generous deadline: under 36-way parallel load the spawned
-    # interpreter's cold start can exceed 5s on first attempt.
-    deadline = time.monotonic() + 15
-    while not started.exists() and not errors and time.monotonic() < deadline:
-        time.sleep(0.01)
-    assert errors == []
-    assert started.exists(), "script did not start"
-
-    cancel.set()
-    # The tree-kill (taskkill /T under load) can take several seconds when
-    # 36 parallel test workers compete for the CPU — generous join bound.
-    thread.join(timeout=15)
-
-    assert errors == []
-    assert not thread.is_alive(), "script ignored cancellation"
-    assert result and result[0][0] is False
-    assert "cancel" in result[0][1].lower()
-    time.sleep(1.2)
-    assert not child_done.exists(), "script descendant survived cancellation"
-
-
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process-group semantics")
-def test_cancel_event_kills_sigterm_ignoring_descendant(tmp_path, monkeypatch):
-    """A SIGTERM-ignoring grandchild must not wedge the cancellation path:
-    the tree kill escalates to SIGKILL for surviving group members, and the
-    pipe drain is bounded even if a descendant still holds the write ends."""
-    import cron.scheduler as scheduler
-    from cron import scheduler_script as sched_script
-
-    monkeypatch.setattr(scheduler, "_get_hermes_home", lambda: tmp_path)
-    # Under the hermetic runner sys.executable can be an emulated binary
-    # whose children fail to spawn; cron resolves the script interpreter
-    # from sys.executable, so pin it to one that actually works here.
-    monkeypatch.setattr(scheduler.sys, "executable", _spawnable_python())
-    scripts_dir = tmp_path / "scripts"
-    scripts_dir.mkdir()
-    PY = _spawnable_python()  # interpreter the spawned script uses for grandchildren
-    started = tmp_path / "started"
-    script = scripts_dir / "stubborn.py"
-    child_code = (
-        "import signal, time; "
-        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
-        f"open({str(started)!r}, 'w').close(); "
-        "time.sleep(60)"
-    )
-    script.write_text(
-        "import subprocess, sys, time\n"
-        f"subprocess.Popen([{PY!r}, '-c', {child_code!r}])\n"
-        "time.sleep(60)\n",
-        encoding="utf-8",
-    )
-
-    cancel = threading.Event()
-    result = []
-    errors = []
-
-    def _run() -> None:
+    def live(pid):
         try:
-            result.append(
-                sched_script._run_job_script(
-                    str(script),
-                    workdir=str(tmp_path),
-                    cancel_event=cancel,
-                )
-            )
-        except Exception as exc:
-            errors.append(exc)
-
-    thread = threading.Thread(target=_run)
+            return psutil.Process(pid).status() != psutil.STATUS_ZOMBIE
+        except psutil.NoSuchProcess:
+            return False
+    thread = threading.Thread(target=run)
     thread.start()
-    # Generous deadline: under 36-way parallel load the spawned
-    # interpreter's cold start can exceed 5s on first attempt.
-    deadline = time.monotonic() + 15
-    while not started.exists() and not errors and time.monotonic() < deadline:
-        time.sleep(0.01)
-    assert errors == []
-    assert started.exists(), "script did not spawn its descendant"
-
-    cancel.set()
-    # TERM grace (1s) + KILL + bounded drain (5s) + margin: must return well
-    # before the unbounded-communicate hang this regresses against.
-    thread.join(timeout=10)
-
-    assert errors == []
-    assert not thread.is_alive(), "cancellation wedged on a SIGTERM-ignoring descendant"
-    assert result and result[0][0] is False
-    assert "cancel" in result[0][1].lower()
+    pid = None
+    try:
+        deadline = time.monotonic() + 10
+        while not ready.exists() and not errors and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert ready.exists() and not errors, errors
+        pid = int(ready.read_text(encoding="utf-8"))
+        assert live(pid), "child must acknowledge readiness before termination"
+        if trigger == "cancel":
+            cancel.set()
+        thread.join(timeout=15)
+        assert not thread.is_alive() and not errors, errors
+        assert results[0][0] is False
+        assert ("cancelled" if trigger == "cancel" else "timed out") in results[0][1]
+        deadline = time.monotonic() + 5
+        while live(pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not live(pid), f"descendant {pid} survived {trigger}"
+    finally:
+        cancel.set()
+        if pid is None and ready.exists():
+            pid = int(ready.read_text(encoding="utf-8"))
+        if pid is not None and live(pid):
+            os.kill(pid, 9)
+        thread.join(timeout=15)
 
 
 def test_no_agent_forwards_cancel_event_to_script_runner(monkeypatch):

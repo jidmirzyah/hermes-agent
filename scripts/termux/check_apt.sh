@@ -6,6 +6,7 @@ export PATH="$PREFIX/bin:$PATH"
 suite="${1:?APT suite required}"
 expected="${2:?expected package version required}"
 repository="${3:-file:/apt}"
+ctmp=/tmp  # no-tmp: ok — where the caller mounts validate_installed.py inside this container
 work="$(mktemp -d "$PREFIX/tmp/hermes-apt-proof.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/lists/partial" "$work/archives/partial"
@@ -34,7 +35,7 @@ actual="$(dpkg-query -W -f='${Version}' hermes-agent)"
 root="$PREFIX/lib/hermes-agent"
 export LD_LIBRARY_PATH="$root/tools/python$PREFIX/lib:$root/tools/node$PREFIX/lib:$root/tools/ffmpeg$PREFIX/lib:$root/runtime-libs/lib:$PREFIX/lib"
 export PYTHONPATH="$root/app"
-"$root/venv/bin/python" /tmp/validate_installed.py
+"$root/venv/bin/python" "$ctmp/validate_installed.py"
 printf 'SIGNED_APT_INSTALL_OK %s\n' "$actual"
 if [ -f /previous.deb ]; then
     printf 'SIGNED_APT_UPGRADE_OK %s -> %s\n' "$previous" "$actual"

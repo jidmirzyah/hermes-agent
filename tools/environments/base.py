@@ -10,14 +10,13 @@ or a temp file (local). Cohesive pieces live in sibling modules (``base_output``
 import json
 import logging
 import os
-import re
 import shlex
 import threading
 import time
 import uuid
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Callable, IO, Iterable, Protocol
+from typing import Callable, Iterable
 
 from hermes_constants import get_hermes_home
 from tools.interrupt import consume_yield, is_interrupted, is_thread_interrupted
@@ -144,98 +143,6 @@ def _file_mtime_key(host_path: str) -> tuple[float, int] | None:
 
 
 # ---------------------------------------------------------------------------
-# ProcessHandle protocol
-# ---------------------------------------------------------------------------
-
-
-class ProcessHandle(Protocol):
-    """Duck type that every backend's _run_bash() must return.
-
-    subprocess.Popen satisfies this natively.  SDK backends (Modal, Daytona)
-    return _ThreadedProcessHandle which adapts their blocking calls.
-    """
-
-    def poll(self) -> int | None: ...
-    def kill(self) -> None: ...
-    def wait(self, timeout: float | None = None) -> int: ...
-
-    @property
-    def stdout(self) -> IO[str] | None: ...
-
-    @property
-    def returncode(self) -> int | None: ...
-
-
-class _ThreadedProcessHandle:
-    """Adapter for SDK backends (Modal, Daytona) that have no real subprocess.
-
-    Wraps a blocking ``exec_fn() -> (output_str, exit_code)`` in a background
-    thread and exposes a ProcessHandle-compatible interface.  An optional
-    ``cancel_fn`` is invoked on ``kill()`` for backend-specific cancellation
-    (e.g. Modal sandbox.terminate, Daytona sandbox.stop).
-    """
-
-    def __init__(
-        self,
-        exec_fn: Callable[[], tuple[str, int]],
-        cancel_fn: Callable[[], None] | None = None,
-    ):
-        self._cancel_fn = cancel_fn
-        self._done = threading.Event()
-        self._returncode: int | None = None
-        self._error: Exception | None = None
-
-        # Pipe for stdout — drain thread in _wait_for_process reads the read end.
-        read_fd, write_fd = os.pipe()
-        self._stdout = os.fdopen(read_fd, "r", encoding="utf-8", errors="replace")  # windows-footgun: ok (pipe is BOM-free)
-        self._write_fd = write_fd
-
-        def _worker():
-            try:
-                output, exit_code = exec_fn()
-                self._returncode = exit_code
-                # Write output into the pipe so drain thread picks it up.
-                try:
-                    os.write(self._write_fd, output.encode("utf-8", errors="replace"))
-                except OSError:
-                    pass
-            except Exception as exc:
-                self._error = exc
-                self._returncode = 1
-            finally:
-                try:
-                    os.close(self._write_fd)
-                except OSError:
-                    pass
-                self._done.set()
-
-        t = threading.Thread(target=_worker, daemon=True)
-        t.start()
-
-    @property
-    def stdout(self):
-        return self._stdout
-
-    @property
-    def returncode(self) -> int | None:
-        return self._returncode
-
-    def poll(self) -> int | None:
-        return self._returncode if self._done.is_set() else None
-
-    def kill(self):
-        if self._cancel_fn:
-            try:
-                self._cancel_fn()
-            except Exception:
-                pass
-
-    def wait(self, timeout: float | None = None) -> int:
-        self._done.wait(timeout=timeout)
-        return self._returncode
-
-
-# ---------------------------------------------------------------------------
 # BaseEnvironment
 # ---------------------------------------------------------------------------
 
@@ -260,8 +167,12 @@ class BaseEnvironment(ABC):
     _profile_scoped_passthrough: bool = False
 
     def get_temp_dir(self) -> str:
-        """Backend temp directory for session artifacts (``/tmp`` in sandboxes;
-        LocalEnvironment overrides for Termux where only ``TMPDIR`` is writable)."""
+        """Return the backend temp directory used for session artifacts.
+
+        Most sandboxed backends use ``/tmp`` inside the target environment.
+        LocalEnvironment overrides this on hosts where ``/tmp`` may be missing
+        and ``TMPDIR`` is the portable writable location.
+        """
         return "/tmp"  # no-tmp: ok — sandbox-side (remote container) temp dir, not the host
 
     def __init__(self, cwd: str, timeout: int, env: dict = None):

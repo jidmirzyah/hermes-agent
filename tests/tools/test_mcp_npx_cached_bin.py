@@ -125,56 +125,27 @@ def test_unusable_args_are_ignored(args):
     assert _npx_cached_bin(args) is None
 
 
-def test_osv_preflight_runs_before_the_swap():
-    """The malware gate must still see `npx` + the package name.
+@pytest.mark.parametrize("rejected", [False, True])
+def test_preflight_checks_original_package_before_cache_access(tmp_path, monkeypatch, rejected):
+    import asyncio
+    from tools import mcp_tool
 
-    `_infer_ecosystem` keys off the command basename, so a command already
-    rewritten to `.../node_modules/.bin/mcp-linear` yields no ecosystem and
-    `check_package_for_malware` returns None — the gate silently becomes a
-    no-op. This pins the ordering: OSV inspects the original invocation.
-    """
-    from tools.osv_check import _infer_ecosystem, _parse_package_from_args
+    target = _cache(tmp_path, package="mcp-linear", bin_field={"mcp-linear": "i.js"})
+    args = ["-y", "mcp-linear", "--port", "7"]
+    seen = []
 
-    # What the preflight sees today, before any swap.
-    assert _infer_ecosystem("npx") == "npm"
-    assert _parse_package_from_args(["-y", "@tacticlaunch/mcp-linear"], "npm")[0] == (
-        "@tacticlaunch/mcp-linear"
-    )
+    def check(command, arguments):
+        seen.append((command, list(arguments)))
+        return "malicious package" if rejected else None
 
-    # What it would see if the swap happened first — nothing.
-    assert _infer_ecosystem("/home/u/.npm/_npx/abc/node_modules/.bin/mcp-linear") is None
-
-
-def test_swap_happens_after_the_osv_call_in_source():
-    """Structural guard for the ordering above.
-
-    The swap and the preflight live in one async function; a future edit that
-    moves the swap earlier would disable the malware gate silently, and no
-    unit test of either piece alone would notice.
-    """
-    from pathlib import Path as _P
-
-    src = _P(__file__).resolve().parents[2] / "tools" / "mcp_tool.py"
-    text = src.read_text(encoding="utf-8")
-    osv_needle = "check_package_for_malware, command, args"
-    swap_needle = "cached = _npx_cached_bin(args)"
-    # Report a rename explicitly: a bare .index() ValueError here reads like a
-    # broken test rather than "someone renamed the thing this guards".
-    assert osv_needle in text, (
-        f"cannot find the OSV preflight call ({osv_needle!r}) — it was renamed; "
-        "update this guard and re-verify the swap still happens after it"
-    )
-    assert swap_needle in text, (
-        f"cannot find the npx swap ({swap_needle!r}) — it was renamed; update "
-        "this guard and re-verify it still happens after the OSV preflight"
-    )
-
-    assert text.index(osv_needle) < text.index(swap_needle), (
-        "the npx swap now precedes the OSV malware preflight, which silently "
-        "disables it: _infer_ecosystem keys off the command basename being "
-        "npx/uvx/pipx, so a rewritten command yields no ecosystem and "
-        "check_package_for_malware returns None"
-    )
+    monkeypatch.setattr("tools.osv_check.check_package_for_malware", check)
+    if rejected:
+        monkeypatch.setattr(mcp_tool, "_npx_cached_bin", lambda *a: pytest.fail("cache read before refusal"))
+        with pytest.raises(ValueError, match="malicious package"):
+            asyncio.run(mcp_tool._preflight_stdio_command("server", "npx", args))
+    else:
+        assert asyncio.run(mcp_tool._preflight_stdio_command("server", "npx", args)) == (str(target), ["--port", "7"])
+    assert seen == [("npx", ["-y", "mcp-linear", "--port", "7"])]
 
 
 def test_windows_selects_launchers_never_the_sh_script():

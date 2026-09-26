@@ -1,5 +1,6 @@
 import type { DesktopVersionInfo, RuntimeSource } from '@/global'
 import { useI18n } from '@/i18n'
+import { distributionLabelKey } from '@/lib/distribution-label'
 import { ExternalLink } from '@/lib/external-link'
 
 /**
@@ -26,17 +27,19 @@ export function VersionDetails({ version }: { version: DesktopVersionInfo }) {
   const source =
     version.source === 'ci' ? 'CI' : version.source ? version.source[0].toUpperCase() + version.source.slice(1) : null
 
-  // The stamp distinguishes Store builds from sideloaded MSIX builds.
+  // The Distribution row: one resolver owns the label policy — see
+  // distribution-label.ts. Nix and Docker are product names, rendered
+  // verbatim; every other shape comes from the stamp via i18n.
+  const distributionKey = distributionLabelKey(version)
+
   const distribution =
     version.distribution === 'nix'
       ? 'Nix'
       : version.distribution === 'docker'
         ? 'Docker'
-        : version.updateMechanism === 'microsoft-store'
-          ? u.versionDetailsDistributionStore
-          : version.distribution === 'desktop-app'
-            ? u.versionDetailsDistributionDesktop
-            : null
+        : distributionKey
+          ? u[distributionKey]
+          : null
 
   const runtime =
     version.hermesRuntime?.type === 'embedded'

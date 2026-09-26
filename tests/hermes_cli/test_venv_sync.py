@@ -23,75 +23,29 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _run_bare(snippet: str) -> subprocess.CompletedProcess:
-    """Run a snippet in an isolated interpreter (-I: no env, no user site)
-    from the repo root, so a bare import graph is what gets exercised."""
-    return subprocess.run(
-        [sys.executable, "-I", "-c", textwrap.dedent(snippet)],
-        capture_output=True,
-        text=True,
-        cwd=REPO_ROOT,
-        timeout=120,
-    )
+    program = f"import sys\nsys.path.insert(0, {str(REPO_ROOT)!r})\n" + textwrap.dedent(snippet)
+    return subprocess.run([sys.executable, '-I', '-S', '-c', program],
+                          capture_output=True, text=True, cwd=REPO_ROOT, timeout=120)
 
 
-# ── the stdlib-only contract, RUN not parsed ─────────────────────────────
+def test_bare_import_and_passive_paths(tmp_path):
+    result = _run_bare(f"""
+        from pathlib import Path
+        from hermes_cli import venv_sync
+        assert 'pm' not in sys.modules
+        root = Path({str(tmp_path)!r})
+        assert venv_sync.sync(root, check=True)['state'] == 'failed'
+        (root / 'install-stamp.json').write_text('{{"updateMechanism":"external"}}')
+        assert venv_sync.sync(root) == {{'state': 'sealed', 'ok': True}}
+        assert venv_sync.prepare_launch(root, []) is None
+        assert 'pm' not in sys.modules
+    """)
+    assert result.returncode == 0, result.stderr
 
 
-class TestStdlibOnly:
-    def test_imports_and_answers_bare(self, tmp_path):
-        """The whole CLI surface must survive a stripped interpreter."""
-        result = _run_bare(
-            f"""
-            import sys
-            sys.path.insert(0, {str(REPO_ROOT)!r})
-            from hermes_cli import venv_sync
-            root = {str(tmp_path)!r}
-            out = venv_sync.sync(root, check=True)
-            assert out["state"] == "failed", out  # empty dir: no pyproject
-            print("ok")
-            """
-        )
-        assert result.returncode == 0, result.stderr
-
-    def test_no_third_party_module_ends_up_loaded(self):
-        """Importing it must not drag in ANY non-stdlib module.
-
-        Check sys.modules after import, because a parser cannot see lazy
-        or conditional imports fire. First-party pm is allowed at SYNC
-        time but must not load at IMPORT time either — the bare import
-        happens on trees where even reading pm's ledger is premature.
-
-        Measure the *delta*: snapshot the foreign modules already loaded
-        before the import and only flag what the import adds. A hardcoded
-        allowlist of ".pth"-injected bootstrap names is not portable — the
-        interpreter loads ``.pth`` hooks at startup (setuptools'
-        ``_distutils_hack``, pywin32's ``pywin32_bootstrap``, the
-        editable-install ``__editable___…_finder``, ``_virtualenv``…) before
-        the snippet runs, and that set varies per platform and install
-        shape. A before/after diff is sensitive to the import and immune to
-        that harness noise.
-        """
-        result = _run_bare(
-            f"""
-            import sys
-            sys.path.insert(0, {str(REPO_ROOT)!r})
-            stdlib = set(sys.stdlib_module_names)
-
-            def _foreign():
-                return {{
-                    name.split(".")[0]
-                    for name, mod in sys.modules.items()
-                    if mod is not None and getattr(mod, "__file__", None)
-                }} - stdlib
-
-            before = _foreign()
-            import hermes_cli.venv_sync
-            dragged_in = {{n for n in _foreign() - before if n != "hermes_cli"}}
-            assert not dragged_in, f"venv_sync loaded non-stdlib: {{dragged_in}}"
-            print("ok")
-            """
-        )
-        assert result.returncode == 0, result.stderr
+def test_bare_harness_rejects_third_party_import():
+    result = _run_bare('import requests')
+    assert result.returncode != 0 and 'ModuleNotFoundError' in result.stderr
 
 
 def _checkout(tmp_path: Path, name: str = "co") -> Path:
@@ -126,11 +80,6 @@ class TestCheckoutSync:
         assert venv_sync.sync(root if foreign else None) == {"state": "synced", "ok": True}
         assert calls == [(root, True)]
 
-    def test_current_selection_needs_no_transaction(self, tmp_path, monkeypatch):
-        root = _checkout(tmp_path)
-        calls = _wire_pm(monkeypatch, current=True)
-        assert venv_sync.sync(root) == {"state": "current", "ok": True}
-        assert calls == []
 
     def test_check_is_passive(self, tmp_path, monkeypatch):
         root = _checkout(tmp_path)

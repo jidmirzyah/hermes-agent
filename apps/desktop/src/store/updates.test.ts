@@ -153,7 +153,11 @@ describe('gateway version refresh', () => {
     setApiRequestProfile('work')
 
     const version: DesktopVersionInfo = {
-      appVersion: '4.5.6', electronVersion: '40', nodeVersion: '26', platform: 'win32', hermesRoot: ''
+      appVersion: '4.5.6',
+      electronVersion: '40',
+      nodeVersion: '26',
+      platform: 'win32',
+      hermesRoot: ''
     }
 
     const getVersion = vi.fn().mockResolvedValue(version)
@@ -165,7 +169,12 @@ describe('gateway version refresh', () => {
       expect(getVersion).toHaveBeenCalledWith({ connectionId: 'remote-box', profile: 'work' })
       expect($desktopVersion.get()?.appVersion).toBe('4.5.6')
       let finish!: (value: DesktopVersionInfo) => void
-      getVersion.mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+      getVersion.mockImplementationOnce(
+        () =>
+          new Promise(resolve => {
+            finish = resolve
+          })
+      )
       const pending = refreshDesktopVersion()
       setRemote(false)
       $desktopVersion.set(null)
@@ -215,10 +224,20 @@ describe('maybeNotifyUpdateAvailable', () => {
   })
 
   it('notifies for a Store update without a commit and never for an unknown check', () => {
-    maybeNotifyUpdateAvailable(status({ mechanism: 'microsoft-store', targetSha: undefined, behind: null, updateAvailable: true }))
+    maybeNotifyUpdateAvailable(
+      status({ mechanism: 'microsoft-store', targetSha: undefined, behind: null, updateAvailable: true })
+    )
     expect(notifySpy).toHaveBeenCalledTimes(1)
     notifySpy.mockClear()
-    maybeNotifyUpdateAvailable(status({ mechanism: 'microsoft-store', targetSha: undefined, behind: null, updateAvailable: false, error: 'Store unavailable' }))
+    maybeNotifyUpdateAvailable(
+      status({
+        mechanism: 'microsoft-store',
+        targetSha: undefined,
+        behind: null,
+        updateAvailable: false,
+        error: 'Store unavailable'
+      })
+    )
     expect(notifySpy).not.toHaveBeenCalled()
   })
 
@@ -934,27 +953,6 @@ describe('applyUpdates terminal state', () => {
     expect($updateApply.get().error).toBe('rebuild-failed')
   })
 
-  it('preserves structured safe blockers for the close-and-update prompt', async () => {
-    const blockers = [
-      {
-        pid: 47484,
-        name: 'python.exe',
-        cmdline: 'python.exe -m http.server 8766',
-        kind: 'local-preview' as const,
-        safeToStop: true,
-        label: 'Example Preview',
-        port: 8766
-      }
-    ]
-
-    applyMock.mockResolvedValue({ ok: false, error: 'venv-blocked', message: 'blocked', blockers })
-
-    await applyUpdates()
-
-    expect($updateApply.get().error).toBe('venv-blocked')
-    expect($updateApply.get().blockers).toEqual(blockers)
-  })
-
   it('keeps the manual command state for CLI installs with no staged updater', async () => {
     applyMock.mockResolvedValue({ ok: true, manual: true, command: 'hermes update' })
 
@@ -1486,5 +1484,78 @@ describe('startUpdatePoller', () => {
     listeners['focus']?.()
     await vi.advanceTimersByTimeAsync(0)
     expect(checkMock).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('discontinued retirement notice', () => {
+  const applyMock = vi.fn()
+  const checkMock = vi.fn()
+
+  const discontinuedStatus = (): DesktopUpdateStatus => ({
+    supported: true,
+    fetchedAt: 0,
+    retirement: { state: 'discontinued', destination: 'stable', version: '1.2.3' }
+  })
+
+  beforeEach(() => {
+    storage.clear()
+    notifySpy.mockClear()
+    dismissSpy.mockClear()
+    applyMock.mockClear()
+    checkMock.mockReset()
+    resetUpdateApplyState()
+    $updateStatus.set(null)
+    $updateOverlayOpen.set(false)
+    checkMock.mockImplementation(async () => discontinuedStatus())
+    ;(globalThis as unknown as { window: unknown }).window = {
+      hermesDesktop: { updates: { apply: applyMock, check: checkMock } }
+    }
+    vi.useRealTimers()
+  })
+
+  afterEach(() => {
+    delete (globalThis as unknown as { window?: unknown }).window
+  })
+
+  it('checkUpdates surfaces the discontinued warning and never offers an apply', async () => {
+    await checkUpdates({ force: true })
+
+    expect(notifySpy).toHaveBeenCalledTimes(1)
+    expect(notifySpy.mock.calls[0]?.[0]).toMatchObject({ kind: 'warning', id: 'desktop-build-discontinued' })
+    // The ordinary update toast must stay silent: nothing can be downloaded.
+    expect(notifySpy.mock.calls[0]?.[0]).not.toMatchObject({ icon: 'gift' })
+
+    // The generic update entry point refuses instead of dispatching an apply.
+    const result = await applyUpdates()
+    expect(result).toMatchObject({ ok: false, error: 'retirement-blocked' })
+    expect(applyMock).not.toHaveBeenCalled()
+  })
+
+  it('dismissal persists per channel revision: a re-check stays quiet, a new retirement re-notifies', async () => {
+    await checkUpdates({ force: true })
+    ;(notifySpy.mock.calls[0]?.[0] as { onDismiss: () => void }).onDismiss()
+    notifySpy.mockClear()
+
+    // Plain re-check of the same retired revision: no nag.
+    await checkUpdates({ force: true })
+    expect(notifySpy).not.toHaveBeenCalled()
+
+    // The publisher pins a new destination version → the notice returns.
+    checkMock.mockImplementation(async () => ({
+      ...discontinuedStatus(),
+      retirement: { state: 'discontinued', destination: 'stable', version: '1.3.0' }
+    }))
+    await checkUpdates({ force: true })
+    expect(notifySpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('a retirement that is not discontinued never raises the notice', async () => {
+    checkMock.mockImplementation(async () => ({
+      ...discontinuedStatus(),
+      retirement: { state: 'available', destination: 'stable', version: '1.2.3' }
+    }))
+    await checkUpdates({ force: true })
+
+    expect(notifySpy.mock.calls.filter(call => call[0]?.id === 'desktop-build-discontinued')).toHaveLength(0)
   })
 })

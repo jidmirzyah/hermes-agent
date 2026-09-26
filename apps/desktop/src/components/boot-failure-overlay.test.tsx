@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { en } from '@/i18n/en'
 import { $desktopBoot } from '@/store/boot'
 import { $notifications } from '@/store/notifications'
 import { $desktopOnboarding } from '@/store/onboarding'
@@ -298,7 +299,9 @@ describe('BootFailureOverlay', () => {
       expect(screen.getByText(/reinstall the app to restore/i)).toBeTruthy()
 
       fireEvent.click(screen.getByRole('button', { name: /reinstall the app/i }))
-      await waitFor(() => expect(openExternal).toHaveBeenCalledWith('https://hermes-agent.nousresearch.com/docs/user-guide/desktop'))
+      await waitFor(() =>
+        expect(openExternal).toHaveBeenCalledWith('https://hermes-agent.nousresearch.com/docs/user-guide/desktop')
+      )
     } finally {
       restore()
     }
@@ -312,29 +315,35 @@ describe('BootFailureOverlay', () => {
       value: { ...window.location, reload }
     })
 
-    const repair = failure === 'unavailable' ? undefined : vi.fn(async () => {
-      if (failure === 'thrown') {
-        throw new Error('installer permission denied')
-      }
+    const repair =
+      failure === 'unavailable'
+        ? undefined
+        : vi.fn(async () => {
+            if (failure === 'thrown') {
+              throw new Error('installer permission denied')
+            }
 
-      return { ok: false, error: 'bundled-immutable' }
-    })
+            return { ok: false, error: 'bundled-immutable' }
+          })
 
-    const restore = stubDesktop(
-      { mode: 'local' },
-      { repairBootstrap: repair }
-    )
+    const restore = stubDesktop({ mode: 'local' }, { repairBootstrap: repair })
 
     try {
       render(<BootFailureOverlay />)
       fireEvent.click(await screen.findByRole('button', { name: /repair install/i }))
 
-      const message = failure === 'thrown' ? 'installer permission denied'
-        : failure === 'refused' ? 'bundled-immutable' : 'Desktop IPC bridge is unavailable.'
+      const message =
+        failure === 'thrown'
+          ? 'installer permission denied'
+          : failure === 'refused'
+            ? 'bundled-immutable'
+            : en.boot.errors.ipcBridgeUnavailable
 
-      await waitFor(() => expect($notifications.get()).toEqual(expect.arrayContaining([
-        expect.objectContaining({ kind: 'error', message })
-      ])))
+      await waitFor(() =>
+        expect($notifications.get()).toEqual(
+          expect.arrayContaining([expect.objectContaining({ kind: 'error', message })])
+        )
+      )
       expect(reload).not.toHaveBeenCalled()
       expect(screen.getByRole('button', { name: /repair install/i }).hasAttribute('disabled')).toBe(false)
     } finally {
@@ -352,10 +361,7 @@ describe('BootFailureOverlay', () => {
       value: { ...window.location, reload }
     })
 
-    const restore = stubDesktop(
-      { mode: 'local' },
-      { repairBootstrap: vi.fn().mockResolvedValue({ ok: true }) }
-    )
+    const restore = stubDesktop({ mode: 'local' }, { repairBootstrap: vi.fn().mockResolvedValue({ ok: true }) })
 
     try {
       render(<BootFailureOverlay />)

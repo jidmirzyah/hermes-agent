@@ -146,6 +146,7 @@ def build_stamp(
     source: str = "local",
     distribution: str | None = None,
     runtime_dir: str | None = None,
+    channel_request: dict | None = None,
 ) -> dict:
     """Build a stamp dict from explicit args, filling gaps from git/env.
 
@@ -172,6 +173,20 @@ def build_stamp(
     if base_version is None:
         base_version = _base_version
 
+    if channel_request is not None:
+        from scripts.bundles.desktop_prepare import git, require_source, validate_channel_request
+        channel_request = validate_channel_request(channel_request)
+        if os.environ.get("HERMES_BUILD_COMMIT") or os.environ.get("HERMES_PAYLOAD_TAG"):
+            raise ValueError("channel request conflicts with commit-build or tag identity")
+        if os.environ.get("HERMES_DESKTOP_VARIANT") != "bundled" or update_mechanism not in {"electron-updater", "app-installer"}:
+            raise ValueError("channel builds require a bundled native update owner")
+        if _run_git("rev-parse", "HEAD", cwd=_REPO_ROOT) != channel_request["commit"] or commit not in (None, channel_request["commit"]):
+            raise ValueError("channel build identity does not match checkout HEAD")
+        require_source(_REPO_ROOT, channel_request["commit"])
+        commit, source, base_version = channel_request["commit"], "channel-build", channel_request["sourceVersion"]
+        dirty, distance = False, 0
+        commit_date = int(git(_REPO_ROOT, "log", "-1", "--format=%ct", "HEAD"))
+
     commit_build = os.environ.get("HERMES_BUILD_COMMIT")
     if commit_build:
         from scripts.releases.commit_build import require_commit
@@ -195,11 +210,11 @@ def build_stamp(
         source = "fallback"
 
     # Branch: explicit > CI env > git
-    if commit_build:
+    if commit_build or channel_request is not None:
         branch = None
     elif branch is None:
         branch = _resolve_branch_from_env()
-    if branch is None and not commit_build:
+    if branch is None and not commit_build and channel_request is None:
         branch = _resolve_branch_from_git()
 
     # Dirty: explicit > git
@@ -245,7 +260,7 @@ def build_stamp(
     tag = os.environ.get("HERMES_PAYLOAD_TAG") or None
 
     _stable_tag = re.compile(r"^v(0|[1-9]\d{0,2})\.\d+\.\d+$")
-    if payload != "bootstrap" and not commit_build and not (
+    if payload != "bootstrap" and not commit_build and channel_request is None and not (
         tag and (_stable_tag.match(tag) or update_channel.is_canary_tag(tag))
     ):
         raise SystemExit(
@@ -269,6 +284,9 @@ def build_stamp(
         "payload": payload,
         "tag": tag if payload != "bootstrap" else None,
     }
+    if channel_request is not None:
+        stamp["channelBuild"] = channel_request
+        stamp["displayVersion"] = f'{base_version} ({channel_request["channel"]} #{channel_request["sequence"]}, {commit[:7]})'
     if runtime_dir is not None:
         stamp["runtimeDir"] = runtime_dir
     return stamp
@@ -286,6 +304,7 @@ def write_stamp(output: str | Path, **kwargs) -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Write install-stamp.json")
     parser.add_argument("--output", "-o", required=True, help="Output file path")
+    parser.add_argument("--channel-request", type=Path, help="Immutable admitted channel request JSON")
     parser.add_argument("--commit", default=None, help="Override commit SHA")
     parser.add_argument("--branch", default=None, help="Override branch name")
     parser.add_argument("--dirty", action="store_true", default=None, help="Mark as dirty")
@@ -328,6 +347,7 @@ def main() -> int:
         source=args.source,
         distribution=args.distribution,
         runtime_dir=args.runtime_dir,
+        channel_request=json.loads(args.channel_request.read_text(encoding="utf-8-sig")) if args.channel_request else None,
     )
 
     commit_short = stamp["commit"][:12]

@@ -347,7 +347,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
         return _err("kanban: --body and --body-file are mutually exclusive", 2)
     if body_file is not None:
         try:
-            body = sys.stdin.read() if body_file == "-" else Path(body_file).read_text(encoding="utf-8")
+            body = sys.stdin.read() if body_file == "-" else Path(body_file).read_text(encoding="utf-8-sig")
         except OSError as exc:
             return _err(f"kanban: --body-file: {exc}", 2)
 

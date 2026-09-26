@@ -6,7 +6,7 @@ description: "配置 Hermes Agent — config.yaml、providers、模型、API 密
 
 # 配置
 
-本页的 Python 依赖命令使用 [PM 准备的源码环境](/reference/package-management#developer-workflow)。
+本页的 Python 依赖命令使用 [PM 准备的源码环境](../reference/package-management.md#developer-workflow)。
 依赖变更后，请重新激活该 checkout 并重启 Hermes。
 
 所有设置均存储在 `~/.hermes/` 目录中，便于访问。

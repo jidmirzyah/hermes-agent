@@ -454,13 +454,13 @@ def test_exec_never_persists_a_checkout_internal_path_hit(tmp_path, xdg_home, mo
     root = _make_project(tmp_path)
     venv_script = root / "venv" / "bin" / "hermes"
     venv_script.parent.mkdir(parents=True)
-    venv_script.write_text("#!/bin/bash\nexec true\n", encoding="utf-8")
+    venv_script.write_text("#!/usr/bin/env bash\nexec true\n", encoding="utf-8")
     venv_script.chmod(0o755)
 
     known_wrapper = tmp_path / "path-home" / ".local" / "bin" / "hermes"
     known_wrapper.parent.mkdir(parents=True)
     known_wrapper.write_text(
-        f'#!/bin/bash\nexec {root / "venv" / "bin" / "python"} {root / "hermes"} "$@"\n',
+        f'#!/usr/bin/env bash\nexec {root / "venv" / "bin" / "python"} {root / "hermes"} "$@"\n',
         encoding="utf-8",
     )
     known_wrapper.chmod(0o755)
@@ -511,7 +511,7 @@ def test_exec_finds_known_wrapper_when_resolver_has_no_candidate(
     known_wrapper = tmp_path / "cold-home" / ".local" / "bin" / "hermes"
     known_wrapper.parent.mkdir(parents=True)
     known_wrapper.write_text(
-        f'#!/bin/bash\nexec {root / "venv" / "bin" / "python"} {root / "hermes"} "$@"\n',
+        f'#!/usr/bin/env bash\nexec {root / "venv" / "bin" / "python"} {root / "hermes"} "$@"\n',
         encoding="utf-8",
     )
     known_wrapper.chmod(0o755)

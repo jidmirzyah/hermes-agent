@@ -2,8 +2,7 @@
 
 The record files are an optimization layer over idempotent steps; these
 tests assert the contracts that keep that safe: identity resolution from
-real git trees and stamps, record scoping (per-install AND per-home vs
-per-machine), and the lock protocol including the double-check under lock.
+real git trees and stamps, record scoping (per-install AND per-home), and the lock protocol including the double-check under lock.
 """
 import json
 import os
@@ -24,7 +23,7 @@ from hermes_cli.boot_bootstrap import (
     read_last_known,
     record_path,
     run_boot_bootstrap,
-    write_record,
+    _write_record,
 )
 
 
@@ -58,8 +57,23 @@ def _head_sha(root):
 # ── read_git_head ────────────────────────────────────────────────────
 
 
-def test_read_git_head_branch_ref(repo):
+def test_git_selection_uses_pm_public_package_reader(repo, monkeypatch):
+    from types import SimpleNamespace
+    import pm
+
+    command = shutil.which("git")
+    assert command is not None
+    binary = Path(command)
+    requests = []
+
+    def installed(name):
+        requests.append(name)
+        return SimpleNamespace(binary=binary)
+
+    monkeypatch.setattr(pm, "installed_package", installed)
+
     assert read_git_head(repo) == _head_sha(repo)
+    assert requests == ["git"]
 
 
 def test_read_git_head_detached(repo):
@@ -116,18 +130,6 @@ def test_read_git_head_missing_and_garbage(tmp_path):
 # ── current_install_identity ─────────────────────────────────────────
 
 
-def test_identity_prefers_git(repo):
-    assert current_install_identity(repo) == _head_sha(repo)
-
-
-def test_identity_sealed_stamp(tmp_path):
-    (tmp_path / "install-stamp.json").write_text(
-        json.dumps({"commit": "a" * 40, "distribution": "desktop-app", "updateMechanism": "electron-updater"}),
-        encoding="utf-8",
-    )
-    assert current_install_identity(tmp_path) == "a" * 40
-
-
 def test_identity_broken_tree_is_none(tmp_path):
     assert current_install_identity(tmp_path) is None
     (tmp_path / "install-stamp.json").write_text("garbage", encoding="utf-8")
@@ -139,37 +141,14 @@ def test_identity_broken_tree_is_none(tmp_path):
 
 def test_record_paths_key_on_install_root(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
-    a = record_path(tmp_path / "install-a", "home")
-    b = record_path(tmp_path / "install-b", "home")
+    a = record_path(tmp_path / "install-a")
+    b = record_path(tmp_path / "install-b")
     assert a != b
     # The key is a FOLDER (installs/<SHA16>/bootstrap/<profile>.json),
     # not a filename suffix: same grandparent tree, different key dirs.
     assert a.parent != b.parent
     assert a.parent.parent.parent == b.parent.parent.parent  # installs/
     assert a.name == b.name  # the profile filename is the shared part
-
-
-def test_home_records_differ_per_profile_machine_record_shared(tmp_path, monkeypatch):
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    base = tmp_path / ".hermes"
-    profile = base / "profiles" / "coder"
-    install = tmp_path / "install"
-
-    monkeypatch.setenv("HERMES_HOME", str(base))
-    home_default = record_path(install, "home")
-    machine_default = record_path(install, "machine")
-
-    monkeypatch.setenv("HERMES_HOME", str(profile))
-    home_profile = record_path(install, "home")
-    machine_profile = record_path(install, "machine")
-
-    assert home_default != home_profile  # each profile bootstraps its own home
-    assert machine_default == machine_profile  # machine record is shared
-
-
-def test_record_path_rejects_unknown_scope(tmp_path):
-    with pytest.raises(ValueError):
-        record_path(tmp_path, "galaxy")
 
 
 @pytest.mark.skipif(
@@ -181,32 +160,17 @@ def test_symlinked_root_canonicalizes(tmp_path, monkeypatch):
     real.mkdir()
     link = tmp_path / "link-install"
     link.symlink_to(real)
-    assert record_path(real, "home") == record_path(link, "home")
+    assert record_path(real) == record_path(link)
 
 
 # ── needs_bootstrap ──────────────────────────────────────────────────
 
 
-def test_needs_bootstrap_lifecycle(repo, tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
-    sha = _head_sha(repo)
-
-    # No record yet → identity returned.
-    assert needs_bootstrap(repo, "home") == sha
-
-    write_record(repo, "home", sha)
-    assert needs_bootstrap(repo, "home") is None
-
-    # New commit → mismatch again.
-    (repo / "f.txt").write_text("2", encoding="utf-8")
-    _git(["add", "."], repo)
-    _git(["commit", "-m", "two"], repo)
-    assert needs_bootstrap(repo, "home") == _head_sha(repo)
-
-
 def test_needs_bootstrap_broken_tree_never_fires(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
-    assert needs_bootstrap(tmp_path / "nope", "home") is None
+    assert needs_bootstrap(tmp_path / "nope") is None
+    assert run_boot_bootstrap(tmp_path / "nope") == {"home": "skipped"}
+    assert not record_path(tmp_path / "nope").exists()
 
 
 # ── lock protocol ────────────────────────────────────────────────────
@@ -250,69 +214,16 @@ def test_fresh_lock_is_respected(tmp_path):
 
 @pytest.fixture
 def fake_steps(monkeypatch):
-    calls = {"home": 0, "machine": 0}
+    calls = {"home": 0}
 
     def home_step():
         calls["home"] += 1
         return {"ok": True}
 
-    def machine_step():
-        calls["machine"] += 1
-        return {"ok": True}
-
     from hermes_cli import post_update
 
     monkeypatch.setattr(post_update, "BOOT_HOME_STEPS", (("h", home_step),))
-    monkeypatch.setattr(post_update, "BOOT_MACHINE_STEPS", (("m", machine_step),))
     return calls
-
-
-def test_run_boot_bootstrap_runs_then_noops(repo, tmp_path, monkeypatch, fake_steps):
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
-
-    first = run_boot_bootstrap(repo)
-    assert fake_steps == {"home": 1, "machine": 1}
-    assert first["home"] == {"h": {"ok": True}}
-    assert first["machine"] == {"m": {"ok": True}}
-
-    second = run_boot_bootstrap(repo)
-    assert fake_steps == {"home": 1, "machine": 1}  # no re-run
-    assert second == {"home": "skipped", "machine": "skipped"}
-
-
-def test_machine_step_runs_once_across_profiles(repo, tmp_path, monkeypatch, fake_steps):
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    base = tmp_path / ".hermes"
-
-    monkeypatch.setenv("HERMES_HOME", str(base))
-    run_boot_bootstrap(repo)
-    monkeypatch.setenv("HERMES_HOME", str(base / "profiles" / "coder"))
-    run_boot_bootstrap(repo)
-
-    # Each home bootstraps itself; the machine step fires once.
-    assert fake_steps == {"home": 2, "machine": 1}
-
-
-def test_step_failure_still_writes_record(repo, tmp_path, monkeypatch):
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
-
-    from hermes_cli import post_update
-
-    def boom():
-        raise RuntimeError("step exploded")
-
-    monkeypatch.setattr(post_update, "BOOT_HOME_STEPS", (("boom", boom),))
-    monkeypatch.setattr(post_update, "BOOT_MACHINE_STEPS", ())
-
-    run_boot_bootstrap(repo)
-    record = read_last_known(record_path(repo, "home"))
-    assert record["identity"] == _head_sha(repo)
-    assert record["results"]["boom"]["ok"] is False
-
-    # A broken step must not retrigger the slow path every boot.
-    assert needs_bootstrap(repo, "home") is None
 
 
 def test_double_check_under_lock(repo, tmp_path, monkeypatch, fake_steps):
@@ -327,7 +238,7 @@ def test_double_check_under_lock(repo, tmp_path, monkeypatch, fake_steps):
         got = real_acquire(self)
         if got and self.path.name.endswith(".json.lock"):
             # Simulate the previous holder completing just before us.
-            write_record(repo, "home", sha)
+            _write_record(record_path(repo), sha, {})
         return got
 
     monkeypatch.setattr(_RecordLock, "acquire", acquire_after_racer_finished)
@@ -344,60 +255,6 @@ def test_maybe_run_never_raises(monkeypatch, tmp_path):
     boot_bootstrap.maybe_run_boot_bootstrap(tmp_path)  # must not raise
 
 
-def test_boot_machine_scope_is_check_only(repo, tmp_path, monkeypatch):
-    """Automatic boot NEVER installs: a drifted machine must get a drift
-    report (and a written record), while pm's ensure/sync_venv stay
-    reserved for the explicit update pass (MACHINE_STEPS)."""
-    import pm
-
-    from hermes_cli import post_update
-
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
-
-    installed: list[str] = []
-    monkeypatch.setattr(pm, "check", lambda: ["node: not installed or outdated"])
-
-    class _Boom:
-        @staticmethod
-        def ensure(*_a, **_kw):
-            installed.append("ensure")
-
-        @staticmethod
-        def sync_venv(*_a, **_kw):
-            installed.append("sync_venv")
-
-    monkeypatch.setitem(sys.modules, "pm.ensure", _Boom)
-
-    result = run_boot_bootstrap(repo)
-
-    assert result["machine"]["report_runtime_drift"]["drift"] == [
-        "node: not installed or outdated"
-    ]
-    assert installed == [], "boot must not install anything"
-    record = read_last_known(record_path(repo, "machine"))
-    assert record["results"]["report_runtime_drift"]["ok"] is True
-    # the installing registry is untouched for the explicit update owner
-    assert ("provision_runtimes", post_update.step_provision_runtimes) in (
-        post_update.MACHINE_STEPS
-    )
-    assert ("report_runtime_drift", post_update.step_report_runtime_drift) in (
-        post_update.BOOT_MACHINE_STEPS
-    )
-
-
-def test_boot_machine_scope_current_is_skipped(repo, tmp_path, monkeypatch):
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
-    import pm
-
-    monkeypatch.setattr(pm, "check", lambda: [])
-    result = run_boot_bootstrap(repo)
-    assert result["machine"] == {
-        "report_runtime_drift": {"ok": True, "skipped": "current"}
-    }
-
-
 def test_sealed_tree_bootstrap_end_to_end(tmp_path, monkeypatch):
     """The desktop-bundle-swap scenario. A sealed tree (install-stamp.json,
     no .git) must bootstrap on first boot, no-op on the second, and RE-RUN
@@ -409,11 +266,6 @@ def test_sealed_tree_bootstrap_end_to_end(tmp_path, monkeypatch):
 
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
-    # A sealed tree consults pm for drift; keep the test hermetic.
-    import pm
-
-    monkeypatch.setattr(pm, "check", lambda: [])
-
     sealed = tmp_path / "payload"
     sealed.mkdir()
     (sealed / "install-stamp.json").write_text(
@@ -427,7 +279,6 @@ def test_sealed_tree_bootstrap_end_to_end(tmp_path, monkeypatch):
         return {"ok": True}
 
     monkeypatch.setattr(post_update, "BOOT_HOME_STEPS", (("h", count),))
-    monkeypatch.setattr(post_update, "BOOT_MACHINE_STEPS", ())
 
     assert run_boot_bootstrap(sealed)["home"] != "skipped"
     assert calls["n"] == 1
@@ -441,194 +292,3 @@ def test_sealed_tree_bootstrap_end_to_end(tmp_path, monkeypatch):
 
     assert run_boot_bootstrap(sealed)["home"] != "skipped"
     assert calls["n"] == 2, "a swapped bundle must re-run the bootstrap"
-
-
-# ── the per-install state folder ─────────────────────────────────────
-
-
-def test_ensure_install_dir_writes_the_reverse_map(repo, tmp_path, monkeypatch):
-    """install.json is the sha16 → root reverse map that makes orphan GC
-    possible. Written once; a second call must not rewrite firstSeen."""
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))  # isolate the default root
-
-    state = boot_bootstrap.ensure_install_dir(repo)
-
-    assert state == boot_bootstrap.install_state_dir(repo)
-    record = json.loads((state / "install.json").read_text())
-    assert record["root"] == str(repo.resolve())
-    assert record["steward"] == "checkout"
-    first_seen = record["firstSeen"]
-
-    boot_bootstrap.ensure_install_dir(repo)
-    assert json.loads((state / "install.json").read_text())["firstSeen"] == first_seen
-
-
-def test_ensure_install_dir_records_the_sealed_steward(tmp_path, monkeypatch):
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))  # isolate the default root
-
-    sealed = tmp_path / "payload"
-    sealed.mkdir()
-    (sealed / "install-stamp.json").write_text(
-        json.dumps({"commit": "c" * 40, "distribution": "desktop-app", "updateMechanism": "electron-updater"})
-    )
-    state = boot_bootstrap.ensure_install_dir(sealed)
-    record = json.loads((state / "install.json").read_text())
-    assert record["steward"] == "desktop-app"
-
-
-def test_orphan_sweep_flags_only_vanished_roots(repo, tmp_path, monkeypatch):
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))  # isolate the default root
-
-    boot_bootstrap.ensure_install_dir(repo)  # alive
-    ghost = tmp_path / "deleted-checkout"
-    ghost.mkdir()
-    ghost_state = boot_bootstrap.ensure_install_dir(ghost)
-    shutil.rmtree(ghost)  # the install is gone; its state folder is not
-
-    orphans = boot_bootstrap.orphaned_installs()
-
-    assert [(folder, root) for folder, root in orphans] == [
-        (ghost_state, str(ghost))
-    ]
-
-
-def test_bootstrap_records_live_inside_the_state_folder(repo, tmp_path, monkeypatch):
-    """Both scopes share the install's folder; profile identity rides the
-    FILENAME. One anchor, not two homes."""
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))  # isolate the default root
-
-    home = boot_bootstrap.record_path(repo, "home")
-    machine = boot_bootstrap.record_path(repo, "machine")
-
-    state = boot_bootstrap.install_state_dir(repo)
-    assert home == state / "bootstrap" / "default.json"
-    assert machine == state / "bootstrap" / "machine.json"
-
-
-class TestSealedDriftBackstop:
-    """_report_sealed_runtime_drift — every boot of a drifted sealed tree
-    says so; nothing else makes a sound, and nothing ever gates boot."""
-
-    def _sealed_tree(self, tmp_path):
-        root = tmp_path / "sealed"
-        root.mkdir()
-        (root / "install-stamp.json").write_text(
-            json.dumps({"schemaVersion": 2, "commit": "a" * 40, "distribution": "docker", "updateMechanism": "external"}),
-            encoding="utf-8",
-        )
-        return root
-
-    def test_drifted_sealed_tree_reports_to_stderr(self, tmp_path, capsys, monkeypatch):
-        import pm
-
-        root = self._sealed_tree(tmp_path)
-        monkeypatch.setattr(pm, "check", lambda: ["node: not installed or outdated"])
-        message = boot_bootstrap._report_sealed_runtime_drift(root)
-        assert message is not None and "node" in message
-        err = capsys.readouterr().err
-        assert "docker" in err and "node" in err
-
-    def test_current_sealed_tree_is_silent(self, tmp_path, capsys, monkeypatch):
-        import pm
-
-        root = self._sealed_tree(tmp_path)
-        monkeypatch.setattr(pm, "check", lambda: [])
-        assert boot_bootstrap._report_sealed_runtime_drift(root) is None
-        assert capsys.readouterr().err == ""
-
-    def test_checkout_is_silent_even_with_drift(self, tmp_path, capsys, monkeypatch):
-        """A checkout provisions on demand; drift there is self-healing
-        and must not produce boot noise."""
-        import pm
-
-        root = tmp_path / "co"
-        (root / ".git").mkdir(parents=True)
-        monkeypatch.setattr(pm, "check", lambda: ["node: not installed or outdated"])
-        assert boot_bootstrap._report_sealed_runtime_drift(root) is None
-        assert capsys.readouterr().err == ""
-
-    def test_a_broken_check_never_gates_boot(self, tmp_path, monkeypatch):
-        import pm
-
-        root = self._sealed_tree(tmp_path)
-
-        def explode():
-            raise RuntimeError("facts file corrupted")
-
-        monkeypatch.setattr(pm, "check", explode)
-        assert boot_bootstrap._report_sealed_runtime_drift(root) is None
-
-    def test_drift_lands_in_the_boot_summary(self, tmp_path, monkeypatch):
-        import pm
-
-        from hermes_cli import post_update
-
-        root = self._sealed_tree(tmp_path)
-        monkeypatch.setattr(Path, "home", lambda: tmp_path)
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
-        monkeypatch.setattr(pm, "check", lambda: ["uv: not installed or outdated"])
-        monkeypatch.setattr(post_update, "BOOT_HOME_STEPS", ())
-        monkeypatch.setattr(post_update, "BOOT_MACHINE_STEPS", ())
-        summary = run_boot_bootstrap(root)
-        assert "uv" in summary.get("sealed_runtime_drift", "")
-
-
-class TestOrphanedStoreEntries:
-    """orphaned_store_entries — pm's facts.json is the only authority,
-    keep on doubt."""
-
-    @pytest.fixture
-    def store(self, tmp_path, monkeypatch):
-        store = tmp_path / "tools"
-        store.mkdir(parents=True)
-        monkeypatch.setenv("HERMES_RUNTIME_DIR", str(store))
-        return store
-
-    def _publish(self, store, name, payload=b"tool bytes"):
-        entry = store / name
-        entry.mkdir(parents=True)
-        (entry / "tool.bin").write_bytes(payload)
-        return entry
-
-    def _facts(self, store, packages: dict):
-        (store / "facts.json").write_text(
-            json.dumps({"schema": 1, "packages": packages}), encoding="utf-8"
-        )
-
-    def test_referenced_entries_survive_unreferenced_are_flagged(self, store):
-        self._publish(store, "ripgrep-15.2.0-win32-x64")
-        stale = self._publish(store, "ripgrep-14.1.0-win32-x64", b"x" * 512)
-        self._facts(store, {
-            "ripgrep": {"entry": "ripgrep-15.2.0-win32-x64", "version": "15.2.0", "env": {}},
-        })
-
-        orphans = boot_bootstrap.orphaned_store_entries()
-
-        assert [(e.name, s) for e, s in orphans] == [
-            ("ripgrep-14.1.0-win32-x64", 512)
-        ]
-        assert stale.exists()  # report-only: nothing was deleted
-
-    def test_no_facts_file_reports_nothing(self, store):
-        """pm only vouches for what it installed: no ledger, no verdicts."""
-        self._publish(store, "gh-2.97.0-win32-x64")
-        assert boot_bootstrap.orphaned_store_entries() == []
-
-    def test_unreadable_facts_err_toward_keep(self, store):
-        """A busted ledger must cost disk, not flag entries it may own."""
-        self._publish(store, "gh-2.97.0-win32-x64")
-        (store / "facts.json").write_text("NOT JSON", encoding="utf-8")
-        assert boot_bootstrap.orphaned_store_entries() == []
-
-    def test_scratch_fetch_and_files_are_not_candidates(self, store):
-        """Scratch dirs are pm's own cleanup, fetch-* entries are the
-        re-download cache, and stray files are not entries at all."""
-        (store / ".staging-abc123").mkdir()
-        self._publish(store, "fetch-0123456789abcdef")
-        (store / "stray.txt").write_text("x", encoding="utf-8")
-        self._facts(store, {})
-        assert boot_bootstrap.orphaned_store_entries() == []

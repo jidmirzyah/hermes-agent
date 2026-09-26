@@ -652,7 +652,7 @@ class TestPidExistsZombieProbe:
         monkeypatch.setattr(psutil.Process, "status", spy)
         return calls
 
-    @pytest.mark.windows_only
+    @pytest.mark.platforms("windows")
     def test_windows_skips_zombie_status_probe(self, monkeypatch):
         # Faking os.name on POSIX proves nothing about the cost on the real host; the wine2e
         # runner receipt (red on main, green on the fix) is the live repro for this test.
@@ -660,7 +660,7 @@ class TestPidExistsZombieProbe:
         assert status._pid_exists(os.getpid()) is True
         assert calls == []
 
-    @pytest.mark.linux_only
+    @pytest.mark.platforms("linux")
     def test_posix_still_probes_zombie_status(self, monkeypatch):
         # Control: on POSIX a zombie still answers pid_exists(), so the probe must survive.
         calls = self._spy_status(monkeypatch)

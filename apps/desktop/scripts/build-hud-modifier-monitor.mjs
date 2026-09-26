@@ -22,7 +22,8 @@ export function hudModifierBinaryRelativePath(platform = process.platform, arch 
 }
 
 export function buildHudModifierMonitor({
-  distDir = resolve(root, 'dist'),
+  source = resolve(root, '../..'),
+  distDir = resolve(source, 'apps/desktop/dist'),
   platform = process.platform,
   arch = process.arch
 } = {}) {
@@ -36,7 +37,7 @@ export function buildHudModifierMonitor({
   if (!['darwin', 'linux', 'win32'].includes(platform)) return null
   const output = resolve(distDir, hudModifierBinaryRelativePath(platform, arch))
   const staging = `${output}.${process.pid}.tmp${platform === 'win32' ? '.exe' : ''}`
-  const source = name => resolve(root, 'electron/native', name)
+  const nativeSource = name => resolve(source, 'apps/desktop/electron/native', name)
   mkdirSync(dirname(output), { recursive: true })
   try {
     if (platform === 'darwin') {
@@ -60,7 +61,7 @@ export function buildHudModifierMonitor({
           'Cocoa',
           '-framework',
           'CoreGraphics',
-          source('hud-modifier-monitor.m'),
+          nativeSource('hud-modifier-monitor.m'),
           '-o',
           staging
         ],
@@ -80,7 +81,7 @@ export function buildHudModifierMonitor({
           '-O2',
           '-Wall',
           '-Wextra',
-          source('hud-modifier-monitor-x11.c'),
+          nativeSource('hud-modifier-monitor-x11.c'),
           '-o',
           staging,
           '-lX11', '-lXi'

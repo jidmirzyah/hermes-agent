@@ -68,15 +68,11 @@ export function buildPathExtCandidates(pathext: string | undefined, isWindows: b
  * @returns {string[]} updater argv, e.g. ['--update', '--branch', 'main'].
  */
 export interface BootstrapRecoverySignals {
-  hasBootstrapMarker: boolean
-  hasVenvHermes: boolean
-  hasVenvPython: boolean
+  runtimeUsable: boolean
 }
 
 export function chooseUpdaterArgs(signals: BootstrapRecoverySignals, branch: string): string[] {
-  const canRunUpdater = signals.hasVenvHermes && signals.hasVenvPython
-
-  return canRunUpdater ? ['--update', '--branch', branch] : ['--repair', '--branch', branch]
+  return signals.runtimeUsable ? ['--update', '--branch', branch] : ['--repair', '--branch', branch]
 }
 
 export interface ResolveVenvHermesCommandDeps {
@@ -84,7 +80,7 @@ export interface ResolveVenvHermesCommandDeps {
   isCommandScript: (command: string) => boolean
   fileExists: (filePath: string) => boolean
   directoryExists: (filePath: string) => boolean
-  canImportHermesCli: (python: string, opts?: { env?: Record<string, string>; cwd?: string }) => boolean
+  canImportHermesCli: (python: string, opts?: { env?: Record<string, string>; cwd?: string }) => Promise<boolean>
   getVenvPython: (venvRoot: string) => string
   buildDesktopBackendEnv: () => Record<string, string>
   resolvePath: (...segments: string[]) => string
@@ -167,7 +163,7 @@ export async function resolveVenvHermesCommand(
 
   // Probe with the same semantics the real spawn uses: venv interpreter,
   // cwd at the checkout root, no PYTHONPATH.
-  if (!canImportHermesCli(python, { cwd: directoryExists(root) ? root : undefined })) {
+  if (!(await canImportHermesCli(python, { cwd: directoryExists(root) ? root : undefined }))) {
     rememberLog?.(
       `Ignoring venv Hermes at ${python}: runtime import probe failed (broken/partial venv); falling through to bootstrap.`
     )

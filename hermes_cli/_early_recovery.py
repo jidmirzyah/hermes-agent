@@ -181,7 +181,7 @@ def recover_if_needed(project_root: Path | None = None, argv: list[str] | None =
     args = command_argv(sys.argv[1:] if argv is None else argv)
     if not explicit and args[:1] == ["pm"]:
         return False  # PM's command boundary owns the explicit repair.
-    from hermes_cli.runtime_paths import install_state_dir, runtime_facts_path, selected_venv, site_packages
+    from pm.environments import install_state_dir, runtime_facts_path, selected_venv, site_packages
 
     missing_marker = install_state_dir(root) / ".repair-incomplete"
     marker_paths = (root / ".update-incomplete", root / ".lazy-refresh-incomplete", missing_marker)
@@ -249,7 +249,7 @@ _EARLY_CORE_INSTALL_MAX_ATTEMPTS = 3
 
 def _claim_recovery_lock(root: Path) -> int | None:
     """Hold a kernel lock in writable state; process exit releases it."""
-    from hermes_cli.runtime_paths import install_state_dir
+    from pm.environments import install_state_dir
     from hermes_cli.runtime_state import _lock
 
     state = install_state_dir(root)

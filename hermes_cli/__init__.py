@@ -3,7 +3,7 @@
 import os
 import sys
 
-__version__ = "0.21.4"
+__version__ = "1.0.0"
 __release_date__ = "2026.9.21"
 
 
@@ -43,3 +43,4 @@ def _ensure_utf8():
 
 
 _ensure_utf8()
+__release_rev_count__ = 40643

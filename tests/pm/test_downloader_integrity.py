@@ -8,6 +8,7 @@ from threading import Thread
 import pytest
 
 from pm.downloader import Download, DownloadError, Source
+from tests.pm._fixtures import threaded_server
 from tests.pm._range_server import dl_server  # noqa: F401 — fixture
 
 
@@ -47,27 +48,17 @@ def test_invalid_worker_response_cannot_publish(reply, tmp_path):
         def log_message(self, *args):
             pass
 
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    server.daemon_threads = True
-    thread = Thread(target=server.serve_forever, daemon=True)
-    thread.start()
     destination = tmp_path / "model.gguf"
-    try:
+    with threaded_server(Handler) as server:
         source = Source(f"http://127.0.0.1:{server.server_port}/model", destination)
         with pytest.raises(DownloadError):
             Download([source], partials_dir=tmp_path / "partials", connections=1).run()
         assert not destination.exists()
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
 
 
 @pytest.mark.parametrize("previous", [None, b"previous complete model"])
-def test_failed_cross_volume_publication_keeps_destination_atomic(tmp_path, monkeypatch, previous):
+def test_failed_copy_publication_keeps_destination_atomic(tmp_path, monkeypatch, previous):
     import errno
-    import os
-    from pathlib import Path
     import shutil
 
     part = tmp_path / "partials" / "model.part"
@@ -83,23 +74,12 @@ def test_failed_cross_volume_publication_keeps_destination_atomic(tmp_path, monk
     source = Source("https://example.invalid/model", destination)
     download = Download([source], partials_dir=part.parent)
 
-    original_rename = os.rename
-
-    def cross_device(src, dst, *args, **kwargs):
-        if Path(src) == part:
-            raise OSError(errno.EXDEV, "cross-volume fixture")
-        return original_rename(src, dst, *args, **kwargs)
-
-    def interrupted_copy(src, dst, *args, **kwargs):
-        Path(dst).write_bytes(Path(src).read_bytes()[:4])
-        raise OSError(errno.ENOSPC, "destination full")
 
     def interrupted_stream(src, dst, *args, **kwargs):
         dst.write(src.read(4))
         raise OSError(errno.ENOSPC, "destination full")
 
-    monkeypatch.setattr(os, "rename", cross_device)
-    monkeypatch.setattr(shutil.move, "__defaults__", (interrupted_copy,))
+
     monkeypatch.setattr(shutil, "copyfileobj", interrupted_stream)
     with pytest.raises(OSError, match="destination full"):
         download._finalize(source, part, side)

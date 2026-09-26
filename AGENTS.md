@@ -404,8 +404,8 @@ scripts/run_tests.sh -v --tb=long                       # pytest flags pass thro
 
 ### Don't fake the host OS
 
-Behaviour that genuinely differs per host is tested ON that host with `@pytest.mark.linux_only`
-/ `macos_only` / `windows_only`, never by patching `sys.platform`. Host-independent things stay
+Behaviour that genuinely differs per host is tested ON that host with `@pytest.mark.platforms("linux")`
+/ `platforms("macos")` / `platforms("windows")`, never by patching `sys.platform`. Host-independent things stay
 unmarked: pure functions that take the platform as data (`hidden_windows_child_options(opts,
 is_windows=True)`) and declaration/packaging invariants ("pyproject declares `tzdata` with a
 `sys_platform == 'win32'` marker"). Setting a module-level `IS_WINDOWS` flag and calling

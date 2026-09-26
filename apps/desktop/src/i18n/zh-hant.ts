@@ -163,7 +163,8 @@ export const zhHant = defineLocale({
   },
 
   notifications: {
-    sharedProfileWarning: '另一個 Hermes 安裝實例正在使用此設定檔。兩個實例共用此設定檔的設定和資料，因此變更可能發生衝突。你可以繼續使用，也可以在變更前關閉另一個實例。',
+    sharedProfileWarning:
+      '另一個 Hermes 安裝實例正在使用此設定檔。兩個實例共用此設定檔的設定和資料，因此變更可能發生衝突。你可以繼續使用，也可以在變更前關閉另一個實例。',
     region: '通知',
     hide: '隱藏',
     show: '顯示',
@@ -975,7 +976,7 @@ export const zhHant = defineLocale({
       driverHealth: '驅動程式健康狀態'
     },
     about: {
-      updates: '更新',
+      updates: '更新'
     },
     config: {
       minimizeToTrayTitle: '最小化至系統匣',
@@ -1292,6 +1293,9 @@ export const zhHant = defineLocale({
       downloaded: '已下載',
       downloadAction: size => `下載 · ${size}`,
       downloadProgress: (done, total) => `${done} / ${total}`,
+      downloadStatusRunning: '下載中',
+      downloadSpeed: rate => `${rate}`,
+      downloadEta: time => `剩餘約 ${time}`,
       downloadPausedLabel: '已暫停',
       downloadPauseAction: '暫停',
       downloadResumeAction: '繼續',
@@ -1305,7 +1309,7 @@ export const zhHant = defineLocale({
       updateAction: '更新引擎',
       updating: '正在更新引擎…',
       upToDateTitle: '引擎已是最新',
-      upToDateDetail: (tag, backend) => `正在執行 llama.cpp ${tag}（${backend}）——已設定的組建。`,
+      upToDateDetail: (tag, backend) => `正在執行 llama.cpp ${tag}（${backend})。`,
       activeDetail: '新對話使用此模型——傳送首條訊息時載入',
       activeNotLoaded: '首條訊息時載入',
       loadedPill: '已載入',
@@ -2713,7 +2717,8 @@ export const zhHant = defineLocale({
   updates: {
     channels: { stable: '穩定版', canary: '預覽版' },
     bundleSwapPending: '重新啟動以完成更新',
-    bundleSwapPendingDesc: '更新後的應用程式已安裝完成，只需重新啟動 Hermes 即可載入新版本。聊天記錄和設定不會受到影響。',
+    bundleSwapPendingDesc:
+      '更新後的應用程式已安裝完成，只需重新啟動 Hermes 即可載入新版本。聊天記錄和設定不會受到影響。',
     bundleSwapPendingAction: '重新啟動 Hermes',
     stages: {
       idle: '準備中…',

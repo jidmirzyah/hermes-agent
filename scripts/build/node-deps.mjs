@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-import { execFileSync } from 'node:child_process'
-import { existsSync, readFileSync, realpathSync } from 'node:fs'
+import { execFileSync, spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
+import { existsSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { delimiter, dirname, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -15,10 +16,14 @@ export function npmCommand({ env = process.env } = {}) {
       const bin = join(dir, name)
       if (!existsSync(bin)) continue
       const prefix = dirname(realpathSync(bin))
+      const lib = join(prefix, '../lib')
       candidates.push(
         join(prefix, 'node_modules/npm/bin/npm-cli.js'),
         join(prefix, '../lib/node_modules/npm/bin/npm-cli.js'),
-        join(prefix, '../lib/npm/bin/npm-cli.js'),
+        // Nix packages use lib/npm or a versioned lib/npm* directory.
+        // Discover the installed JS entrypoint, never parse/execute its shell wrapper.
+        ...(existsSync(lib) ? readdirSync(lib).filter(name => name.startsWith('npm')).sort()
+          .map(name => join(lib, name, 'bin/npm-cli.js')) : []),
         realpathSync(bin),
       )
     }
@@ -28,8 +33,20 @@ export function npmCommand({ env = process.env } = {}) {
   return [process.execPath, cli]
 }
 
+function completedInstallMatches({ source, receipt, hiddenLock, key, nativeKey }) {
+  if (!existsSync(receipt) || !existsSync(hiddenLock)) return false
+  const installed = readFileSync(hiddenLock)
+  const expected = `${key}\n${createHash('sha256').update(installed).digest('hex')}\n`
+  if (nativeKey !== undefined) {
+    const nativeReceipt = `${receipt}.native-toolchain`
+    if (!existsSync(nativeReceipt) || readFileSync(nativeReceipt, 'utf8') !== `${expected}${nativeKey}\n`) return false
+  }
+  return readFileSync(receipt, 'utf8') === expected && Object.keys(JSON.parse(installed).packages)
+    .every(path => existsSync(join(source, path)))
+}
+
 /** Install the full requested workspace union in one strict, locked operation. */
-export function prepareNodeDependencies({ source, workspaces, env = process.env }) {
+export function prepareNodeDependencies({ source, workspaces, env = process.env, reuse = false, install = true, nativeToolchain }) {
   source = resolve(source)
   if (!Array.isArray(workspaces) || workspaces.length === 0) {
     throw new Error('Select at least one workspace; implicit all-workspace installation is not allowed')
@@ -45,7 +62,7 @@ export function prepareNodeDependencies({ source, workspaces, env = process.env 
       throw new Error(`Unknown or missing locked workspace: ${workspace}`)
     }
     return path
-  }))]
+  }))].sort()
   const [node, npm] = npmCommand({ env })
   const npmVersion = execFileSync(node, [npm, '--version'], { cwd: source, env, encoding: 'utf8' }).trim()
   const { satisfies } = createRequire(npm)('semver')
@@ -53,17 +70,63 @@ export function prepareNodeDependencies({ source, workspaces, env = process.env 
     const range = manifest.engines?.[name]
     if (range && !satisfies(version, range)) throw new Error(`${name} ${version} violates ${range}`)
   }
-  execFileSync(node, [npm, 'ci', '--no-audit', '--no-fund', '--engine-strict', '--include=dev',
+  const args = ['ci', '--no-audit', '--no-fund', '--engine-strict', '--include=dev',
     '--include=optional', '--include-workspace-root=true',
     ...selected.flatMap(workspace => ['--workspace', workspace]),
-  ], { cwd: source, env, stdio: 'inherit' })
+  ]
+  // This receipt certifies dependency preparation, never compiled product freshness.
+  // Keep it inside the cached tree so a clean npm ci also removes the receipt.
+  const receipt = join(source, 'node_modules/.hermes-node-deps')
+  // Ordinary product builders consume the baseline receipt; preparation also
+  // binds lifecycle outputs to its compiler/SDK identity. On a mismatch npm ci
+  // removes arbitrary package lifecycle outputs, not just known node-pty paths.
+  const nativeReceipt = `${receipt}.native-toolchain`
+  const nativeKey = nativeToolchain === undefined ? undefined : JSON.stringify(nativeToolchain)
+  const hiddenLock = join(source, 'node_modules/.package-lock.json')
+  const inputs = createHash('sha256').update(JSON.stringify({
+    node: process.versions.node, npm: npmVersion, platform: process.platform, arch: process.arch, args,
+    // npm names are case-insensitive; Windows Python uppercases inherited keys.
+    config: Object.entries(env).filter(([key]) => /^npm_config_/i.test(key) && !/^npm_config_(cache|offline|prefer_offline)$/i.test(key))
+      .map(([key, value]) => [key.toLowerCase(), value]).sort(),
+  }))
+  const files = ['package-lock.json', '.npmrc', ...Object.keys(lock.packages)
+    .filter(path => !path.split('/').includes('node_modules'))
+    .map(path => join(path, 'package.json'))].sort()
+  for (const file of files) {
+    inputs.update(file).update('\0').update(existsSync(join(source, file)) ? readFileSync(join(source, file)) : '<missing>').update('\0')
+  }
+  const key = inputs.digest('hex')
+  if (reuse && completedInstallMatches({ source, receipt, hiddenLock, key, nativeKey })) {
+    console.log(`node-deps: reusing completed install (${selected.join(', ')})`)
+    return { source, workspaces: selected }
+  }
+  if (!install) throw new Error('Workspace dependencies are stale or missing and lazy installs are disabled; run an explicit build/update')
+  // npm can fail during validation before deleting node_modules. Invalidate first.
+  rmSync(receipt, { force: true })
+  rmSync(nativeReceipt, { force: true })
+  execFileSync(node, [npm, ...args], { cwd: source, env, stdio: 'inherit' })
+  if (reuse) {
+    const completed = `${key}\n${createHash('sha256').update(readFileSync(hiddenLock)).digest('hex')}\n`
+    writeFileSync(receipt, completed)
+    if (nativeKey !== undefined) writeFileSync(nativeReceipt, `${completed}${nativeKey}\n`)
+  }
   return { source, workspaces: selected }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  // The Python bundle driver uses this same resolver, not a second layout probe.
+  if (process.argv[2] === '--npm') {
+    const [node, ...command] = npmCommand()
+    const child = spawnSync(node, [...command, ...process.argv.slice(3)], { stdio: 'inherit' })
+    if (child.error) throw child.error
+    process.exit(child.status ?? 1)
+  }
   const { values } = parseArgs({ options: {
     source: { type: 'string' }, workspace: { type: 'string', multiple: true },
+    reuse: { type: 'boolean', default: false },
+    'no-install': { type: 'boolean', default: false },
+    'native-toolchain': { type: 'string' },
   } })
   if (!values.source) throw new Error('--source is required')
-  prepareNodeDependencies({ source: values.source, workspaces: values.workspace })
+  prepareNodeDependencies({ source: values.source, workspaces: values.workspace, reuse: values.reuse, install: !values['no-install'], nativeToolchain: values['native-toolchain'] })
 }

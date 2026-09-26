@@ -21,7 +21,8 @@ import {
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { useI18n } from '@/i18n'
 import { triggerHaptic } from '@/lib/haptics'
-import { AlertCircle, ChevronDown } from '@/lib/icons'
+import { ChevronDown, Loader2 } from '@/lib/icons'
+import { releaseApprovalKey } from '@/lib/keybinds/approval-keys'
 import { cn } from '@/lib/utils'
 import { $gateway } from '@/store/gateway'
 import { reconnectAction } from '@/store/gateway-reconnect'
@@ -315,80 +316,13 @@ const ApprovalCard: FC<ApprovalCardProps> = ({ request, total, position, stack }
       onPointerDownCapture={rememberFocusOrigin}
       ref={cardRef}
     >
-      <div className="flex items-center gap-2.5">
-        <div className="inline-flex h-6 items-stretch overflow-hidden rounded-md border border-primary/25 bg-primary/10 text-primary">
-          <Button
-            className="h-full gap-1 rounded-none px-2 text-xs font-medium text-primary hover:bg-primary/15 hover:text-primary"
-            disabled={busy}
-            loading={submitting === 'once'}
-            onClick={() => void respond('once')}
-            size="xs"
-            variant="ghost"
-          >
-            {copy.run}
-            <span className="text-[0.625rem] text-primary/60">{isMac ? '⌘⏎' : 'Ctrl⏎'}</span>
-          </Button>
-          {hasMoreOptions && <span aria-hidden className="w-px self-stretch bg-primary/20" />}
-          {hasMoreOptions && (
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button
-                  aria-label={copy.moreOptions}
-                  className="h-full w-5 rounded-none px-0 text-primary hover:bg-primary/15 hover:text-primary"
-                  disabled={busy}
-                  size="xs"
-                  variant="ghost"
-                >
-                  <ChevronDown className="size-3" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="start" className="min-w-44">
-                {allowSession && (
-                  <DropdownMenuItem onSelect={() => void respond('session')}>{copy.allowSession}</DropdownMenuItem>
-                )}
-                {allowAlways && (
-                  <DropdownMenuItem
-                    onSelect={() => {
-                      // Defer one tick so the menu fully unmounts before the dialog
-                      // mounts — otherwise Radix's focus-return races the dialog and
-                      // dismisses it via onInteractOutside.
-                      setTimeout(() => setConfirmAlways(true), 0)
-                    }}
-                  >
-                    {copy.alwaysAllowMenu}
-                  </DropdownMenuItem>
-                )}
-                <DropdownMenuItem onSelect={() => void respond('deny')} variant="destructive">
-                  {copy.reject}
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          )}
-        </div>
-
-        <Button
-          className="h-6 gap-1.5 rounded-md px-1.5 text-xs font-normal text-(--ui-text-tertiary) hover:text-foreground"
-          disabled={busy}
-          loading={submitting === 'deny'}
-          onClick={() => void respond('deny')}
-          size="xs"
-          variant="ghost"
-        >
-          {copy.reject}
-          <span className="text-[0.625rem] opacity-55">Esc</span>
-        </Button>
-
-        {hasCommand && (
-          <Button
-            aria-expanded={showCommand}
-            className="h-6 gap-1 rounded-md px-1.5 text-xs font-normal text-(--ui-text-tertiary) hover:text-foreground"
-            onClick={() => setShowCommand(value => !value)}
-            size="xs"
-            variant="ghost"
-          >
-            {copy.command}
-            <ChevronDown className={cn('size-3 transition-transform', showCommand && 'rotate-180')} />
-          </Button>
+      <div className="flex items-center gap-2 px-2.5 pt-2 text-xs text-(--ui-text-secondary)">
+        <Codicon name="terminal" size="0.875rem" />
+        <span>{copy.command}</span>
+        {total > 1 && (
+          <span className="ml-auto text-[0.6875rem] tabular-nums text-(--ui-text-tertiary)">
+            {position} / {total}
+          </span>
         )}
       </div>
       {hasCommand && (

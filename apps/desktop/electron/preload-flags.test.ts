@@ -3,9 +3,9 @@ import { expect, it, vi } from 'vitest'
 const host = vi.hoisted(() => ({
   exposeInMainWorld: vi.fn(),
   send: vi.fn<(channel: string, line: string) => void>(),
-  sendSync: vi.fn((channel: string): unknown => channel === 'hermes:feature-flags'
-    ? { localModels: true, guestOnboarding: true }
-    : {})
+  sendSync: vi.fn((channel: string): unknown =>
+    channel === 'hermes:feature-flags' ? { localModels: true, guestOnboarding: true, skipIntro: true } : {}
+  )
 }))
 
 vi.mock('electron', () => ({
@@ -20,7 +20,7 @@ it('publishes the feature flags answered by main before the renderer starts', as
   const registration = host.exposeInMainWorld.mock.calls.find(([name]): boolean => name === 'hermesDesktop')
 
   expect(registration).toBeDefined()
-  expect(registration![1]).toMatchObject({ localModelsEnabled: true, guestOnboardingEnabled: true })
+  expect(registration![1]).toMatchObject({ localModelsEnabled: true, guestOnboardingEnabled: true, skipIntro: true })
   expect(host.sendSync).toHaveBeenCalledWith('hermes:feature-flags')
 })
 

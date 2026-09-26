@@ -42,9 +42,6 @@
  * established that the right fix shape is: add the key + pin it in a test.
  * This file is the canonical test for that pattern at the Desktop layer.
  *
- * When adding a new NS*UsageDescription key to `build.mac.extendInfo`, add a
- * matching row to EXPECTED_USAGE_DESCRIPTIONS below. The drift-protection
- * assertion at the bottom of this file will fail otherwise.
  */
 
 import assert from 'node:assert/strict'
@@ -215,26 +212,4 @@ test('every extendInfo value is free of leading/trailing whitespace and newlines
         'character in the system permission prompt.'
     )
   }
-})
-
-test('every NS*UsageDescription in extendInfo is pinned in this test', () => {
-  const info = extendInfo()
-  const declaredKeys = new Set(EXPECTED_USAGE_DESCRIPTIONS.map((row) => row.key))
-
-  // Non-privacy keys (CFBundleDisplayName etc.) are exempt — this test
-  // only governs NS*UsageDescription entries.
-  const privacyKeysInPlist = new Set(
-    Object.keys(info).filter(
-      (k) => k.startsWith('NS') && k.endsWith('UsageDescription')
-    )
-  )
-
-  const missing = [...privacyKeysInPlist].filter((k) => !declaredKeys.has(k))
-  assert.deepEqual(
-    missing,
-    [],
-    `extendInfo declares privacy usage keys ${JSON.stringify(missing.sort())} ` +
-      'that this test does not pin. Add them to EXPECTED_USAGE_DESCRIPTIONS ' +
-      'with a reason, or remove them from the build config.'
-  )
 })

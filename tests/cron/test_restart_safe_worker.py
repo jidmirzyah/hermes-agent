@@ -78,7 +78,7 @@ def test_genuine_external_worker_crash_is_recovered_unknown(
 
 
 @pytest.mark.platforms("linux")
-def test_restart_safe_gateway_child_fails_closed_without_scope(monkeypatch):
+def test_restart_safe_gateway_child_fails_closed_when_required(monkeypatch):
     import tools.process_registry as process_registry
 
     monkeypatch.setattr(process_registry, "_is_supervised_gateway_process", lambda: True)
@@ -93,7 +93,7 @@ def test_restart_safe_gateway_child_fails_closed_without_scope(monkeypatch):
         )
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_restart_safe_gateway_child_degrades_without_scope(monkeypatch, caplog):
     """Managed gateway + no user bus degrades to a mode distinct from the
     in-process passthrough, and warns once per process, not per dispatch."""
@@ -606,7 +606,7 @@ def test_launch_external_worker_stays_in_process_outside_managed_gateway(
     popen.assert_not_called()
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_launch_external_worker_degrades_by_default_with_real_helper(
     tmp_path, monkeypatch,
 ):

@@ -3,10 +3,12 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
+import { Arch, Packager, Platform, WinPackager } from 'app-builder-lib'
 import { afterEach, test } from 'vitest'
 
+import builderConfig from '../electron-builder.config.cjs'
+
 import {
-  azureSigningConfigured,
   batchSignAppTree,
   chunk,
   customSign,
@@ -32,7 +34,7 @@ test('getBinaries collects .exe and .dll recursively, case-insensitive, sorted',
   fs.mkdirSync(path.join(root, 'resources', 'agent-payload', 'tools', 'python', 'bin'), { recursive: true })
   fs.mkdirSync(path.join(root, 'resources', 'agent-payload', 'tools', 'chromium-1', 'meep'), { recursive: true })
   fs.writeFileSync(path.join(root, 'Hermes.exe'), 'x')
-  fs.writeFileSync(path.join(root, 'ffmpeg.dll'), 'x')
+  fs.writeFileSync(path.join(root, 'FFMPEG.DLL'), 'x')
   fs.writeFileSync(path.join(root, 'resources', 'agent-payload', 'tools', 'python', 'bin', 'node.exe'), 'x')
   fs.writeFileSync(path.join(root, 'resources', 'agent-payload', 'tools', 'chromium-1', 'meep', 'chrome.dll'), 'x')
   fs.writeFileSync(path.join(root, 'resources', 'README.md'), 'x')
@@ -40,8 +42,8 @@ test('getBinaries collects .exe and .dll recursively, case-insensitive, sorted',
   const files = getBinaries(root).map(f => path.relative(root, f))
 
   assert.deepEqual(files, [
+    path.join('FFMPEG.DLL'),
     path.join('Hermes.exe'),
-    path.join('ffmpeg.dll'),
     path.join('resources', 'agent-payload', 'tools', 'chromium-1', 'meep', 'chrome.dll'),
     path.join('resources', 'agent-payload', 'tools', 'python', 'bin', 'node.exe')
   ])
@@ -87,37 +89,6 @@ test('chunk splits into ~100-file batches with no leftovers', () => {
   assert.deepEqual(chunk(exact).map(b => b.length), [100, 100])
 })
 
-test('azureSigningConfigured requires endpoint, account, and profile together', () => {
-  assert.equal(azureSigningConfigured({}), false)
-  assert.equal(azureSigningConfigured({ AZURE_SIGN_ENDPOINT: 'https://cus.codesigning.azure.net' }), false)
-  assert.equal(
-    azureSigningConfigured({
-      AZURE_SIGN_ENDPOINT: 'https://cus.codesigning.azure.net',
-      AZURE_SIGN_ACCOUNT: 'codesign2'
-    }),
-    false
-  )
-  assert.equal(
-    azureSigningConfigured({
-      AZURE_SIGN_ENDPOINT: 'https://cus.codesigning.azure.net',
-      AZURE_SIGN_ACCOUNT: 'codesign2',
-      AZURE_SIGN_PROFILE: 'hermesagent'
-    }),
-    true
-  )
-})
-
-test('customSign returns true for batch-covered payload files without touching Azure', async () => {
-  let azureTouched = 0
-  const result = await customSign(
-    { path: 'C:/out/win-unpacked/resources/agent-payload/tools/node.exe' },
-    { appInfo: { productFilename: 'Hermes' } },
-    { azureSignFile: async () => { azureTouched += 1 } }
-  )
-  assert.equal(result, true)
-  assert.equal(azureTouched, 0)
-})
-
 test('customSign skips Store- submission packages (Partner Center signs)', async () => {
   const result = await customSign(
     { path: 'C:/out/Store-HermesBundled-0.28.0-win-x64.msix' },
@@ -127,38 +98,48 @@ test('customSign skips Store- submission packages (Partner Center signs)', async
   assert.equal(result, true)
 })
 
-test('customSign delegates the msix package and the product exe to the Azure signer', async () => {
+test('customSign delegates only the msix package and root product exe to the Azure signer', async () => {
+  /** @type {string[][]} */
   const delegated = []
+  /** @type {Parameters<typeof customSign>[2]} */
   const deps = {
-    signMsix: async configuration => delegated.push(['msix', configuration.path]),
-    azureSignFile: async file => delegated.push(['exe', file])
+    signMsix: async configuration => { delegated.push(['msix', configuration.path]) },
+    azureSignFile: async file => { delegated.push(['exe', file]) }
   }
-  const packager = { appInfo: { productFilename: 'Hermes' } }
+  const output = path.join(tmpTree(), '${os}', '${arch}')
+  const info = new Packager({
+    projectDir: path.resolve(import.meta.dirname, '..'),
+    targets: Platform.WINDOWS.createTarget(['msix'], Arch.x64, Arch.arm64),
+    config: {
+      ...builderConfig,
+      // validateConfig normalizes these file sets in place.
+      files: structuredClone(builderConfig.files),
+      extraResources: structuredClone(builderConfig.extraResources),
+      directories: { output },
+      win: { ...builderConfig.win, executableName: 'hermes-collision' }
+    }
+  })
+  await info.validateConfig()
+  const packager = new WinPackager(info)
+  const msix = path.join(tmpTree(), 'HermesBundled-0.28.0-win-x64.msix')
+  assert.equal(await customSign({ path: msix }, packager, deps), true)
+  assert.deepEqual(delegated, [['msix', msix]])
 
-  await customSign({ path: 'C:/out/HermesBundled-0.28.0-win-x64.msix' }, packager, deps)
-  await customSign({ path: 'C:/out/win-unpacked/Hermes.exe' }, packager, deps)
-
-  // The hook's contract is `true` (handled) even when it delegated —
-  // electron-builder must not fall back to per-file default signing.
-  assert.deepEqual(delegated, [
-    ['msix', 'C:/out/HermesBundled-0.28.0-win-x64.msix'],
-    ['exe', 'C:/out/win-unpacked/Hermes.exe']
-  ])
-  assert.equal(await customSign({ path: 'C:/out/win-unpacked/Hermes.exe' }, packager, deps), true)
-})
-
-test('customSign does not mistake a similarly-named payload exe for the product exe', async () => {
-  const deps = {
-    azureSignFile: async () => { throw new Error('must not be called') }
+  for (const arch of [Arch.x64, Arch.arm64]) {
+    const root = packager['computeAppOutDir'](packager.expandMacro(output, Arch[arch]), arch)
+    const exeName = `${packager.appInfo.productFilename}.exe`
+    const exe = path.join(root, exeName)
+    delegated.length = 0
+    // Same basename is not enough: payload copies wait for the afterPack batch.
+    for (const file of [path.join(root, 'resources', 'agent-payload', 'bin', exeName), path.join(`${root}-other`, exeName), path.join(root, 'resources', 'Hermes-helper.exe')]) {
+      assert.equal(await customSign({ path: file }, packager, deps), true)
+    }
+    assert.deepEqual(delegated, [])
+    // Returning true suppresses electron-builder's fallback per-file signer.
+    assert.equal(await customSign({ path: exe }, packager, deps), true)
+    assert.equal(await customSign({ path: exe.toUpperCase() }, packager, deps), true)
+    assert.deepEqual(delegated, [['exe', exe], ['exe', exe.toUpperCase()]])
   }
-  assert.equal(
-    await customSign(
-      { path: 'C:/out/win-unpacked/resources/Hermes-helper.exe' },
-      { appInfo: { productFilename: 'Hermes' } },
-      deps
-    ),
-    true
-  )
 })
 
 test('batchSignAppTree is a no-op (skipped=true) without the Azure env, and signs via chunked argv-array invocations when set', async () => {
@@ -167,7 +148,7 @@ test('batchSignAppTree is a no-op (skipped=true) without the Azure env, and sign
   const exe = path.join(root, 'Hermes.exe')
   fs.writeFileSync(exe, 'x')
   fs.writeFileSync(path.join(root, 'tools', 'node.exe'), 'x')
-  fs.writeFileSync(path.join(root, 'tools', 'ffmpeg.dll'), 'x')
+  fs.writeFileSync(path.join(root, 'tools', 'FFMPEG.DLL'), 'x')
   // The shipped uv-cache holds inert sdist/archive artifacts — the arch
   // audit exempts it and batch-sign must never sign it (wasted Azure
   // round-trips; locally it can even reference files since removed).
@@ -175,8 +156,9 @@ test('batchSignAppTree is a no-op (skipped=true) without the Azure env, and sign
   fs.writeFileSync(path.join(root, 'uv-cache', 'archive-v0', 'setuptools', 'cli.exe'), 'x')
 
   // Unsigned lane: loud no-op, nothing invoked.
-  const skipped = await batchSignAppTree(root, exe, { env: {} })
-  assert.deepEqual(skipped, { signed: 0, chunks: 0, skipped: true })
+  for (const env of [{}, { AZURE_SIGN_ENDPOINT: 'https://test.invalid' }, { AZURE_SIGN_ENDPOINT: 'https://test.invalid', AZURE_SIGN_ACCOUNT: 'account' }]) {
+    assert.deepEqual(await batchSignAppTree(root, exe, { env }), { signed: 0, chunks: 0, skipped: true })
+  }
 
   // Signed lane: product exe excluded, chunked argv arrays. Two passes per
   // chunk: 'sign' (Azure, no timestamp) then 'timestamp' (RFC3161, no dlib).
@@ -208,7 +190,7 @@ test('batchSignAppTree is a no-op (skipped=true) without the Azure env, and sign
   assert.ok(!args.some(arg => typeof arg === 'string' && arg.includes(' ')))
   assert.equal(args.includes(exe), false, 'product exe excluded — signed per-file after rcedit')
   assert.equal(args.includes(path.join(root, 'tools', 'node.exe')), true)
-  assert.equal(args.includes(path.join(root, 'tools', 'ffmpeg.dll')), true)
+  assert.equal(args.includes(path.join(root, 'tools', 'FFMPEG.DLL')), true)
   assert.equal(args[args.indexOf('/dlib') + 1], 'azure.codesigning.dlib.dll')
   assert.ok(args[args.indexOf('/dmdf') + 1].endsWith('batch-sign.json'))
   assert.equal(args[args.indexOf('/fd') + 1], 'SHA256')
@@ -222,7 +204,7 @@ test('batchSignAppTree is a no-op (skipped=true) without the Azure env, and sign
   assert.equal(tsArgs.includes('/dlib'), false)
   assert.equal(tsArgs.includes('/dmdf'), false)
   assert.ok(tsArgs.includes(path.join(root, 'tools', 'node.exe')), 'timestamp pass covers the same files')
-  assert.ok(tsArgs.includes(path.join(root, 'tools', 'ffmpeg.dll')))
+  assert.ok(tsArgs.includes(path.join(root, 'tools', 'FFMPEG.DLL')))
 })
 
 test('batchSignAppTree chunks large trees into ~100-file signtool invocations, sign + timestamp passes', async () => {
@@ -302,7 +284,7 @@ test('sign chunks run concurrently, capped at the configured concurrency', async
   assert.equal(maxInFlight, 3, 'never more than the configured concurrency in flight')
 })
 
-test('timestamp pass retries a flaky server before giving up', async () => {
+test.each([false, true])('timestamp retry is bounded; permanent failure=%s', async permanent => {
   const root = tmpTree()
   fs.mkdirSync(path.join(root, 'tools'), { recursive: true })
   fs.writeFileSync(path.join(root, 'tools', 'node.exe'), 'x')
@@ -311,10 +293,10 @@ test('timestamp pass retries a flaky server before giving up', async () => {
   const fakeExec = (tool, args) => {
     if (args[0] === 'sign') return
     calls += 1
-    if (calls < 3) throw new Error('Invalid Time Stamp Request Length:-1')
+    if (permanent || calls < 3) throw new Error('Invalid Time Stamp Request Length:-1')
   }
 
-  await batchSignAppTree(root, path.join(root, 'Hermes.exe'), {
+  const signing = batchSignAppTree(root, path.join(root, 'Hermes.exe'), {
     env: {
       AZURE_SIGN_ENDPOINT: 'https://cus.codesigning.azure.net',
       AZURE_SIGN_ACCOUNT: 'codesign2',
@@ -327,6 +309,7 @@ test('timestamp pass retries a flaky server before giving up', async () => {
     timestampRetryDelayMs: 0
   })
 
+  if (permanent) await assert.rejects(signing, /Invalid Time Stamp/); else await signing
   assert.equal(calls, 3, 'timestamp pass retried until the server succeeded')
 })
 

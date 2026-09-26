@@ -38,7 +38,7 @@ def test_bionic_facts_and_agent_keep_fixed_prefix_and_tui_only(tmp_path):
     (tui / "dist/entry.js").write_text("built", encoding="utf-8")
     (tui / "package.json").write_text('{"type":"module"}', encoding="utf-8")
     build_set = tmp_path / "build-set.txt"
-    build_set.write_text("native-fixture\n", encoding="utf-8")
+    build_set.write_bytes(b"\xef\xbb\xbfnative-fixture\n")
     write_facts(payload, lock, build_set, tui)
     manifest = json.loads((payload / "manifest.json").read_text())
     assert manifest["runtime"]["commands"] == {"probe": "bin/probe"}

@@ -25,6 +25,7 @@ import urllib.request
 from pathlib import Path
 
 from hermes_cli.local_runtime.binaries import runtimes_root
+from hermes_cli.local_runtime.processes import server_child_env, spawn_server
 
 logger = logging.getLogger(__name__)
 

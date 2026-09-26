@@ -1,21 +1,8 @@
-"""Store.fetch resume end-to-end: a dropped archive download resumes on the
-second Store.fetch instead of re-fetching the whole archive.
-
-A real loopback Range-honoring server, a real tar.gz, no urllib mocking.
-The first fetch is cut short by the server closing the connection mid-body
-(so Store.fetch raises); the second fetch must resume from the durable
-byte-range prefix — requesting only the missing tail, not the whole archive —
-and return bytes that exactly match the original tar.gz. The managed partials
-live OUTSIDE the scratch tempdir (in the store's machine-scoped partials
-area), so the scratch context's finally-rmtree cannot destroy resume state.
-"""
+"""Store scratch cleanup retains resumable bytes outside the scratch directory."""
 
 from __future__ import annotations
 
 import hashlib
-import io
-import tarfile
-from pathlib import Path
 
 import pytest
 
@@ -23,30 +10,9 @@ from pm.store import Store
 
 import pm.paths as paths
 
-from tests.pm._range_server import RangeHandler as _Handler, dl_server, url as _url
+from tests.pm._range_server import RangeHandler as _Handler, url as _url
+from tests.pm._range_server import dl_server as dl_server
 
-
-def _make_archive() -> bytes:
-    """A real tar.gz, big enough to stream across several 64 KiB serve
-    pieces yet small enough (< 1 MiB) that the downloader fans out to ONE
-    byte range — keeping the resume shape a single 'missing tail' request
-    that the assertions can check literally. The payload is pseudo-random
-    (hash chain) so gzip cannot compress it down below the serve-piece
-    size, which would collapse the whole body into one write and spare the
-    mid-body abort."""
-    data = b""
-    seed = b"hermes-pm-resume"
-    while len(data) < 512 * 1024:
-        seed = hashlib.sha256(seed).digest()
-        data += seed
-    data = data[:512 * 1024]
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
-        info = tarfile.TarInfo("payload.bin")
-        info.size = len(data)
-        info.mode = 0o644
-        tf.addfile(info, io.BytesIO(data))
-    return buf.getvalue()
 
 
 def test_store_fetch_resumes_interrupted_download(tmp_path, dl_server, monkeypatch):
@@ -58,7 +24,7 @@ def test_store_fetch_resumes_interrupted_download(tmp_path, dl_server, monkeypat
     # byte range (the shared fixture resets this to 1 MiB).
     _Handler.chunk = 1 << 16
 
-    archive_bytes = _make_archive()
+    archive_bytes = bytes(range(256)) * 2048
     assert len(archive_bytes) < (1 << 20), "single-range resume assumes < 1 MiB"
     name = "faketool-1.0.tar.gz"
     _Handler.payloads[f"/{name}"] = archive_bytes

@@ -1,11 +1,11 @@
 """Hermetic tests for the iron-proxy egress integration.
 
 Covers the pure-function surface (token mint, mapping discovery, config build,
-config + mappings I/O), the binary install path (HTTP downloads + tar
-extraction + checksum verification fully mocked), the subprocess lifecycle
+config + mappings I/O), the subprocess lifecycle
 (spawn / PID / pid_alive / stop, with subprocess.Popen mocked), and the
 docker backend's egress arg builder.
 
+PM acquisition has real loopback/worker coverage in test_security_consumers.
 Live network and the real ``iron-proxy`` binary are NEVER touched.  See
 ``tests/agent/test_iron_proxy_e2e.py`` (gated behind a marker) for the real-binary
 smoke test.
@@ -13,10 +13,8 @@ smoke test.
 
 from __future__ import annotations
 
-import io
 import os
 import sys
-import tarfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -61,7 +59,7 @@ def test_management_token_path_is_single_authority(hermes_home):
     assert not (hermes_home / "proxy").exists()
 
     token = ip.ensure_management_token()
-    assert token
+    assert token.startswith("hermes-mgmt-")
     p = ip._management_token_path()
     assert p.is_file()
     assert p.read_text(encoding="utf-8-sig").strip() == token
@@ -73,13 +71,7 @@ def test_management_token_path_is_single_authority(hermes_home):
     assert ip._management_token_path().read_text(encoding="utf-8-sig").strip() == rotated
 
 
-
-
-
-
     # Unknown providers (no entry in _BEARER_PROVIDERS) are skipped, not warned.
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -93,8 +85,6 @@ def _sample_mapping(env_name: str = "OPENROUTER_API_KEY") -> ip.TokenMapping:
         real_env_name=env_name,
         upstream_hosts=("openrouter.ai", "*.openrouter.ai"),
     )
-
-
 
 
 def test_build_proxy_config_custom_allowed_hosts(tmp_path):
@@ -116,25 +106,9 @@ def test_build_proxy_config_custom_allowed_hosts(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-
-
-
-
-
-
 # ---------------------------------------------------------------------------
 # Bind policy (regression: must not bind 0.0.0.0)
 # ---------------------------------------------------------------------------
-
-
-
-
-
-
-
-
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -165,18 +139,10 @@ def test_audit_log_kwarg_does_not_inject_audit_path_v039(tmp_path):
     )
 
 
-
-
-
-
-
-
 def test_load_mappings_handles_corrupt_json(hermes_home):
     state = ip._proxy_state_dir()
     (state / "mappings.json").write_text("{not json", encoding="utf-8")
     assert ip.load_mappings() == []
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -184,50 +150,14 @@ def test_load_mappings_handles_corrupt_json(hermes_home):
 # ---------------------------------------------------------------------------
 
 
-
-
-
-
-
-
 # ---------------------------------------------------------------------------
 # Uncovered provider detection (regression: signature-auth providers bypass)
 # ---------------------------------------------------------------------------
 
 
-
-
-
-
-
-
-
-
 # ---------------------------------------------------------------------------
 # Binary discovery + lazy install
 # ---------------------------------------------------------------------------
-
-
-
-
-
-
-def _make_fake_tar(binary_name: str, payload: bytes = b"#!/bin/sh\necho ok\n") -> bytes:
-    """Build a tar.gz with one file at the root, named ``binary_name``."""
-
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
-        info = tarfile.TarInfo(name=binary_name)
-        info.size = len(payload)
-        info.mode = 0o755
-        tf.addfile(info, io.BytesIO(payload))
-    return buf.getvalue()
-
-
-
-
-
-
 
 
 # ── GPG release-signature verification (maxpetrusenko P1) ────────────────────
@@ -240,48 +170,9 @@ def test_verify_checksums_signature_skips_without_gpg(hermes_home, monkeypatch, 
     assert ip._verify_checksums_signature(tmp_path, cks) is False
 
 
-
-
-
-
-
-
-
-
-def test_pick_tar_member_rejects_path_traversal():
-    """A malicious tar that escapes via '..' must be refused."""
-
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
-        info = tarfile.TarInfo(name="../iron-proxy")
-        info.size = 1
-        info.mode = 0o755
-        tf.addfile(info, io.BytesIO(b"x"))
-    buf.seek(0)
-    with tarfile.open(fileobj=buf, mode="r:gz") as tf:
-        with pytest.raises(RuntimeError, match="Could not find iron-proxy"):
-            ip._pick_tar_member(tf, "iron-proxy")
-
-
 # ---------------------------------------------------------------------------
 # Subprocess lifecycle
 # ---------------------------------------------------------------------------
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def test_start_proxy_idempotent_when_already_running(hermes_home, monkeypatch):
@@ -306,23 +197,9 @@ def test_start_proxy_idempotent_when_already_running(hermes_home, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-
-
-
-
-
-
-
-
-
-
 # ---------------------------------------------------------------------------
 # Platform asset name resolution
 # ---------------------------------------------------------------------------
-
-
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -348,10 +225,6 @@ def test_subprocess_env_strips_unrelated_secrets(hermes_home, monkeypatch):
     assert "DATABASE_URL" not in env
     assert "SLACK_BOT_TOKEN" not in env
     assert env.get("OPENROUTER_API_KEY") == "sk-or-real"
-
-
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -426,13 +299,9 @@ def test_proxy_state_dir_is_0o700(hermes_home):
     assert mode == 0o700
 
 
-
-
 # ---------------------------------------------------------------------------
 # Mappings clobber refused when corrupt (regression: silent 403s)
 # ---------------------------------------------------------------------------
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -440,13 +309,9 @@ def test_proxy_state_dir_is_0o700(hermes_home):
 # ---------------------------------------------------------------------------
 
 
-
-
 # ---------------------------------------------------------------------------
 # Docker env collision detection (regression: docker_env silently bypassed proxy)
 # ---------------------------------------------------------------------------
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -454,30 +319,14 @@ def test_proxy_state_dir_is_0o700(hermes_home):
 # ---------------------------------------------------------------------------
 
 
-
-
-
-
-
-
 # ---------------------------------------------------------------------------
 # v3: default deny-list adjacency (P2 IPv4-mapped-v6 + CGNAT)
 # ---------------------------------------------------------------------------
 
 
-
-
 # ---------------------------------------------------------------------------
 # Header-auth providers (x-api-key family) — match_headers + aliases
 # ---------------------------------------------------------------------------
-
-
-
-
-
-
-
-
 
 
 def test_mappings_roundtrip_preserves_headers_and_aliases(hermes_home):
@@ -494,38 +343,21 @@ def test_mappings_roundtrip_preserves_headers_and_aliases(hermes_home):
     assert loaded[0].alias_env_names == ("GOOGLE_API_KEY",)
 
 
-
-
-
-
-
-
 # ---------------------------------------------------------------------------
 # Management API (hot reload)
 # ---------------------------------------------------------------------------
 
 
-
-
 @pytest.mark.platforms("linux")
-def test_ensure_management_token_persists_and_is_stable(hermes_home):
-    t1 = ip.ensure_management_token()
-    t2 = ip.ensure_management_token()
-    assert t1 == t2
-    assert t1.startswith("hermes-mgmt-")
-    p = ip._proxy_state_dir() / "management.token"
-    assert p.exists()
-    assert (p.stat().st_mode & 0o777) == 0o600
-
-
+def test_management_token_is_private(hermes_home):
+    ip.ensure_management_token()
+    assert (ip._management_token_path().stat().st_mode & 0o777) == 0o600
 
 
 def test_reload_proxy_refuses_when_not_running(hermes_home, monkeypatch):
     monkeypatch.setattr(ip, "_read_pid", lambda: None)
     with pytest.raises(RuntimeError, match="not running"):
         ip.reload_proxy()
-
-
 
 
 def test_reload_proxy_posts_bearer_to_management_endpoint(hermes_home, monkeypatch):
@@ -607,15 +439,9 @@ def test_start_proxy_injects_management_key_env(hermes_home, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-
-
-
-
 # ---------------------------------------------------------------------------
 # v3: stop_proxy SIGKILL suppression on pid recycle (P3 #5 coverage gap)
 # ---------------------------------------------------------------------------
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -637,8 +463,6 @@ def test_reset_for_tests_clears_version_cache_and_nonce():
 # ---------------------------------------------------------------------------
 # v3: version cache doesn't poison on empty stdout (P2 _VERSION_CACHE bug B)
 # ---------------------------------------------------------------------------
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -690,8 +514,6 @@ def test_docker_egress_node_options_uses_sentinel(hermes_home, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-
-
 # ---------------------------------------------------------------------------
 # v3: persisted nonce roundtrip (stephenschoettler #3 cross-CLI defense)
 # ---------------------------------------------------------------------------
@@ -708,16 +530,10 @@ def test_persisted_nonce_roundtrip(hermes_home, monkeypatch):
     assert ip._read_persisted_nonce() == "test-nonce-abc123"
 
 
-
-
 # ---------------------------------------------------------------------------
 # v4 round (GodsBoy follow-up): bind-host-aware liveness probes +
 # allow_env_fallback on the partial-secret path
 # ---------------------------------------------------------------------------
-
-
-
-
 
 
 def test_get_status_probes_configured_bind_host(hermes_home, monkeypatch):

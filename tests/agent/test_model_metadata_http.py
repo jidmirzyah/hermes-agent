@@ -67,7 +67,7 @@ def test_redirect_credentials_and_proxy_routing_are_preserved(servers, monkeypat
     assert seen[-1][0] == "http://probe.invalid/models"
 
 
-@pytest.mark.parametrize("status", [401, 403])
+@pytest.mark.parametrize("status", [401, 403, 404])
 def test_metadata_auth_failure_closes_without_reading_body(servers, monkeypatch, status):
     requests = []
 
@@ -76,9 +76,16 @@ def test_metadata_auth_failure_closes_without_reading_body(servers, monkeypatch,
 
         def do_GET(self):
             requests.append(self.path)
-            self.send_response(status)
-            self.send_header("Content-Length", "1000000")
-            self.end_headers()
+            if status == 404 and self.path == "/models":
+                body = b'{"data":[{"id":"test/model","context_length":32768}]}'
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            else:
+                self.send_response(status)
+                self.send_header("Content-Length", "1000000")
+                self.end_headers()
             # Intentionally send no body. The client must close on the headers,
             # not wait for a read timeout or try the alternate /v1 URL.
 
@@ -98,7 +105,15 @@ def test_metadata_auth_failure_closes_without_reading_body(servers, monkeypatch,
         return original_client(**{**kwargs, "timeout": 2.0})
 
     monkeypatch.setattr(httpx, "Client", recorded_client)
-    assert model_metadata.fetch_endpoint_model_metadata(url, force_refresh=True) == {}
-    assert requests == ["/models"]
-    assert len(responses) == 1 and responses[0].is_closed
-    assert not responses[0].is_stream_consumed, "auth rejection read the absent body"
+    url += "/v1"
+    result = model_metadata.fetch_endpoint_model_metadata(url, force_refresh=True)
+    if status == 404:
+        assert result["test/model"]["context_length"] == 32768
+        assert requests == ["/v1/models", "/models"]
+        assert responses[1].is_stream_consumed
+    else:
+        assert result == {}
+        assert model_metadata.fetch_endpoint_model_metadata(url) == {}
+        assert requests == ["/v1/models"]
+    assert all(response.is_closed for response in responses)
+    assert not responses[0].is_stream_consumed, "rejection read the absent body"

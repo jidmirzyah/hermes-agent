@@ -24,9 +24,6 @@ from tools.environments.local_env_policy import (  # noqa: F401 — _HERMES_PROV
     _ALWAYS_STRIP_KEYS, _HERMES_PROVIDER_ENV_BLOCKLIST, _HERMES_PROVIDER_ENV_FORCE_PREFIX,
     _is_hermes_internal_secret, _is_provider_env_blocklisted, _is_terminal_first_party_env,
     _matches_terminal_first_party_prefix, _plugin_terminal_env_strip_keys, strip_profile_gate_env)
-from tools.environments.local_gitbash_probe import (
-    _bash_probe_details_cache, _bash_starts, _git_bash_aslr_help,
-    _looks_like_msys_spawn_failure, _mandatory_aslr_enabled)
 from tools.environments.local_pythonpath import (
     _build_hermes_repo_root_aliases, _strip_hermes_owned_pythonpath_and_runtime_markers)
 
@@ -38,9 +35,8 @@ logger = logging.getLogger(__name__)
 # --- Terminal temp-cache pruning ---
 # get_temp_dir() defaults to HERMES_HOME/cache/terminal (real storage, not tmpfs), so
 # stale artifacts don't vanish on reboot: the gateway housekeeping loop prunes hourly
-# and a once-per-process sweep covers CLI-only installs. Retention is idle-based like
-# the scratch dir: an entry goes 24h after the last write anywhere inside it.
-TERMINAL_TEMP_MAX_IDLE_HOURS = 24
+# and a once-per-process sweep covers CLI-only installs.
+TERMINAL_TEMP_MAX_AGE_HOURS = 72
 _terminal_temp_prune_lock = threading.Lock()
 _terminal_temp_pruned_once = False
 # Background artifacts come in triplets (hermes_bg_<id>.log/.pid/.exit). A live
@@ -58,13 +54,9 @@ def _default_terminal_temp_dir() -> "Path | None":
         return None
 
 
-def cleanup_terminal_temp_cache(max_age_hours: float = TERMINAL_TEMP_MAX_IDLE_HOURS) -> int:
-    """Delete session temp artifacts idle for *max_age_hours* (no write anywhere in a
-    directory's subtree; the kwarg name is the ``cleanup_*_cache`` signature the gateway
-    housekeeping loop calls every entry with); return count.
+def cleanup_terminal_temp_cache(max_age_hours: int = TERMINAL_TEMP_MAX_AGE_HOURS) -> int:
+    """Delete session temp artifacts older than *max_age_hours*; return count.
     Only the managed default dir is pruned — never a user-pointed ``terminal.temp_dir``."""
-    from hermes_constants_scratch import subtree_touched_since
-
     root = _default_terminal_temp_dir()
     if root is None:
         return 0
@@ -87,10 +79,7 @@ def cleanup_terminal_temp_cache(max_age_hours: float = TERMINAL_TEMP_MAX_IDLE_HO
     removed = 0
     for f, mt in mtimes.items():
         m = _BG_GROUP_RE.match(f.name)
-        if m:
-            if group_newest[m.group(1)] >= cutoff:
-                continue
-        elif subtree_touched_since(f, cutoff):
+        if (group_newest[m.group(1)] if m else mt) >= cutoff:
             continue
         try:
             shutil.rmtree(f, ignore_errors=True) if f.is_dir() else f.unlink()
@@ -317,20 +306,43 @@ def _sanitize_subprocess_env(base_env: dict | None, extra_env: dict | None = Non
 def hermes_subprocess_env(
     *, inherit_credentials: bool = False, base_env: dict[str, str] | None = None
 ) -> dict[str, str]:
-    """Sanitized env for the **non-terminal** spawn surface (browser, ACP/CLI executors,
-    computer-use driver, TUI Node host, dep-ensure, detached gateway). Tier 1
-    (_ALWAYS_STRIP_KEYS, plugin keys, force-prefixed hints, dynamic internal secrets)
-    is always removed; Tier 2 (the provider/tool blocklist) unless inherit_credentials —
-    pass that **only** for children that legitimately need LLM credentials (user-blessed
-    claude/codex/gemini CLI, TUI Node host). Terminal/execute_code use
-    :func:"_sanitize_subprocess_env".
+    """Build a sanitized environment dict for a spawned subprocess.
 
-    base_env swaps the starting environment (default os.environ) — for callers
-    that already hold a curated env (e.g. pm's sanitized uv env) and want the strip
-    policy applied on top of it.
+    Centralized helper for the **non-terminal** spawn surface (browser,
+    ACP/CLI executors, computer-use driver, dep-ensure, TUI Node host,
+    detached gateway).  Use this instead of copying ``os.environ`` directly
+    so strip-by-default is the uniform policy across every spawn site, with a
+    single source of truth (``_HERMES_PROVIDER_ENV_BLOCKLIST``).  The terminal
+    / execute_code path keeps using :func:`_sanitize_subprocess_env`, which is
+    skill-aware (``env_passthrough``); this helper is for spawns that have no
+    skill-passthrough concept.
+
+    Two-tier stripping:
+
+    * **Tier 1 (always):** ``_ALWAYS_STRIP_KEYS`` — gateway bot tokens, GitHub
+      auth, and remote-compute secrets are removed regardless of
+      ``inherit_credentials``.  No child Hermes spawns legitimately needs them.
+    * **Tier 2 (conditional):** the rest of ``_HERMES_PROVIDER_ENV_BLOCKLIST``
+      (LLM provider API keys, tool secrets) is removed unless the caller passes
+      ``inherit_credentials=True``.
+
+    Pass ``inherit_credentials=True`` **only** when the child legitimately
+    needs LLM provider credentials — a user-blessed ``claude`` / ``codex`` /
+    ``gemini`` CLI executor, or the TUI Node host that makes model calls.  The
+    flag is grep-able for audit: ``grep -rn 'inherit_credentials=True'`` lists
+    every spawn site that still receives provider credentials.
+
+    Callers that need a *specific* non-provider secret (e.g. the browser worker
+    needs ``BROWSERBASE_API_KEY`` / ``FIRECRAWL_API_KEY``) should call with
+    ``inherit_credentials=False`` and copy just those keys back from
+    ``os.environ`` into the returned dict.
+
+    ``base_env`` swaps the starting environment (default ``os.environ``) —
+    for callers that already hold a curated env (pm's sanitized uv env) and
+    want the strip policy applied on top of it.
     """
-    base = dict(base_env) if base_env is not None else os.environ.copy()
-    env = _scrub_credentials(base, inherit_credentials=inherit_credentials)
+    env = dict(base_env) if base_env is not None else os.environ.copy()
+    env = _scrub_credentials(env, inherit_credentials=inherit_credentials)
     env.setdefault("PYTHONUTF8", "1")  # Windows UTF-8 safety for spawned processes
     return _finalize_child_env(env)
 
@@ -860,6 +872,7 @@ class LocalEnvironment(BaseEnvironment):
     the session snapshot preserves env vars across calls; CWD persists via the
     stdout marker."""
 
+    _sudo_nopasswd_probe_supported = True
     _profile_scoped_passthrough = True
     # Commands run on the Hermes host itself — controller-side platform behavior
     # (macOS TCC pruning, etc.) legitimately applies here.

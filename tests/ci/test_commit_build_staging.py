@@ -1,4 +1,5 @@
 """Execute commit staging and summary steps against a disposable object store."""
+import html
 import json
 import os
 from pathlib import Path
@@ -7,6 +8,7 @@ import shlex
 import subprocess
 import sys
 from urllib.request import urlopen
+from urllib.parse import quote, unquote
 
 import pytest
 
@@ -21,7 +23,7 @@ def step_script(job, name):
     return next(step['run'] for step in _workflow()['jobs'][job]['steps'] if step.get('name') == name)
 
 
-def shell_step(tmp_path, r2_server, job, name, env):
+def shell_step(tmp_path, r2_server, job, name, env, *, script=None):
     helper = tmp_path / 'bin'
     helper.mkdir(exist_ok=True)
     driver = helper / 'python-driver.py'
@@ -32,11 +34,12 @@ def shell_step(tmp_path, r2_server, job, name, env):
         f'r2.s3_endpoint=lambda _: "http://127.0.0.1:{r2_server.server_port}"\n'
         'args=sys.argv[1:]\n'
         'assert args[:2] == ["-m", "scripts.releases.handoff"] or '
-        'args[:1] == ["scripts/render-builds-table.py"] or args == ["-"], args\n'
+        'args[:1] in (["scripts/render-builds-table.py"], ["-"]), args\n'
         'if args[:1] == ["-m"]:\n'
         '    sys.argv=args[1:]\n'
         '    runpy.run_module(args[1],run_name="__main__")\n'
-        'elif args == ["-"]:\n'
+        'elif args[:1] == ["-"]:\n'
+        '    sys.argv=args\n'
         '    exec(compile(sys.stdin.read(), "workflow-inline", "exec"))\n'
         'else:\n'
         '    sys.argv=args\n'
@@ -48,11 +51,11 @@ def shell_step(tmp_path, r2_server, job, name, env):
         command.write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} {shlex.quote(str(driver))} "$@"\n',
                            encoding='utf-8', newline='\n')
         command.chmod(0o755)
-    script = tmp_path / 'step.sh'
-    script.write_text(step_script(job, name), encoding='utf-8', newline='\n')
+    script_file = tmp_path / 'step.sh'
+    script_file.write_text(script if script is not None else step_script(job, name), encoding='utf-8', newline='\n')
     environment = _child_env(**env)
     environment['PATH'] = str(helper) + os.pathsep + environment['PATH']
-    return subprocess.run([_BASH, '-e', '-o', 'pipefail', str(script)], cwd=tmp_path,
+    return subprocess.run([_BASH, '-e', '-o', 'pipefail', str(script_file)], cwd=tmp_path,
                           env=environment, capture_output=True, text=True, encoding='utf-8', timeout=60)
 
 
@@ -63,7 +66,10 @@ def test_failed_commit_summary_publishes_downloads_or_run_links(tmp_path, r2_ser
     base = f'http://127.0.0.1:{r2_server.server_port}/hermes-releases'
     summary = tmp_path / 'summary.md'
     jobs = _workflow()['jobs']
+    bundle_env = {'HERMES_HOME': None, 'EMPTY': '', 'LABEL': '<script>\n"café" & value</script>'}
     env = dict(HERMES_BUILD_COMMIT=sha, HERMES_PAYLOAD_TAG='', RELEASE_COMMIT=sha,
+               GITHUB_REPOSITORY='fixture-owner/fixture-repo',
+               HERMES_BUNDLE_ENV_JSON=json.dumps(bundle_env), CI_SECRET='must-not-appear',
                RELEASE_PHASE='', TARGET='win32-x64', RUN_URL=run_url,
                GITHUB_STEP_SUMMARY=str(summary), CLOUDFLARE_R2_PUBLIC_URL=base,
                CLOUDFLARE_R2_ACCOUNT_ID='loopback', CLOUDFLARE_R2_ACCESS_KEY_ID='test-inert',
@@ -74,15 +80,20 @@ def test_failed_commit_summary_publishes_downloads_or_run_links(tmp_path, r2_ser
         artifact = tmp_path / 'apps/desktop/release/HermesBundled-0.33.0-win-x64.msix'
         artifact.parent.mkdir(parents=True)
         artifact.write_bytes(b'inert downloadable fixture')
-        staged = shell_step(tmp_path, r2_server, 'build-win32', 'Stage Windows packages to R2', env)
+        staged = shell_step(tmp_path, r2_server, 'build-win32-commit', 'Stage Windows packages to R2', env)
         assert staged.returncode == 0, staged.stdout + staged.stderr
     result = shell_step(tmp_path, r2_server, 'commit-builds-summary',
                         'Render the full expected-binary matrix', env)
     assert result.returncode == 0, result.stdout + result.stderr
-    text = summary.read_text(encoding='utf-8')
+    text = summary.read_text(encoding='utf-8-sig')
     page_key = f'releases/commit/{sha}/index.html'
     with urlopen(f'{base}/{page_key}', timeout=5) as response:
         page = response.read().decode()
+    assert f'href="https://github.com/fixture-owner/fixture-repo/commit/{sha}"' in page
+    assert 'Bundle environment' in page and 'HERMES_HOME' in page and 'Unset' in page
+    assert '<code>EMPTY</code></td><td><code>&quot;&quot;</code>' in page
+    assert html.escape(json.dumps(bundle_env['LABEL'], ensure_ascii=False)) in page
+    assert '<script>' not in page and 'must-not-appear' not in page and 'CI_SECRET' not in page
     links = re.findall(r'\]\((https?://[^)]+)\)', text)
     assert run_url in links
     assert text.count('✅ Built') == page.count('✅ Built') == int(has_download)
@@ -95,36 +106,42 @@ def test_failed_commit_summary_publishes_downloads_or_run_links(tmp_path, r2_ser
     for line in text.splitlines():
         if 'Not built' in line:
             assert f'[View build run]({run_url})' in line and base not in line
-        elif 'Linux' in line:
+        elif line.startswith('| Linux'):
             assert 'Disabled' in line and '](' not in line
     assert all(key.startswith(f'releases/commit/{sha}/') for key in r2_server.store)
     for name in ('build-win32', 'build-darwin'):
-        assert jobs[name]['strategy']['fail-fast'] is False
+        # The commit/release split collapsed into one leg per platform; the
+        # result job's env still encodes exactly-which-trust-branch-succeeded.
+        result_job = jobs[name]
+        assert f"needs.{name}-commit.result" in result_job['env']['SELECTED_BUILD_SUCCEEDED']
+        assert jobs[f'{name}-commit']['strategy']['fail-fast'] is False
     step = next(step for step in jobs['commit-builds-summary']['steps'] if 'run' in step)
     assert step['env']['RUN_URL'] == '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+    assert step['env']['HERMES_BUNDLE_ENV_JSON'] == '${{ inputs.bundle_env }}'
 
 
 def test_commit_staging_and_summary_bind_every_produced_file_without_channels(tmp_path, r2_server):
     sha = 'a' * 40
     base = f'http://127.0.0.1:{r2_server.server_port}/hermes-releases'
     env = dict(HERMES_BUILD_COMMIT=sha, HERMES_PAYLOAD_TAG='', RELEASE_COMMIT=sha,
+               GITHUB_REPOSITORY='o/r',
                RELEASE_PHASE='', GITHUB_SHA='b' * 40, CLOUDFLARE_R2_PUBLIC_URL=base,
                CLOUDFLARE_R2_ACCOUNT_ID='loopback', CLOUDFLARE_R2_ACCESS_KEY_ID='test-inert',
                CLOUDFLARE_R2_SECRET_ACCESS_KEY='test-inert', CLOUDFLARE_R2_BUCKET='hermes-releases')
     release = tmp_path / 'apps/desktop/release'
     release.mkdir(parents=True)
     producers = [
-        ('build-win32', 'Stage Windows packages to R2', 'win32-x64', [
+        ('build-win32-commit', 'Stage Windows packages to R2', 'win32-x64', [
             'HermesBundled-0.33.0-win-x64.msix']),
-        ('build-win32', 'Stage Windows packages to R2', 'win32-arm64', [
+        ('build-win32-commit', 'Stage Windows packages to R2', 'win32-arm64', [
             'HermesBundled-0.33.0-win-arm64.msix']),
-        ('build-darwin', 'Stage macOS packages and feed inputs to R2', 'darwin-arm64', [
+        ('build-darwin-commit', 'Stage macOS packages and feed inputs to R2', 'darwin-arm64', [
             'HermesBundled-0.33.0-mac-arm64.dmg', 'HermesBundled-0.33.0-mac-arm64.zip',
             'HermesBundled-0.33.0-mac-arm64.zip.blockmap']),
-        ('build-darwin', 'Stage macOS packages and feed inputs to R2', 'darwin-x64', [
+        ('build-darwin-commit', 'Stage macOS packages and feed inputs to R2', 'darwin-x64', [
             'HermesBundled-0.33.0-mac-x64.dmg', 'HermesBundled-0.33.0-mac-x64.zip',
             'HermesBundled-0.33.0-mac-x64.zip.blockmap']),
-        ('publish-win32-updater', 'Stage universal bundles to R2', 'windows-universal', [
+        ('assemble-win32-bundle', 'Stage universal bundles to R2', 'windows-universal', [
             'HermesBundled-0.33.0.0-win.msixbundle']),
     ]
     artifact_keys = set()
@@ -148,7 +165,7 @@ def test_commit_staging_and_summary_bind_every_produced_file_without_channels(tm
     missing = shell_step(tmp_path, r2_server, 'termux-deb', termux_name, env)
     assert missing.returncode != 0
     assert r2_server.store == before
-    deb = tmp_path / 'termux-build/deb/hermes-agent_0.33.0~commit.aaaaaaaaaaaa_aarch64.deb'
+    deb = tmp_path / 'termux-build/deb/hermes agent_0.33.0~commit.aaaaaaaaaaaa_aarch64.deb'
     deb.parent.mkdir(parents=True)
     deb.write_bytes(b'transport fixture, not a native Debian package')
     staged = shell_step(tmp_path, r2_server, 'termux-deb', termux_name, env)
@@ -160,24 +177,38 @@ def test_commit_staging_and_summary_bind_every_produced_file_without_channels(tm
     summary = tmp_path / 'summary.md'
     summary_env = {**env, 'GITHUB_STEP_SUMMARY': str(summary), 'RELEASE_NEEDS': json.dumps({
         'validate': {'result': 'success'}, 'build-win32': {'result': 'success'},
-        'build-darwin': {'result': 'success'}, 'publish-win32-updater': {'result': 'success'},
+        'build-darwin': {'result': 'success'}, 'assemble-win32-bundle': {'result': 'success'},
         'termux-deb': {'result': 'success'}, 'build-linux': {'result': 'success'},
     })}
     result = shell_step(tmp_path, r2_server, 'commit-builds-summary',
                         'Render the full expected-binary matrix', summary_env)
     assert result.returncode == 0, result.stdout + result.stderr
-    text = summary.read_text(encoding='utf-8')
+    text = summary.read_text(encoding='utf-8-sig')
     links = re.findall(r'\]\((http[^)]+)\)', text)
     # Blockmaps are receipt inputs; every other staged product has a download row.
-    expected = {f'{base}/{key}' for key in artifact_keys if not key.endswith('.blockmap')}
+    expected = {f'{base}/{quote(key, safe="/")}' for key in artifact_keys if not key.endswith('.blockmap')}
     assert set(links) == expected
     assert len(links) == len(expected)
     for url in links:
         with urlopen(url, timeout=5) as response:
-            key = url.removeprefix(base + '/')
+            key = unquote(url.removeprefix(base + '/'))
             assert response.read() == r2_server.store[key][0]
+    page_key = f'releases/commit/{sha}/index.html'
+    page = r2_server.store[page_key][0].decode()
+    assert all(f'href="{url}"' in page for url in expected)
+    assert 'Store-' not in page and 'Linux x64' in page and 'Linux ARM64' in page
     assert all(key.startswith(f'releases/commit/{sha}/') for key in r2_server.store)
     assert not any(method == 'DELETE' for method, _, _ in r2_server.requests)
+
+    receipt_key = f'releases/commit/{sha}/handoff-win32-x64.json'
+    original = r2_server.store[receipt_key]
+    r2_server.store[receipt_key] = (b'not-json', '"invalid"')
+    failed = shell_step(tmp_path, r2_server, 'commit-builds-summary',
+                        'Render the full expected-binary matrix', summary_env)
+    assert failed.returncode != 0
+    assert summary.read_text(encoding='utf-8-sig') == text
+    assert r2_server.store[page_key][0].decode() == page
+    r2_server.store[receipt_key] = original
 
     # The actual summary command remains useful after an admitted matrix failure.
     r2_server.store.pop(f'releases/commit/{sha}/handoff-darwin-x64.json')
@@ -187,4 +218,4 @@ def test_commit_staging_and_summary_bind_every_produced_file_without_channels(tm
     incomplete = shell_step(tmp_path, r2_server, 'commit-builds-summary',
                             'Render the full expected-binary matrix', summary_env)
     assert incomplete.returncode == 0, incomplete.stdout + incomplete.stderr
-    assert 'failed: build-darwin' in summary.read_text(encoding='utf-8')
+    assert 'failed: build-darwin' in summary.read_text(encoding='utf-8-sig')

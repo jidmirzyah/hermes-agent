@@ -240,7 +240,7 @@ use `pm.available("extra-name")` in `is_available()`. Request
 
 Declare a third-party plugin's own dependencies in its manifest or
 `pyproject.toml` rather than inventing a Hermes extra. See
-[Build a Hermes Plugin → Lazy-install](/developer-guide/plugins#lazy-install-optional-python-dependencies).
+[Build a Hermes Plugin → Lazy-install](./plugins/index.md#lazy-install-optional-python-dependencies).
 
 ## Reference implementations
 

@@ -62,8 +62,6 @@ class DaemonThreadPoolExecutor(ThreadPoolExecutor):
                     self._initializer,
                     self._initargs,
                 )
-            # Carry the active profile into the review thread so MEMORY.md / skill review writes land in the
-            # right profile (#54937).
             t = threading.Thread(
                 name=thread_name, target=_worker, daemon=True,
                 args=worker_args,

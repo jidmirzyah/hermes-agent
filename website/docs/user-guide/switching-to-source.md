@@ -54,7 +54,7 @@ Do not clone into a signed app package or overwrite the packaged runtime.
 
 ## 3. Prepare the source runtime
 
-Read the [developer workflow](/reference/package-management#developer-workflow)
+Read the [developer workflow](../reference/package-management.md#developer-workflow)
 for native build prerequisites and current bootstrap limitations. Select your
 intended `HERMES_HOME` before preparation, then use the checkout's PM bootstrap:
 
@@ -81,8 +81,8 @@ runs this checkout and avoids an older `hermes` command or MSIX alias on PATH.
 `deactivate` restores the shell environment when you finish.
 
 For test dependencies and manual environments, use the
-[development setup](/developer-guide/contributing).
-See [Package management](/reference/package-management) for selected Python
+[development setup](../developer-guide/contributing.md).
+See [Package management](../reference/package-management.md) for selected Python
 generations and writable tool storage.
 
 ## 4. Select data deliberately
@@ -124,7 +124,7 @@ Check ownership and permissions on the destination.
 
 A local `docker build -t hermes-agent .` produces another image-managed install.
 It does not turn the running container into a self-updating source checkout.
-Recreate the container to use that image. See [Docker](/user-guide/docker).
+Recreate the container to use that image. See [Docker](./docker.md).
 
 ## Nix and Termux users
 
@@ -134,7 +134,7 @@ or the source procedure above where the host supports it.
 
 The Termux distribution is a bionic APT package. The desktop/server source
 bootstrap is not its supported development or repair route. Use the
-[Termux guide](/getting-started/termux) for its package and build boundaries.
+[Termux guide](../getting-started/termux.md) for its package and build boundaries.
 
 ## Switch back without assuming a downgrade is safe
 

@@ -476,20 +476,20 @@ function Emit-Frame([bool]$ok, [string]$name, [bool]$skipped, [string]$reason = 
     $frame | ConvertTo-Json -Compress | Write-Output
 }
 
+$ProductTitle = if ($IncludeDesktop) { "Install command and app + desktop" } else { "Install command and app" }
 $Stages = @(
     @{ name = "prerequisites"; title = "System prerequisites"; category = "runtime"; needs_user_input = $false },
     @{ name = "repository"; title = "Download Hermes Agent"; category = "runtime"; needs_user_input = $false },
     @{ name = "venv"; title = "Create Python environment"; category = "runtime"; needs_user_input = $false },
     @{ name = "python-deps"; title = "Install Python dependencies"; category = "runtime"; needs_user_input = $false },
-    @{ name = "node-deps"; title = "Install tool dependencies"; category = "runtime"; needs_user_input = $false },
-    @{ name = "path"; title = "Install hermes command"; category = "runtime"; needs_user_input = $false },
     @{ name = "config"; title = "Prepare config and skills"; category = "configuration"; needs_user_input = $false },
+    # The shared completion tail -- the same call `hermes update` makes -- so
+    # the manifest and the run cannot disagree. -IncludeDesktop selects the
+    # desktop product inside this stage instead of adding a second build stage.
+    @{ name = "products"; title = $ProductTitle; category = "runtime"; needs_user_input = $false },
     @{ name = "setup"; title = "Configure API keys and settings"; category = "configuration"; needs_user_input = $true },
     @{ name = "gateway"; title = "Configure gateway service"; category = "configuration"; needs_user_input = $true }
 )
-if ($IncludeDesktop) {
-    $Stages += @{ name = "desktop"; title = "Build desktop app"; category = "runtime"; needs_user_input = $false }
-}
 $Stages += @{ name = "complete"; title = "Finish install"; category = "runtime"; needs_user_input = $false }
 function Stage-Prerequisites {
     if (-not (Ensure-Git)) {
@@ -503,8 +503,30 @@ function Stage-Repository {
         Log "updating $InstallDir"
         git -C $InstallDir fetch origin $Branch; if ($LASTEXITCODE) { Fail "git fetch failed" }
         git -C $InstallDir checkout $Branch; if ($LASTEXITCODE) { Fail "git checkout failed" }
-        git -C $InstallDir pull --ff-only origin $Branch
-        if ($LASTEXITCODE) { Log "not fast-forwardable; keeping local state" }
+        git -C $InstallDir merge --ff-only "origin/$Branch"
+        if ($LASTEXITCODE) {
+            # A release cut off the main line, a force-pushed remote, or the
+            # user's own commits cannot fast-forward. Every stage below reads
+            # files only the new tree has (pm/), so an install left on the old
+            # tree cannot finish -- match the remote the way `hermes update`
+            # does, after parking the old tip and any local work. Mirrors
+            # scripts/install.sh; this side kept the old tree and then read a
+            # pm/ file that only the new one has.
+            $stamp = (Get-Date -Format 'yyyyMMdd-HHmmss')
+            $prior = (git -C $InstallDir rev-parse --short HEAD 2>$null)
+            if (-not $prior) { $prior = 'unknown' }
+            $rescue = "refs/hermes-install-backup/$stamp-$prior"
+            if (git -C $InstallDir status --porcelain) {
+                git -C $InstallDir stash push --include-untracked -m "hermes-install-autostash-$stamp"
+                if ($LASTEXITCODE) { Log "could not stash local changes; they are overwritten below" }
+                else { Log "local changes stashed as hermes-install-autostash-$stamp" }
+            }
+            git -C $InstallDir update-ref $rescue HEAD 2>$null
+            if ($LASTEXITCODE) { Log "could not back up the previous HEAD" }
+            else { Log "previous HEAD backed up to $rescue" }
+            git -C $InstallDir reset --hard "origin/$Branch"; if ($LASTEXITCODE) { Fail "git reset failed" }
+            Log "not fast-forwardable; reset to origin/$Branch"
+        }
     } else {
         Log "cloning $RepoUrl ($Branch) into $InstallDir"
         New-Item -ItemType Directory -Force -Path (Split-Path $InstallDir) | Out-Null
@@ -558,11 +580,32 @@ function Stage-PythonDeps {
     Invoke-BootstrapPm
 }
 
-function Stage-NodeDeps {
-    Log "tool dependencies are managed by pm (hermes pm install)"
+function Invoke-SourceCompletion([bool]$Desktop) {
+    # The whole tail in one place, by calling the completion an update calls:
+    # publish the commands, build the products (tui/web, plus the desktop app
+    # when asked), then run the post-build maintenance that syncs bundled
+    # skills and migrates config. Node, browsers and the frontend build tools
+    # arrive through pm as the build asks for them; the bootstrap interpreter
+    # itself only re-enters the tree on PM's selected Python.
+    $bootPy = Get-BootstrapPython
+    $completionArgs = @('-I', '-B', '-X', 'utf8', 'hermes_cli/source_completion.py', '--source', $InstallDir)
+    if ($Desktop) { $completionArgs += '--desktop' }
+    Push-Location $InstallDir
+    try {
+        & $bootPy @completionArgs
+        $code = $LASTEXITCODE
+    } finally {
+        Pop-Location
+    }
+    if ($code) { Fail "app products or command publication failed (exit $code)" }
+    Log "app products and hermes command ready"
 }
 
-function Stage-Path {
+function Publish-UserCommand {
+    # PATH exposure stays installer-owned on Windows: expose_cli() answers
+    # "windows-installer-owned" rather than creating the user-facing command,
+    # so the install-scoped launchers the completion publishes are not the ones
+    # the user's PATH points at.
     $binDir = Join-Path $HermesHome "bin"
     $bootPy = Get-BootstrapPython
     Push-Location $InstallDir
@@ -575,6 +618,25 @@ function Stage-Path {
     if ($code) { Fail "launcher staging failed" }
     Set-LauncherUserPath $binDir
     Log "hermes command installed at $binDir"
+}
+
+function Test-DesktopProductPresent {
+    # Does this checkout already carry a built desktop app? A plain repair or
+    # upgrade rerun on a desktop install must REBUILD it rather than leave a
+    # bundle built by the previous code: the app is part of that install and its
+    # artifacts live inside the tree, so an update makes them stale, not gone.
+    $release = Join-Path $InstallDir "apps/desktop/release"
+    foreach ($candidate in @("win-unpacked", "linux-unpacked", "mac", "mac-arm64")) {
+        if (Test-Path (Join-Path $release $candidate)) { return $true }
+    }
+    return $false
+}
+
+function Stage-Products {
+    $desktop = [bool]$IncludeDesktop -or [bool](Test-DesktopProductPresent)
+    Invoke-SourceCompletion $desktop
+    Publish-UserCommand
+    if ($desktop) { Confirm-DesktopArtifact }
 }
 
 function Set-LauncherUserPath([string]$binDir) {
@@ -600,41 +662,39 @@ function Stage-Config {
     Log "config prepared in $HermesHome"
 }
 
+function Invoke-InstalledHermes([string[]]$CommandArgs) {
+    . (Join-Path $InstallDir 'scripts/desktop-update/runtime.ps1')
+    $command = @(Get-HermesRuntimeCommand -InstallRoot $InstallDir)
+    $runtimeArgs = @($command | Select-Object -Skip 1) + $CommandArgs
+    & $command[0] @runtimeArgs
+    if ($LASTEXITCODE) { Fail "hermes $($CommandArgs -join ' ') failed (exit $LASTEXITCODE)" }
+}
+
 function Stage-Setup {
     if ($NonInteractive) { return }
-    & (Join-Path $InstallDir "venv\Scripts\python.exe") (Join-Path $InstallDir "hermes") setup
+    Invoke-InstalledHermes @('setup')
 }
 
 function Stage-Gateway {
     if ($NonInteractive) { return }
-    & (Join-Path $InstallDir "venv\Scripts\python.exe") (Join-Path $InstallDir "hermes") gateway install
+    Invoke-InstalledHermes @('gateway', 'install')
 }
 
 function Stage-Desktop {
-    # Desktop support via the CURRENT runtime paths only. wake/voice extras
-    # ride pm's venv sync ([all] does not include them; lazy install at
-    # first use remains the fallback -- policy: Teknium, July 2026, #70509).
-    # The build is `hermes desktop --build-only`, the same authority as
-    # `hermes gui` and the update flow; the deleted installer-local
-    # npm/Electron helpers must not reappear here.
-    $venvPython = Join-Path $InstallDir "venv\Scripts\python.exe"
-    if (-not (Test-Path $venvPython)) { Fail "venv python missing at $venvPython" }
+    # External-caller contract: -Stage desktop stays dispatchable on its own
+    # (see Invoke-StageByName). The work is the same completion call with the
+    # desktop product selected. Voice and wake extras are not synced here: pm
+    # lazy-installs them at first use (policy: Teknium, July 2026, #70509).
+    Invoke-SourceCompletion $true
+    Publish-UserCommand
+    Confirm-DesktopArtifact
+}
+
+function Confirm-DesktopArtifact {
+    # Probe the packaged artifact the completion just built -- the same
+    # candidates hermes_cli/main_desktop._desktop_packaged_executable resolves.
     Push-Location $InstallDir
     try {
-        Log "ensuring desktop voice/wake dependencies via pm venv sync"
-        & $venvPython -c "from pm.ensure import sync_venv; sync_venv(['wake', 'voice'], explicit=True)"
-        if ($LASTEXITCODE) {
-            Write-Host "[hermes] voice/wake dependency sync failed (exit $LASTEXITCODE) -- they will lazy-install at first use" -ForegroundColor Yellow
-        }
-        Log "building desktop app (hermes desktop --build-only)"
-        & $venvPython (Join-Path $InstallDir "hermes") desktop --build-only
-        $code = $LASTEXITCODE
-        if ($code) { Fail "desktop build failed (hermes desktop --build-only exited $code)" }
-
-        # Probe the produced artifact -- the same candidates
-        # hermes_cli/main_desktop._desktop_packaged_executable resolves
-        # (verified: --build-only returns the packaged app under
-        # apps/desktop/release/, not the --source dist/).
         $desktopDir = Join-Path $InstallDir "apps\desktop"
         $candidates = @(
             (Join-Path $desktopDir "release\win-unpacked\Hermes.exe"),
@@ -720,7 +780,7 @@ function New-DesktopShortcuts {
                 $parent = Split-Path -Parent $lnkPath
                 if (-not (Test-Path $parent)) {
                     New-Item -ItemType Directory -Force -Path $parent | Out-Null
-                }
+        }
                 $sc = $shell.CreateShortcut($lnkPath)
                 $sc.TargetPath = $TargetExe
                 $sc.WorkingDirectory = $workDir
@@ -755,8 +815,7 @@ function Invoke-StageByName([string]$name) {
         "repository" { Stage-Repository }
         "venv" { Stage-Venv }
         "python-deps" { Stage-PythonDeps }
-        "node-deps" { Stage-NodeDeps }
-        "path" { Stage-Path }
+        "products" { Stage-Products }
         "config" { Stage-Config }
         "setup" { Stage-Setup }
         "gateway" { Stage-Gateway }
@@ -798,9 +857,8 @@ if ($Stage) {
     # The $Stages table is the single authoritative list: it drives the
     # -Manifest output AND the no-flag ladder, so -IncludeDesktop affects
     # the real run exactly as the manifest advertises. "desktop" stays
-    # directly dispatchable via -Stage even without the flag (long-standing
-    # external-caller contract; the bootstrap frontend always pairs it
-    # with -IncludeDesktop when it lists the stage).
+    # directly dispatchable via -Stage even though it is never listed
+    # (long-standing external-caller contract).
     $known = @($Stages | ForEach-Object { $_.name })
     if ($known -notcontains $Stage -and $Stage -ne "desktop") {
         if ($Json) { Emit-Frame $false $Stage $false "unknown stage: $Stage" }

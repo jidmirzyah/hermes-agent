@@ -1,6 +1,8 @@
 """CI runs archival before the exact tool and payload consumers."""
+import json
 from pathlib import Path
-import shlex
+
+import pytest
 
 from ruamel.yaml import YAML
 
@@ -12,28 +14,22 @@ def load(name):
     return YAML(typ="base").load((ROOT / ".github/workflows" / name).read_text(encoding="utf-8"))
 
 
-def test_termux_and_desktop_stagers_consume_archive_seeds():
-    release = load("desktop-bundled-release.yml")
-    for file, job_name in (("desktop-bundled-release.yml", "termux-deb"), ("termux-verify.yml", "native-runtime")):
-        job = load(file)["jobs"][job_name]
-        steps = job["steps"]
-        index, step = next((i, s) for i, s in enumerate(steps) if "scripts.ci.archive_inputs" in s.get("run", ""))
-        args = shlex.split(step["run"])
-        assert args[args.index("--target") + 1] == "linux-arm64-bionic"
-        assert args[args.index("--store") + 1] == "$HERMES_RUNTIME_DIR"
-        assert args[args.index("--payload") + 1] == "termux-build/payload"
-        assert "if" not in step and "continue-on-error" not in step
-        assert R2_ENV <= (job.get("env", {}).keys() | step.get("env", {}).keys())
-        first_stage = next(i for i, s in enumerate(steps) if "scripts/termux/build_cpython.sh" in s.get("run", ""))
-        assert index < first_stage
-    for name in ("build-win32", "build-darwin"):
-        steps = release["jobs"][name]["steps"]
-        index, step = next((i, s) for i, s in enumerate(steps) if "scripts.ci.archive_inputs" in s.get("run", ""))
-        assert "--target '${{ matrix.target.label }}'" in step["run"]
-        assert "--store apps/desktop/build/agent-payload/tools" in step["run"]
-        assert index < next(i for i, s in enumerate(steps) if "scripts/bundles/desktop.py" in s.get("run", ""))
-        setup = next(s for s in steps if s.get("uses") == "./.github/actions/setup-pm")
-        assert setup["with"]["archive-inputs"] == "true"
+def test_archive_reader_accepts_bom_without_changing_pin_authority(tmp_path):
+    from scripts.ci.archive_inputs import pinned_inputs
+
+    (tmp_path / "pm").mkdir()
+    (tmp_path / "pm/lock.json").write_bytes(b'\xef\xbb\xbf{"schema":1,"packages":{}}')
+    table = tmp_path / "pm/termux_runtime_libs.json"
+    row = {"url": "https://example.invalid/café.deb", "sha256": "a" * 64}
+    table.write_bytes(b"\xef\xbb\xbf" + json.dumps({"libs": {"lib": row}}, ensure_ascii=False).encode("utf-8"))
+    before = table.read_bytes()
+    (pin,) = pinned_inputs(tmp_path, target="linux-arm64-bionic")
+    assert (pin.name, pin.url, pin.sha256) == ("lib", row["url"], row["sha256"])
+    assert table.read_bytes() == before
+    row["sha256"] = " " + row["sha256"]
+    table.write_bytes(b"\xef\xbb\xbf" + json.dumps({"libs": {"lib": row}}).encode("utf-8"))
+    with pytest.raises(ValueError):
+        pinned_inputs(tmp_path, target="linux-arm64-bionic")
 
 
 def test_archive_gate_uses_bootstrap_python_and_trusted_exact_revision():
@@ -48,11 +44,20 @@ def test_archive_gate_uses_bootstrap_python_and_trusted_exact_revision():
     checkout = job["steps"][0]
     assert checkout["with"]["ref"] == "${{ inputs.sha || github.sha }}"
     release = load("desktop-bundled-release.yml")["jobs"]
-    caller = release["archive-inputs"]
-    assert caller["needs"] == ["validate"]
-    assert caller["with"]["sha"] == "${{ needs.validate.outputs.sha }}"
+    # The archive lives as a validate step with the job's own gate shape —
+    # a skipped archive (disposable/termux runs) must not skip the builds.
+    validate = release["validate"]
+    (archive,) = [s for s in validate["steps"] if s.get("run") == "python3 -m scripts.ci.archive_inputs"]
+    assert archive["if"] == (
+        "inputs.disposable_run == '' && inputs.disposable_channel == ''"
+        " && (inputs.release-phase == '' || inputs.release-phase == 'candidate')"
+    )
+    assert R2_ENV <= archive["env"].keys()
+    assert validate["environment"] == "release-signing"
+    checkout = validate["steps"][0]
+    assert "actions/checkout" in checkout["uses"]
     for name in ("build-win32", "build-darwin", "termux-deb"):
-        assert "archive-inputs" in release[name]["needs"]
+        assert "archive-inputs" not in release[name].get("needs", [])
 
     action = YAML(typ="base").load((ROOT / ".github/actions/setup-pm/action.yml").read_text(encoding="utf-8"))
     assert action["inputs"]["archive-inputs"]["default"] == "false"

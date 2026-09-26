@@ -20,8 +20,8 @@ def git(root, *args):
     ).stdout.strip()
 
 
-@pytest.fixture
-def releases(tmp_path, monkeypatch):
+@pytest.fixture(params=["utf-8", "utf-8-sig"])
+def releases(tmp_path, monkeypatch, request):
     origin = tmp_path / "origin"
     origin.mkdir()
     git(origin, "init", "-b", "main")
@@ -73,7 +73,7 @@ def releases(tmp_path, monkeypatch):
             self.send_response(404 if data is None else 200)
             self.end_headers()
             if data is not None:
-                self.wfile.write((data if isinstance(data, str) else json.dumps(data)).encode())
+                self.wfile.write((data if isinstance(data, str) else json.dumps(data)).encode(request.param))
 
         def log_message(self, format, *args):
             pass
@@ -90,6 +90,20 @@ def releases(tmp_path, monkeypatch):
                         + (f"?{parsed.query}" if parsed.query else ""), *args, **kwargs)
 
     monkeypatch.setattr(urllib.request, "urlopen", local_urlopen)
+    # Legacy pointer tests below retain their HTTP/tag boundary. New CLI callers
+    # consume the protocol reader, whose complete schema is tested independently.
+    from hermes_cli import source_releases
+    def resolve_channel(name, repository):
+        record = {"name": name, "repository": repository, "state": "active",
+                  "policy": "source-branch" if name == "main" else "preview"}
+        manifest = None
+        if name == "main":
+            record["delivery"] = {"kind": "source-branch", "branch": "main"}
+        else:
+            manifest = {"request": {"commit": commits[1 if name == "stable" else 2],
+                "sourceVersion": tags[name].removeprefix("v"), "buildId": "legacy-fixture"}}
+        return SimpleNamespace(requested=record, terminal=record, manifest=manifest)
+    monkeypatch.setattr(source_releases, "_resolve_channel", resolve_channel)
     yield SimpleNamespace(root=checkout, origin=origin, commits=commits,
                           tags=tags, responses=responses, requests=requests)
     server.shutdown()
@@ -125,20 +139,22 @@ def test_source_check_and_apply_land_on_selected_release(releases, monkeypatch, 
     # Exercise the real selection/fetch/checkout path, not dependency installation
     # or live service management. No host OS is simulated.
     opts = update_cmd._UpdateOptions(
-        active_lazy_features=[], pre_update_version=None, gw_input_fn=None,
+        pre_update_version=None, gw_input_fn=None,
         assume_yes=True, keep_stash=False, switch_branch=False, discard_local_changes=False,
     )
     monkeypatch.setattr(update_cmd, "_resolve_update_options", lambda *_: opts)
     monkeypatch.setattr(update_cmd, "_begin_update_receipt_and_plan", lambda *_: None)
     monkeypatch.setattr(main, "_run_pre_update_backup", lambda *_: None)
-    monkeypatch.setattr(main, "_pause_windows_gateways_for_update", lambda: [])
+    monkeypatch.setattr(main, "_pause_windows_gateways_for_update", lambda: None)
     monkeypatch.setattr(update_cmd, "_prepare_git_command", lambda: (False, ["git"], False))
     applied = []
-    monkeypatch.setattr(update_cmd, "_apply_pulled_update", lambda *a, **k: applied.append(git(releases.root, "rev-parse", "HEAD")))
+    monkeypatch.setattr(update_cmd, "_complete_source_update", lambda request: applied.append(request))
     args = SimpleNamespace(branch=None, channel=None, force_venv=True)
     update_cmd._cmd_update_impl(args, False)
     expected = releases.commits[1 if channel == "stable" else 2]
-    assert applied == [expected]
+    assert len(applied) == 1
+    assert applied[0]["expected_sha"] == expected
+    assert applied[0]["source"] == str(releases.root.resolve())
     assert git(releases.root, "rev-parse", "HEAD") == expected
     if start != "old":
         assert git(releases.root, "rev-parse", "my-work") == branch_sha
@@ -185,7 +201,7 @@ def test_zip_fallback_keeps_selected_repository_and_commit(releases, monkeypatch
     with pytest.raises(DownloadBoundary):
         update_cmd_zip._update_via_zip(
             SimpleNamespace(branch=None), target_sha=releases.commits[2],
-            target_repository="Fixture/hermes-agent")
+            target_repository="Fixture/hermes-agent", completion_request={})
     assert seen == [f"https://github.com/Fixture/hermes-agent/archive/{releases.commits[2]}.zip"]
 
 

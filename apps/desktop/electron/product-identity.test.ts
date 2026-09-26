@@ -117,104 +117,85 @@ test('nonstable runtime pins userData before the app name can change', async ():
   }
 })
 
-test('light identity is fully distinct from the full identity', async (): Promise<void> => {
-  const full: ProductIdentity = await identityForVariant(undefined)
-  const light: ProductIdentity = await identityForVariant('light')
-
-  assert.equal(light.light, true)
-
-  // Enumerate the OS-visible identity markers explicitly rather than looping
-  // Object.keys: `store` is a build-mode flag, legitimately equal (false)
-  // across variants, so a keys-loop would fail for the wrong reason. Only the
-  // markers Windows/electron keys on must differ for side-by-side installs.
-  for (const prop of ['displayName', 'appId', 'appNamePascal', 'msixAppIdWithOrg', 'channel'] as const) {
-    assert.notEqual(light[prop], full[prop], `${prop} must differ between light and full`)
-  }
-})
-
-test('a canary payload tag moves BOTH variants onto their canary feed channel', async (): Promise<void> => {
-  process.env.HERMES_PAYLOAD_TAG = 'v0.28.0-canary.20260818'
-  const full: ProductIdentity = await identityForVariant(undefined)
-  assert.equal(full.channel, 'canary')
-
-  process.env.HERMES_PAYLOAD_TAG = 'v0.28.0-canary.20260818'
-  const light: ProductIdentity = await identityForVariant('light')
-  assert.equal(light.channel, 'light-canary')
-})
-
-test('canary installs alongside stable with its own GUI and CLI names', async (): Promise<void> => {
-  for (const variant of [undefined, 'bundled', 'light']) {
-    delete process.env.HERMES_PAYLOAD_TAG
+test.each([
+  [undefined, 'Hermes', 'hermes', 'latest', 'canary'],
+  ['bundled', 'Hermes Agent', 'hermes', 'latest', 'canary'],
+  ['light', 'Hermes Light', 'hermes-light', 'light', 'light-canary']
+] as const)(
+  '%s separates stable, canary and independent commits',
+  async (
+    variant: string | undefined,
+    display: string,
+    cli: string,
+    channel: string,
+    canaryChannel: string
+  ): Promise<void> => {
     const stable: ProductIdentity = await identityForVariant(variant)
-    process.env.HERMES_PAYLOAD_TAG = 'v0.28.0-canary.20260818'
-    const canary: ProductIdentity = await identityForVariant(variant)
+    assert.equal(stable.displayName, display)
+    assert.equal(stable.channel, channel)
+    assert.equal(stable.light, variant === 'light')
+    assert.equal(stable.storeMsix, undefined)
+    const identities: ProductIdentity[] = [stable]
 
-    for (const prop of [
-      'displayName',
-      'appId',
-      'appNamePascal',
-      'msixAppIdWithOrg',
-      'windowsExecutableName',
-      'cliName'
+    for (const [tag, commit, expectedCli, expectedChannel] of [
+      ['v1.2.3-canary.20260818', '', `${cli}-canary`, canaryChannel],
+      ['', 'abcdef1234567890abcdef1234567890abcdef12', `${cli}-abcdef1`, null],
+      ['', '1234567890abcdef1234567890abcdef12345678', `${cli}-1234567`, null]
     ] as const) {
-      assert.notEqual(canary[prop], stable[prop], `${prop} must isolate canary`)
+      process.env.HERMES_PAYLOAD_TAG = tag
+      process.env.HERMES_BUILD_COMMIT = commit
+      const current: ProductIdentity = await identityForVariant(variant)
+      assert.equal(current.channel, expectedChannel)
+      assert.equal(current.cliName, expectedCli)
+      assert.equal(current.windowsExecutableName, expectedCli)
+      assert.equal(current.artifactNamePascal, stable.artifactNamePascal)
+      assert.deepEqual(current, await identityForVariant(variant))
+
+      if (commit) {
+        assert.equal(current.displayName, `${display} ${commit.slice(0, 7)}`)
+      }
+
+      for (const previous of identities) {
+        for (const field of [
+          'displayName',
+          'appId',
+          'appNamePascal',
+          'msixAppIdWithOrg',
+          'windowsExecutableName',
+          'cliName'
+        ] as const) {
+          assert.notEqual(current[field], previous[field], `${field} must isolate installations`)
+
+          if (commit) {
+            assert.ok(current[field].includes(commit.slice(0, 7)))
+          }
+        }
+      }
+
+      identities.push(current)
     }
 
-    assert.equal(canary.artifactNamePascal, stable.artifactNamePascal)
-    assert.equal(canary.cliName, variant === 'light' ? 'hermes-light-canary' : 'hermes-canary')
-    assert.equal(canary.windowsExecutableName, canary.cliName)
+    process.env.HERMES_BUILD_COMMIT = 'not-a-sha'
+    process.env.HERMES_PAYLOAD_TAG = 'v1.2.3'
+    assert.deepEqual(await identityForVariant(variant), stable)
   }
-})
+)
 
-test('each commit owns a deterministic identity and has no release channel', async (): Promise<void> => {
-  const firstSha: string = 'abcdef1234567890abcdef1234567890abcdef12'
-  const secondSha: string = '1234567890abcdef1234567890abcdef12345678'
+test('light and bundled retain distinct OS markers from the full client', async (): Promise<void> => {
+  const full: ProductIdentity = await identityForVariant(undefined)
 
-  for (const variant of [undefined, 'bundled', 'light']) {
-    delete process.env.HERMES_BUILD_COMMIT
-    const stable: ProductIdentity = await identityForVariant(variant)
-    process.env.HERMES_BUILD_COMMIT = firstSha
-    const first: ProductIdentity = await identityForVariant(variant)
-    assert.deepEqual(first, await identityForVariant(variant))
-    process.env.HERMES_BUILD_COMMIT = secondSha
-    const second: ProductIdentity = await identityForVariant(variant)
+  for (const variant of ['bundled', 'light']) {
+    const other: ProductIdentity = await identityForVariant(variant)
 
-    for (const prop of [
-      'displayName',
-      'appId',
-      'appNamePascal',
-      'msixAppIdWithOrg',
-      'windowsExecutableName',
-      'cliName'
-    ] as const) {
-      assert.notEqual(first[prop], stable[prop], `${prop} must isolate commit from stable`)
-      assert.notEqual(first[prop], second[prop], `${prop} must isolate two commits`)
-      assert.ok(first[prop].includes(firstSha.slice(0, 7)))
+    for (const field of ['displayName', 'appId', 'appNamePascal'] as const) {
+      assert.notEqual(other[field], full[field])
     }
 
-    assert.equal(first.channel, null)
-    assert.equal(first.cliName, `${variant === 'light' ? 'hermes-light' : 'hermes'}-${firstSha.slice(0, 7)}`)
-    assert.equal(first.artifactNamePascal, stable.artifactNamePascal)
+    if (variant === 'light') {
+      assert.notEqual(other.msixAppIdWithOrg, full.msixAppIdWithOrg)
+      assert.notEqual(other.channel, full.channel)
+    }
   }
-})
-
-test('a commit build names the SHA in the display name', async (): Promise<void> => {
-  process.env.HERMES_BUILD_COMMIT = 'abcdef1234567890abcdef1234567890abcdef12'
-  const full: ProductIdentity = await identityForVariant(undefined)
-  assert.equal(full.displayName, 'Hermes abcdef1')
-
-  const bundled: ProductIdentity = await identityForVariant('bundled')
-  assert.equal(bundled.displayName, 'Hermes Agent abcdef1')
-
-  delete process.env.HERMES_BUILD_COMMIT
-  const plain: ProductIdentity = await identityForVariant(undefined)
-  assert.equal(plain.displayName, 'Hermes')
-
-  // Malformed commit values must not leak into the name (commit builds
-  // validate the full SHA elsewhere; the display derivation stays total).
-  process.env.HERMES_BUILD_COMMIT = 'not-a-sha'
-  const malformed: ProductIdentity = await identityForVariant(undefined)
-  assert.equal(malformed.displayName, 'Hermes')
 })
 
 test('packaging isolates boot metadata and executable names without renaming release artifacts', async (): Promise<void> => {
@@ -275,25 +256,6 @@ test('packaging isolates boot metadata and executable names without renaming rel
       assert.equal(config.mac.publish, null)
     }
   }
-})
-
-test('stable tags and tagless dev builds publish to the stable channels', async (): Promise<void> => {
-  process.env.HERMES_PAYLOAD_TAG = 'v0.28.0'
-  assert.equal((await identityForVariant(undefined)).channel, 'latest')
-
-  delete process.env.HERMES_PAYLOAD_TAG
-  assert.equal((await identityForVariant('light')).channel, 'light')
-})
-
-test('bundled variant has a distinct identity from the full variant', async (): Promise<void> => {
-  const full: ProductIdentity = await identityForVariant(undefined)
-  const bundled: ProductIdentity = await identityForVariant('bundled')
-
-  assert.equal(bundled.light, false)
-  assert.notEqual(bundled.displayName, full.displayName)
-  assert.notEqual(bundled.appNamePascal, full.appNamePascal)
-  assert.notEqual(bundled.appId, full.appId)
-  assert.equal(bundled.channel, 'latest')
 })
 
 test('store inherits the bundled app identity (shared userData) but swaps the MSIX packaging identity', async (): Promise<void> => {

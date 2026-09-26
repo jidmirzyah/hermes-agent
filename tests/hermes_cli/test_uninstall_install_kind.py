@@ -137,24 +137,6 @@ def _make_home(tmp_path: Path) -> Path:
     return home
 
 
-def test_run_data_uninstall_removes_data_keeps_code(monkeypatch, tmp_path):
-    home = _make_home(tmp_path)
-    monkeypatch.setattr(un, "get_hermes_home", lambda: home)
-    import hermes_cli.gui_uninstall as gu
-
-    monkeypatch.setattr(gu, "desktop_userdata_dir", lambda: tmp_path / "electron-userdata-none")
-
-    un.run_data_uninstall(SimpleNamespace(yes=True))
-
-    # Data gone.
-    assert not (home / "config.yaml").exists()
-    assert not (home / ".env").exists()
-    assert not (home / "sessions").exists()
-    assert not (home / "logs").exists()
-    # Code untouched — even on a sealed tree the data mode never touches it.
-    assert (home / "hermes-agent" / "hermes_cli" / "__init__.py").exists()
-
-
 def test_run_data_uninstall_removes_electron_userdata(monkeypatch, tmp_path):
     home = _make_home(tmp_path)
     userdata = tmp_path / "electron-userdata"

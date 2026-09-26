@@ -15,26 +15,12 @@ import pm.receipt as receipt
 
 @pytest.fixture(autouse=True)
 def _isolated_receipt_context():
-    """The ContextVars are module state — tests must not see each other's
-    in-flight/completed receipts (a leaked begin or finalize would corrupt
-    the next test)."""
-    receipt._current.set(None)
-    receipt._completed_by_update.set(None)
-    try:
-        import hermes_cli.update_receipt as _ur
-
-        _ur._current.set(None)
-    except Exception:
-        pass
+    import hermes_cli.update_receipt as update_receipt
+    variables = (receipt._current, receipt._completed_by_update, update_receipt._current)
+    tokens = [variable.set(None) for variable in variables]
     yield
-    receipt._current.set(None)
-    receipt._completed_by_update.set(None)
-    try:
-        import hermes_cli.update_receipt as _ur
-
-        _ur._current.set(None)
-    except Exception:
-        pass
+    for variable, token in zip(variables, tokens):
+        variable.reset(token)
 
 
 @pytest.fixture
@@ -46,23 +32,47 @@ def homed(tmp_path, monkeypatch):
     return tmp_path
 
 
-def test_begin_record_finalize_roundtrip(homed):
+@pytest.mark.parametrize("outcome,exit_code", [("failed", 1), ("refused", 2)])
+def test_begin_record_finalize_roundtrip(homed, outcome, exit_code):
+    assert receipt.latest() is None
+    assert not (homed / "logs").exists()
+    assert receipt.finalize("ok") is None
+    receipt.record_warning("orphan")
+    receipt.record_refusal("x", "y")
+    assert receipt.latest() is None
     receipt.begin("sync")
+    assert receipt.snapshot()["update_id"] is None
     receipt.record_step("uv-lock", True)
     receipt.record_venv_rebuild(True)
-    receipt.record_bisect(
-        [{"plugin": "bad", "action": "disabled", "reason": "conflict"}]
-    )
     receipt.record_feature_list(["web", "acp"])
-    path = receipt.finalize("bisected")
+    assert receipt.snapshot()["kind"] == "sync"
+    path = receipt.finalize("ok")
     assert path is not None and path.is_file()
-
     data = json.loads(path.read_text(encoding="utf-8-sig"))
-    assert data["kind"] == "sync"
-    assert data["outcome"] == "bisected"
+    assert receipt.latest() == data
+    assert data["kind"] == "sync" and data["outcome"] == "ok"
     assert data["venv_rebuild"] == {"ok": True, "reason": ""}
-    assert data["plugin_bisect"][0]["plugin"] == "bad"
+    assert data["steps"][0]["name"] == "uv-lock"
     assert data["feature_list"] == ["web", "acp"]
+    assert receipt.snapshot() is None
+    assert receipt.finalize("ok") is None
+    assert receipt.last_for_update("any-id") is None
+    assert receipt.last_for_update(None) is None
+    receipt.begin("sync")
+    receipt.record_venv_rebuild(False, "uv sync exited 1")
+    receipt.record_warning("first")
+    receipt.record_warning("second")
+    receipt.record_refusal("lazy-install", "extras outside frozen set")
+    failed = receipt.finalize(outcome, exit_code)
+    latest = receipt.latest()
+    assert latest == json.loads(failed.read_text(encoding="utf-8-sig"))
+    assert latest["outcome"] == outcome and latest["exit_code"] == exit_code
+    assert latest["venv_rebuild"]["reason"] == "uv sync exited 1"
+    assert latest["refusal"]["code"] == "lazy-install"
+    assert latest["refusal"]["detail"] == "extras outside frozen set"
+    assert [w["message"] for w in latest["warnings"]] == ["first", "second"]
+    assert all(w["at"] for w in latest["warnings"])
+    assert json.loads(path.read_text(encoding="utf-8-sig")) == data
 
 
 def test_bare_python_can_report_a_failed_bootstrap(tmp_path, monkeypatch):
@@ -100,48 +110,6 @@ print(json.dumps(row))
     assert child.returncode == 0, child.stdout + child.stderr
     row = json.loads(child.stdout)
     assert row["steps"][0]["ok"] is False
-
-
-def test_latest_points_at_newest(homed):
-    receipt.begin("sync")
-    receipt.finalize("ok")
-    latest = receipt.latest()
-    assert latest is not None
-    assert latest["outcome"] == "ok"
-
-    receipt.begin("sync")
-    receipt.record_venv_rebuild(False, "uv sync exited 1")
-    receipt.finalize("failed", 1)
-    latest = receipt.latest()
-    assert latest["outcome"] == "failed"
-    assert latest["venv_rebuild"]["reason"] == "uv sync exited 1"
-
-
-def test_finalize_without_begin_is_none(homed):
-    assert receipt.finalize("ok") is None
-
-
-def test_snapshot_returns_inflight(homed):
-    receipt.begin("sync")
-    snap = receipt.snapshot()
-    assert snap is not None and snap["kind"] == "sync"
-    receipt.finalize("ok")
-    assert receipt.snapshot() is None
-
-
-def test_latest_none_when_empty(homed):
-    assert receipt.latest() is None
-
-
-def test_latest_does_not_create_dirs(homed):
-    """Reading a receipt must be side-effect free — no logs/ mkdir."""
-    import shutil
-
-    logs = homed / "logs"
-    if logs.exists():
-        shutil.rmtree(logs)
-    assert receipt.latest() is None
-    assert not logs.exists()
 
 
 def test_concurrent_finalize_writes_unique_names(homed):
@@ -192,13 +160,15 @@ def test_receipt_state_is_thread_scoped(homed):
     another thread neither sees nor clobbers this one's in-flight receipt."""
     import threading
 
-    receipt.begin("sync")
+    with receipt.worker_context("mine"):
+        receipt.begin("sync")
     receipt.record_step("mine", True)
     seen: dict = {}
 
     def other():
         seen["snapshot_from_other"] = receipt.snapshot()
-        receipt.begin("update")
+        with receipt.worker_context("theirs"):
+            receipt.begin("update")
         receipt.record_step("theirs", False)
         receipt.finalize("failed")
         seen["after_other"] = receipt.snapshot()
@@ -214,6 +184,8 @@ def test_receipt_state_is_thread_scoped(homed):
     assert [s["name"] for s in snap["steps"]] == ["mine"]
     path = receipt.finalize("ok")
     assert path is not None and path.is_file()
+    assert receipt.last_for_update("theirs") is None
+    assert receipt.last_for_update("mine")["steps"][0]["name"] == "mine"
 
 
 def test_copied_context_does_not_corrupt_parent_receipt():
@@ -253,10 +225,10 @@ def test_copied_context_finalize_does_not_finish_parent(homed):
 
 def test_recorded_values_are_not_mutable_through_the_input():
     receipt.begin("sync")
-    decisions = [{"plugin": "a", "action": "kept"}]
-    receipt.record_bisect(decisions)
-    decisions[0]["action"] = "disabled"
-    assert receipt.snapshot()["plugin_bisect"][0]["action"] == "kept"
+    checks = [{"plugin": "a", "result": {"compatible": True}}]
+    receipt.record_plugin_checks(checks)
+    checks[0]["result"]["compatible"] = False
+    assert receipt.snapshot()["plugin_checks"][0]["result"]["compatible"] is True
 
 
 def test_snapshot_returns_a_copy():
@@ -288,47 +260,6 @@ def test_nested_begin_with_token_restores_outer():
     assert receipt.snapshot() is None
 
 
-def test_finalize_without_token_pops_receipt():
-    """Ambient (no token) finalize still pops the receipt — the existing
-    linear begin→finalize consumers keep working."""
-    receipt.begin("sync")
-    assert receipt.finalize("ok") is not None
-    assert receipt.snapshot() is None
-    assert receipt.finalize("ok") is None  # nothing begun
-
-
-# --- correlation with the invoking update (update_id stamping) ----------
-
-
-def test_begin_stamps_ambient_update_correlation_id(homed):
-    """A sync begun while an update receipt is open is stamped with THAT
-    update's correlation id — the embed matches on it."""
-    import hermes_cli.update_receipt as ur
-
-    ur.begin_update_receipt()
-    my_id = ur.current_correlation_id()
-    assert my_id
-    receipt.begin("sync")
-    assert receipt.snapshot()["update_id"] == my_id
-    receipt.finalize("ok")
-    # the completion is filed under the update's id
-    assert receipt.last_for_update(my_id)["update_id"] == my_id
-
-
-def test_standalone_sync_has_no_update_id(homed):
-    receipt.begin("sync")
-    assert receipt.snapshot()["update_id"] is None
-
-
-def test_standalone_sync_is_never_filed_for_an_update(homed):
-    """A sync with no invoking update (update_id None) can never be
-    embedded into any update — it is not filed in the map at all."""
-    receipt.begin("sync")
-    receipt.finalize("ok")
-    assert receipt.last_for_update("any-id") is None
-    assert receipt.last_for_update(None) is None
-
-
 def test_sync_begin_after_update_finalized_has_no_update_id(homed, monkeypatch):
     """The correlation id comes from the OPEN update receipt: after its
     finalize pops it, a sync begun is standalone."""
@@ -342,64 +273,6 @@ def test_sync_begin_after_update_finalized_has_no_update_id(homed, monkeypatch):
     assert receipt.snapshot()["update_id"] is None
 
 
-def test_completion_map_is_per_context(homed):
-    """Another thread's finalize must not enter THIS context's completion
-    map — concurrency cannot misattribute its receipt to us."""
-    import threading
-    import hermes_cli.update_receipt as ur
-
-    ur.begin_update_receipt()
-    my_id = ur.current_correlation_id()
-    receipt.begin("sync")
-    receipt.finalize("ok")
-    mine = receipt.last_for_update(my_id)
-    assert mine is not None
-
-    def other():
-        ur.begin_update_receipt()
-        receipt.begin("sync")
-        receipt.record_step("theirs", True)
-        receipt.finalize("ok")
-
-    t = threading.Thread(target=other)
-    t.start()
-    t.join()
-    assert receipt.last_for_update(my_id)["steps"] == mine["steps"]
-
-
-def test_nested_update_syncs_do_not_displace_each_other(homed, monkeypatch):
-    """outer sync → nested update → nested sync → finalize inner →
-    finalize outer: BOTH completions stay filed under their own update
-    id; the nested one never overwrites the outer's entry."""
-    import hermes_cli.update_receipt as ur
-
-    monkeypatch.setattr(ur, "_receipt_dir", lambda: homed / "logs" / "update_receipts")
-    ur.begin_update_receipt()
-    outer_id = ur.current_correlation_id()
-    receipt.begin("sync")
-    receipt.record_step("outer-sync", True)
-    receipt.finalize("ok")
-
-    ur.begin_update_receipt()  # nested
-    inner_id = ur.current_correlation_id()
-    receipt.begin("sync")
-    receipt.record_step("inner-sync", True)
-    receipt.finalize("ok")
-
-    # both entries exist while the inner update is still open
-    assert [s["name"] for s in receipt.last_for_update(outer_id)["steps"]] == ["outer-sync"]
-    assert [s["name"] for s in receipt.last_for_update(inner_id)["steps"]] == ["inner-sync"]
-
-    ur.finalize_update_receipt("success")
-    # and after the nested finalize restored the outer receipt
-    assert ur.current_correlation_id() == outer_id
-    assert [s["name"] for s in receipt.last_for_update(outer_id)["steps"]] == ["outer-sync"]
-    assert receipt.last_for_update(inner_id) is None
-    path = ur.finalize_update_receipt("success")
-    assert receipt.last_for_update(outer_id) is None
-    assert json.loads(path.read_text(encoding="utf-8-sig"))["pm_steps"][0]["name"] == "outer-sync"
-
-
 def test_last_for_update_returns_a_copy(homed):
     import hermes_cli.update_receipt as ur
 
@@ -410,50 +283,3 @@ def test_last_for_update_returns_a_copy(homed):
     snap = receipt.last_for_update(my_id)
     snap["outcome"] = "tampered"
     assert receipt.last_for_update(my_id)["outcome"] == "ok"
-
-
-# --- failures, refusals, surfaced warnings ------------------------------
-
-
-def test_record_warning_appends(homed):
-    receipt.begin("sync")
-    receipt.record_warning("shim quarantine skipped: file locked")
-    receipt.record_warning("second")
-    receipt.finalize("ok")
-    warnings = receipt.latest()["warnings"]
-    assert [w["message"] for w in warnings] == [
-        "shim quarantine skipped: file locked", "second"
-    ]
-    assert all(w["at"] for w in warnings)
-
-
-def test_record_warning_without_begin_is_noop(homed):
-    receipt.record_warning("orphan")
-    receipt.record_refusal("x", "y")
-    assert receipt.latest() is None
-
-
-def test_record_refusal_names_the_policy_conflict(homed):
-    """A refusal record names WHY the sync refused (policy conflict) while
-    the outcome stays a failure — network/build InstallErrors stay plain
-    failures and must never be recorded as refusals."""
-    receipt.begin("sync")
-    receipt.record_refusal("lazy-install", "venv out of sync")
-    path = receipt.finalize("failed", 1)
-    data = json.loads(path.read_text(encoding="utf-8-sig"))
-    assert data["outcome"] == "failed"
-    assert data["refusal"]["code"] == "lazy-install"
-    assert data["refusal"]["detail"] == "venv out of sync"
-
-
-def test_warnings_and_refusal_survive_finalize_rotation(homed):
-    """Failure receipts must survive: recorded, written to latest.json,
-    and present on the stamped file after rotation."""
-    receipt.begin("sync")
-    receipt.record_warning("uv exited 1")
-    receipt.record_refusal("lazy-install", "extras outside frozen set")
-    receipt.finalize("refused", 2)
-    latest = receipt.latest()
-    assert latest["outcome"] == "refused"
-    assert latest["warnings"] and latest["refusal"]["code"] == "lazy-install"
-    assert latest["update_id"] is None

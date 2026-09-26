@@ -1,28 +1,18 @@
 'use strict'
 
-// Read the feed facts shared by the desktop runtime and Python publisher.
-// update-feed.json owns the paths; neither consumer derives a second copy.
-//
-//   darwinFeed('stable')          → { directory: 'releases/darwin/stable',
-//                                     channel: 'stable',
-//                                     fileName: 'stable-mac.yml',
-//                                     allowPrerelease: false }
-//   darwinFeed('canary', true)    → { directory: 'releases/darwin/light/canary',
-//                                     channel: 'canary',
-//                                     fileName: 'canary-mac.yml',
-//                                     allowPrerelease: true }
-//
-// A client composes its feed URL as PUBLIC_URL + '/' + feed.directory +
-// '/' + feed.fileName; the producer publishes the manifest at exactly that
-// key. There is no placeholder default URL — the caller supplies the base.
-
-const feeds = require('./update-feed.json')
-
+// Historical native URLs are a compatibility layout, not a channel registry.
+/** @param {string} channel @param {boolean} light */
 function darwinFeed(channel, light = false) {
-  if (!Object.hasOwn(feeds, channel)) {
-    throw new TypeError(`darwinFeed: unknown channel ${JSON.stringify(channel)} (expected stable|canary)`)
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(channel) || channel.length > 32 ||
+      /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/.test(channel)) {
+    throw new TypeError('Invalid channel name')
   }
-  return { ...feeds[channel][light ? 'light' : 'bundled'] }
+  return {
+    directory: `releases/darwin/${light ? 'light/' : ''}${channel}`,
+    channel,
+    fileName: `${channel}-mac.yml`,
+    allowPrerelease: channel !== 'stable'
+  }
 }
 
 module.exports = { darwinFeed }

@@ -156,7 +156,7 @@ def _isolated_checkout(tmp_path: Path) -> Path:
     shutil.copytree(REPO_ROOT / "pm", root / "pm", ignore=shutil.ignore_patterns("__pycache__"))
     (root / "hermes_cli").mkdir()
     for relative in ("activate", "activate.ps1", "hermes_constants.py", "hermes_cli/__init__.py",
-                     "hermes_cli/runtime_paths.py", "hermes_cli/runtime_state.py"):
+                     "pm/environments.py", "hermes_cli/runtime_state.py"):
         shutil.copy2(REPO_ROOT / relative, root / relative)
     # Environment-only tests do not exercise provisioning; the runtime tests
     # replace these stubs with a publisher that records and applies each sync.
@@ -189,6 +189,7 @@ def test_bash_scripts_pass_syntax_check():
         assert result.returncode == 0, f"{script.name}: {result.stderr}"
 
 
+@pytest.mark.platforms("windows")
 def test_source_activate_exports_the_pm_env(tmp_path: Path):
     root = _isolated_checkout(tmp_path)
     store, _ = _fake_store(tmp_path)
@@ -208,6 +209,32 @@ def test_source_activate_exports_the_pm_env(tmp_path: Path):
     assert result.stdout == "env-ok"
 
 
+@pytest.mark.platforms("windows")
+def test_activate_exports_the_sentinel_to_child_processes(tmp_path: Path):
+    """Repo scripts read activation from the environment, so the sentinel must
+    survive into an exec'd child (a plain shell variable would not), and
+    deactivate must take it back out."""
+    root = _isolated_checkout(tmp_path)
+    store, _ = _fake_store(tmp_path)
+    script = (
+        f'source "{_posix(root / "activate")}" && '
+        f'"$BASH" -c \'test -n "$__HERMES_ACTIVATED"\' && '
+        f'deactivate && '
+        f'! "$BASH" -c \'test -n "$__HERMES_ACTIVATED"\' && '
+        f'echo exported-then-cleared'
+    )
+    result = subprocess.run(
+        [_bash(), "-c", script],
+        capture_output=True,
+        text=True,
+        cwd=_posix(tmp_path),
+        env=_bash_env(store),
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "exported-then-cleared"
+
+
+@pytest.mark.platforms("windows")
 def test_deactivate_restores_the_prior_shell(tmp_path: Path):
     root = _isolated_checkout(tmp_path)
     store, _ = _fake_store(tmp_path)

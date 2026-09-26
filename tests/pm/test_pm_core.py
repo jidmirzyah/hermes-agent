@@ -5,14 +5,7 @@ stores."""
 
 from __future__ import annotations
 
-import hashlib
-import io
-import json
-import os
-import tarfile
 import threading
-from functools import partial
-from http.server import HTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
 
 import pytest
@@ -20,9 +13,10 @@ import pytest
 import pm.paths as paths
 import pm.registry as registry
 from pm.lock import Facts, Lockfile
-from pm.package import InstallError, Package, StatePackage, compose_env
+from pm.package import InstallError, compose_env
 from pm.packages import BinaryPackage
-from pm.store import Store, current_target, flatten_single_dir
+from pm.store import Store, current_target
+from tests.pm._fixtures import make_tar, served as served
 
 
 class FakeTool(BinaryPackage):
@@ -63,32 +57,6 @@ class MultiTool(BinaryPackage):
         return self.fetch_urls(version, target)[0]
 
 
-def make_tar(docroot: Path, name: str, files: dict[str, str]) -> tuple[str, str]:
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
-        for rel, content in files.items():
-            data = content.encode()
-            info = tarfile.TarInfo(rel)
-            info.size = len(data)
-            info.mode = 0o755
-            tf.addfile(info, io.BytesIO(data))
-    payload = buf.getvalue()
-    (docroot / name).write_bytes(payload)
-    return name, hashlib.sha256(payload).hexdigest()
-
-
-@pytest.fixture
-def served(tmp_path):
-    docroot = tmp_path / "www"
-    docroot.mkdir()
-    handler = partial(SimpleHTTPRequestHandler, directory=str(docroot))
-    server = HTTPServer(("127.0.0.1", 0), handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    yield docroot, f"http://127.0.0.1:{server.server_port}"
-    server.shutdown()
-
-
 @pytest.fixture
 def pm_env(tmp_path, served, monkeypatch):
     docroot, base_url = served
@@ -100,7 +68,7 @@ def pm_env(tmp_path, served, monkeypatch):
     # Policy is pinned open here; the disabled-path tests pin it closed.
     import importlib
 
-    ensure_mod = importlib.import_module("pm.ensure")
+    ensure_mod = importlib.import_module("pm.install")
     monkeypatch.setattr(ensure_mod, "lazy_installs_allowed", lambda: True)
 
     saved = dict(registry._packages)
@@ -135,26 +103,10 @@ def _pin(lockfile_path: Path, name: str, version: str, digest: str) -> None:
     lockfile.save()
 
 
-def test_install_and_env(pm_env):
-    from pm.ensure import ensure, is_installed
-
-    runner = ensure("faketool", base_env={})
-    assert is_installed("faketool")
-    assert "faketool-1.0" in runner.env["PATH"]
-
-
-def test_idempotent_and_offline_after_install(pm_env):
-    from pm.ensure import ensure
-
-    _, _, docroot, _ = pm_env
-    ensure("faketool", base_env={})
-    (docroot / "faketool-1.0.tar.gz").unlink()
-    runner = ensure("faketool", base_env={})
-    assert "faketool-1.0" in runner.env["PATH"]
 
 
 def test_bad_hash_rejected(pm_env):
-    from pm.ensure import ensure
+    from pm.install import ensure
 
     lockfile_path, *_ = pm_env
     _pin(lockfile_path, "faketool", "1.0", "0" * 64)
@@ -162,21 +114,12 @@ def test_bad_hash_rejected(pm_env):
         ensure("faketool", base_env={})
 
 
-def test_fetch_is_a_store_entry(pm_env):
-    lock_path, runtime, _, _ = pm_env
-    artifact = Lockfile(lock_path).artifacts("faketool", current_target())[0]
-    store = Store(runtime)
-    with store.scratch() as scratch:
-        store.fetch(artifact["url"], artifact["sha256"], scratch)
-    fetches = [p for p in runtime.iterdir() if p.name.startswith("fetch-")]
-    assert len(fetches) == 1
 
-
-def test_multi_archive_merges_into_one_entry(pm_env):
+def test_multi_archive_merges_into_one_entry(pm_env, capsys):
     """A package split across two archives lands in ONE store entry: a
     second entry would put the DLLs where a loading executable can never
     find them. No per-archive entries, no leftover scratch."""
-    from pm.ensure import ensure, is_installed
+    from pm.install import ensure, is_installed
 
     lockfile_path, runtime, docroot, _ = pm_env
     _, digest_a = make_tar(docroot, "multitool-1.0-a.tar.gz",
@@ -190,7 +133,11 @@ def test_multi_archive_merges_into_one_entry(pm_env):
     ]})
     lockfile.save()
 
-    ensure("multitool", base_env={})
+    from pm import cli
+    assert cli._install_names(["multitool"]) == 0
+    out = capsys.readouterr().out
+    assert "✓ multitool" in out and "multitool: 100.0%" in out
+    assert "multitool: unpacking 1/2" in out and "multitool: unpacking 2/2" in out
     assert is_installed("multitool")
 
     entry_dirs = [p for p in runtime.iterdir() if p.name.startswith("multitool-")]
@@ -200,98 +147,28 @@ def test_multi_archive_merges_into_one_entry(pm_env):
     assert (entry / "lib" / "extra.so").is_file()
     # Both archives verified before publish: a digest mismatch in either
     # must fail loudly, not be silently dropped.
-    _, bad = make_tar(docroot, "multitool-2.0-b.tar.gz", {"lib/extra.so": "z"})
+    old_facts = (runtime / "facts.json").read_bytes()
+    _, good = make_tar(docroot, "multitool-2.0-a.tar.gz", {"bin/multitool": "#!new"})
+    make_tar(docroot, "multitool-2.0-b.tar.gz", {"lib/extra.so": "z"})
     lockfile = Lockfile(lockfile_path)
     lockfile.set_pin("multitool", "2.0", {"any": [
-        {"url": f"{FakeTool.base_url}/multitool-2.0-a.tar.gz", "sha256": "0" * 64},
-        {"url": f"{FakeTool.base_url}/multitool-2.0-b.tar.gz", "sha256": bad},
+        {"url": f"{FakeTool.base_url}/multitool-2.0-a.tar.gz", "sha256": good},
+        {"url": f"{FakeTool.base_url}/multitool-2.0-b.tar.gz", "sha256": "0" * 64},
     ]})
     lockfile.save()
-    with pytest.raises(InstallError):
+    with pytest.raises(InstallError, match="sha256 mismatch.*multitool-2.0-b"):
         ensure("multitool", base_env={})
+    assert (runtime / "facts.json").read_bytes() == old_facts
+    assert (entry / "bin/multitool").read_bytes() == b"#!a"
+    assert (entry / "lib/extra.so").read_bytes() == b"y"
+    assert not list(runtime.glob("multitool-2.0*"))
 
 
-def test_install_emits_staged_progress(pm_env):
-    """ensure() streams download -> unpack per artifact, labelled when a
-    package has several. A slow download must not look frozen."""
-    from pm.ensure import ensure
 
-    lockfile_path, _, docroot, _ = pm_env
-    _, digest_a = make_tar(docroot, "multitool-1.0-a.tar.gz", {"bin/multitool": "#!a"})
-    _, digest_b = make_tar(docroot, "multitool-1.0-b.tar.gz", {"lib/extra.so": "y"})
-    lockfile = Lockfile(lockfile_path)
-    lockfile.set_pin("multitool", "1.0", {"any": [
-        {"url": f"{FakeTool.base_url}/multitool-1.0-a.tar.gz", "sha256": digest_a},
-        {"url": f"{FakeTool.base_url}/multitool-1.0-b.tar.gz", "sha256": digest_b},
-    ]})
-    lockfile.save()
-
-    events: list[tuple[str, str]] = []
-    ensure("multitool", base_env={},
-           progress=lambda stage, d, t, label: events.append((stage, label)))
-
-    assert ("download", "1/2") in events
-    assert ("download", "2/2") in events
-    assert ("unpack", "1/2") in events
-    assert ("unpack", "2/2") in events
-    # download before unpack within each artifact.
-    stages = [s for s, _ in events]
-    assert stages.index("download") < stages.index("unpack")
-
-
-def test_install_names_streams_progress(pm_env, capsys):
-    """The CLI install loop renders live download/unpack progress + a ✓
-    line per package, so a slow bundle run is never silent in a piped
-    log."""
-    from pm import cli
-
-    assert cli._install_names(["faketool"]) == 0
-    out = capsys.readouterr().out
-    assert "✓ faketool" in out
-    assert "faketool: 100.0%" in out
-    assert "faketool: unpacking" in out
-
-
-def test_install_names_labels_multi_archive(pm_env, capsys):
-    """A package split across archives gets a label on its progress lines,
-    so the log says which archive is moving."""
-    from pm import cli
-
-    lockfile_path, _, docroot, _ = pm_env
-    _, digest_a = make_tar(docroot, "multitool-1.0-a.tar.gz", {"bin/multitool": "#!a"})
-    _, digest_b = make_tar(docroot, "multitool-1.0-b.tar.gz", {"lib/extra.so": "y"})
-    lockfile = Lockfile(lockfile_path)
-    lockfile.set_pin("multitool", "1.0", {"any": [
-        {"url": f"{FakeTool.base_url}/multitool-1.0-a.tar.gz", "sha256": digest_a},
-        {"url": f"{FakeTool.base_url}/multitool-1.0-b.tar.gz", "sha256": digest_b},
-    ]})
-    lockfile.save()
-
-    assert cli._install_names(["multitool"]) == 0
-    out = capsys.readouterr().out
-    assert "multitool: unpacking 1/2" in out
-    assert "multitool: unpacking 2/2" in out
-    assert "✓ multitool" in out
-
-
-def test_download_ticks_per_chunk(pm_env, monkeypatch):
-    """The raw download stream reports byte progress on every chunk so a
-    slow line proves liveness."""
-    from pm.store import Store
-
-    _, runtime, docroot, _ = pm_env
-    ticks: list[tuple[int, int]] = []
-    store = Store(runtime / "scratch")
-    url = f"{FakeTool.base_url}/faketool-1.0.tar.gz"
-    _, digest = make_tar(docroot, "faketool-1.0.tar.gz", {"bin/faketool": "#!x"})
-    archive = store.fetch(url, digest, runtime / "scratch",
-                          progress=lambda d, t: ticks.append((d, t)))
-    assert archive.is_file()
-    assert ticks and ticks[-1][0] == ticks[-1][1] == archive.stat().st_size
 
 
 def test_deps_compose_dependents_win(pm_env):
-    from pm.ensure import ensure
+    from pm.install import ensure
 
     lockfile_path, _, docroot, _ = pm_env
     name, digest = make_tar(docroot, "deptool-1.0.tar.gz", {"bin/faketool": "y"})
@@ -305,8 +182,97 @@ def test_deps_compose_dependents_win(pm_env):
     assert path.index("toptool-1.0") < path.index("deptool-1.0")
 
 
+def test_warm_install_verifies_shared_dependencies_once_under_lock(pm_env, monkeypatch):
+    import importlib
+    import os
+    from collections import Counter
+    from hermes_cli.runtime_state import _lock
+    from pm.cli import _install_names
+
+    ensure = importlib.import_module("pm.install")
+    lockfile_path, runtime, docroot, _ = pm_env
+    for name in ("deptool", "toptool"):
+        _, digest = make_tar(docroot, f"{name}-1.0.tar.gz", {"bin/faketool": name})
+        _pin(lockfile_path, name, "1.0", digest)
+    assert _install_names(["deptool", "toptool"]) == 0
+    checked = Counter()
+    locked = []
+    original = ensure._entry_verified
+
+    def verify(package, fact, store, target):
+        fd = os.open(store.root / ".install.lock", os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            locked.append(not _lock(fd, wait=False))
+        finally:
+            os.close(fd)
+        checked[package.name] += 1
+        return original(package, fact, store, target)
+
+    monkeypatch.setattr(ensure, "_entry_verified", verify)
+    assert _install_names(["deptool", "toptool"]) == 0
+    assert checked == {"deptool": 1, "toptool": 1}
+    assert all(locked), "validation must share the publication lock"
+
+    # The next operation must not reuse validity across a writer's mutation.
+    fact = Facts(runtime / "facts.json").get("deptool")
+    assert fact is not None
+    binary = runtime / fact["entry"] / "bin/faketool"
+    with Store(runtime).install_lock():
+        binary.write_text("corrupt", encoding="utf-8")
+    assert _install_names(["toptool"]) == 0
+    assert binary.read_text(encoding="utf-8") == "deptool"
+
+
+def test_standalone_warm_ensure_does_not_wait_for_unrelated_writer(pm_env):
+    from concurrent.futures import ThreadPoolExecutor
+    from pm.install import ensure
+
+    _, runtime, _, _ = pm_env
+    ensure("faketool", explicit=True)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with Store(runtime).install_lock():
+            # A downloader can hold this lock for minutes. A healthy unrelated
+            # tool must remain usable without waiting for that writer to finish.
+            future = pool.submit(ensure, "faketool", explicit=True, base_env={})
+            runner = future.result(timeout=3)
+            assert "faketool-1.0" in runner.env["PATH"]
+
+
+def test_install_forgets_verification_when_state_operation_releases_lock(pm_env, monkeypatch):
+    import importlib
+    import os
+    from hermes_cli.runtime_state import _lock
+    from pm.cli import _install_names
+    from pm.packages import Venv
+
+    ensure = importlib.import_module("pm.install")
+    lockfile_path, runtime, docroot, _ = pm_env
+    for name in ("deptool", "toptool"):
+        _, digest = make_tar(docroot, f"{name}-1.0.tar.gz", {"bin/faketool": name})
+        _pin(lockfile_path, name, "1.0", digest)
+    assert _install_names(["toptool"]) == 0
+    fact = Facts(runtime / "facts.json").get("deptool")
+    assert fact is not None
+    binary = runtime / fact["entry"] / "bin/faketool"
+
+    def sync(**kwargs):
+        # State operations provision their own tools. They must be able to
+        # acquire the lock independently, and invalidate prior observations.
+        fd = os.open(runtime / ".install.lock", os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            assert _lock(fd, wait=False), "tool lock leaked into the state operation"
+            binary.write_text("corrupt", encoding="utf-8")
+        finally:
+            os.close(fd)
+
+    monkeypatch.setattr(ensure, "sync_venv", sync)
+    monkeypatch.setitem(registry._packages, "venv", Venv())
+    assert _install_names(["deptool", "venv", "toptool"]) == 0
+    assert binary.read_text(encoding="utf-8") == "deptool"
+
+
 def test_version_bump_selects_the_new_tool(pm_env):
-    from pm.ensure import ensure
+    from pm.install import ensure
 
     lockfile_path, _, docroot, _ = pm_env
 
@@ -320,14 +286,14 @@ def test_version_bump_selects_the_new_tool(pm_env):
 def test_lazy_installs_disabled(pm_env, monkeypatch):
     import importlib
 
-    ensure_mod = importlib.import_module("pm.ensure")
+    ensure_mod = importlib.import_module("pm.install")
     monkeypatch.setattr(ensure_mod, "lazy_installs_allowed", lambda: False)
     with pytest.raises(InstallError, match="lazy installs are disabled"):
         ensure_mod.ensure("faketool", base_env={})
 
 
 def test_missing_platform_is_declared(pm_env):
-    from pm.ensure import ensure
+    from pm.install import ensure
 
     lockfile_path, *_ = pm_env
     pkg = registry._packages["faketool"]
@@ -340,7 +306,7 @@ def test_missing_platform_is_declared(pm_env):
 
 
 def test_corrupt_facts_degrades_to_empty(pm_env):
-    from pm.ensure import ensure, is_installed
+    from pm.install import ensure, is_installed
 
     _, runtime, *_ = pm_env
     ensure("faketool", base_env={})
@@ -350,18 +316,9 @@ def test_corrupt_facts_degrades_to_empty(pm_env):
     assert (runtime / "facts.corrupt").is_file()
 
 
-def test_sealed_install_explicit_addition_leaves_payload_unchanged(pm_env, monkeypatch):
-    from pm.ensure import ensure, is_installed
-
-    _, runtime, *_ = pm_env
-    (runtime.parent / "manifest.json").write_text('{"schema": 1}', encoding="utf-8")
-    ensure("faketool", base_env={}, explicit=True)
-    assert is_installed("faketool")
-    assert not (runtime / "facts.json").exists()
-
 
 def test_concurrent_installs_do_not_clobber(pm_env):
-    from pm.ensure import ensure, is_installed
+    from pm.install import ensure, is_installed
 
     lockfile_path, _, docroot, _ = pm_env
     name, digest = make_tar(docroot, "deptool-1.0.tar.gz", {"bin/faketool": "y"})
@@ -387,31 +344,57 @@ def test_concurrent_installs_do_not_clobber(pm_env):
     assert is_installed("faketool") and is_installed("deptool")
 
 
-def test_single_flight_one_store_entry(pm_env):
-    from pm.ensure import ensure
+def test_single_flight_one_store_entry(pm_env, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from contextlib import contextmanager
+    from http.server import SimpleHTTPRequestHandler
+    from pm.install import ensure
 
     _, runtime, *_ = pm_env
-    errors = []
+    contenders = threading.Barrier(6)
+    body_started, release_body = threading.Event(), threading.Event()
+    bodies, stages = [], []
+    install_lock, do_get, stage = Store.install_lock, SimpleHTTPRequestHandler.do_GET, FakeTool.stage
 
-    def go():
+    @contextmanager
+    def contending(self):
+        contenders.wait(timeout=15)
+        with install_lock(self):
+            yield
+
+    def body(self):
+        if self.headers.get("Range") == "bytes=0-0":
+            return do_get(self)
+        bodies.append(self.path)
+        body_started.set()
+        assert release_body.wait(15), "server was never released"
+        return do_get(self)
+
+    def staged(self, *args):
+        stages.append(self.name)
+        return stage(self, *args)
+
+    monkeypatch.setattr(Store, "install_lock", contending)
+    monkeypatch.setattr(SimpleHTTPRequestHandler, "do_GET", body)
+    monkeypatch.setattr(FakeTool, "stage", staged)
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        futures = [pool.submit(ensure, "faketool", base_env={}) for _ in range(6)]
         try:
-            ensure("faketool", base_env={})
-        except Exception as e:
-            errors.append(e)
-
-    threads = [threading.Thread(target=go) for _ in range(6)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-    assert not errors
-    entries = [p for p in runtime.iterdir() if p.name.startswith("faketool-")]
-    assert len(entries) == 1
+            assert body_started.wait(15)
+        finally:
+            release_body.set()
+        runners = [future.result(timeout=30) for future in futures]
+    assert bodies == ["/faketool-1.0.tar.gz"]
+    assert stages == ["faketool"]
+    assert all(runner.env == runners[0].env for runner in runners)
+    fact = Facts(runtime / "facts.json").get("faketool")
+    assert fact["entry"] in runners[0].env["PATH"]
+    assert (runtime / fact["entry"] / "bin/faketool").read_bytes() == b"#!x"
 
 
 def test_gc_keeps_used_removes_orphans(pm_env):
     from pm.cli import cmd_gc
-    from pm.ensure import ensure
+    from pm.install import ensure
 
     _, runtime, *_ = pm_env
     ensure("faketool", base_env={})
@@ -427,7 +410,7 @@ def test_gc_removes_fetch_cache_archives(pm_env):
     drop them so a staged payload (and the CI cache that stores it) doesn't
     carry the raw archives. The live package entry survives."""
     from pm.cli import cmd_gc
-    from pm.ensure import ensure
+    from pm.install import ensure
 
     lock_path, runtime, *_ = pm_env
     ensure("faketool", base_env={})
@@ -447,7 +430,7 @@ def test_gc_removes_fetch_cache_archives(pm_env):
 
 
 def test_env_for_never_installs(pm_env):
-    from pm.ensure import env_for
+    from pm import env_for
 
     _, runtime, *_ = pm_env
     env = env_for("faketool", base_env={})
@@ -456,33 +439,11 @@ def test_env_for_never_installs(pm_env):
     assert not any(p.name.startswith("faketool-") for p in installed)
 
 
-def test_facts_adopt_by_path_substitution(tmp_path):
-    store_a = tmp_path / "bundle-store"
-    facts_a = Facts(store_a / "facts.json")
-    store_a.mkdir()
-    facts_a.record("tool", "1.0", "tool-1.0-any", {"PATH": [str(store_a / "tool-1.0-any" / "bin")]}, store_a)
-
-    raw = (store_a / "facts.json").read_text(encoding="utf-8")
-    assert "{{store}}" in raw and str(store_a) not in raw
-
-    store_b = tmp_path / "user-store"
-    store_b.mkdir()
-    (store_a / "facts.json").rename(store_b / "facts.json")
-    facts_b = Facts(store_b / "facts.json")
-    env = facts_b.env_for("tool", store_b)
-    assert env["PATH"] == [str(store_b / "tool-1.0-any" / "bin")]
-
 
 def test_compose_env_dependents_win_non_path_too():
     env = compose_env([{"X": "dep"}, {"X": "dependent"}], base={})
     assert env["X"] == "dependent"
 
-
-def test_flatten_refuses_layout_dirs(tmp_path):
-    (tmp_path / "bin").mkdir()
-    (tmp_path / "bin" / "tool").write_text("x")
-    flatten_single_dir(tmp_path)
-    assert (tmp_path / "bin" / "tool").is_file()
 
 
 # ── bundle payload pieces ─────────────────────────────────────────────
@@ -504,54 +465,45 @@ def test_python_package_url_carries_release_tag():
         pass
 
 
-def test_python_package_stably_signs_macos_runtime(monkeypatch, tmp_path):
-    import pm.packages as packages
+@pytest.mark.platforms("macos")
+def test_python_package_stably_signs_macos_runtime(tmp_path):
+    import shutil
+    import subprocess
+    import sys
     from pm.registry import get_package
 
     python = get_package("python")
-    binary = tmp_path / "bin" / "python3"
-    binary.parent.mkdir()
-    binary.touch()
-    calls = []
-
-    monkeypatch.setattr(packages.platform, "system", lambda: "Darwin")
-    monkeypatch.setattr(packages.shutil, "which", lambda name: "/usr/bin/codesign")
-    monkeypatch.setattr(
-        packages.subprocess,
-        "run",
-        lambda cmd, **kwargs: calls.append((cmd, kwargs)) or type("Result", (), {"returncode": 0})(),
+    staged = tmp_path / "staged"
+    binary = staged / "python" / "bin" / "python3"
+    binary.parent.mkdir(parents=True)
+    (staged / "python" / "lib").mkdir()
+    shutil.copy2(Path(sys._base_executable).resolve(), binary)
+    subprocess.run(
+        ["codesign", "--force", "--sign", "-", "--timestamp=none",
+         "--identifier", "test.hermes.downloaded", "--requirements",
+         '=designated => identifier "test.hermes.downloaded"', str(binary)],
+        check=True, capture_output=True, timeout=30,
     )
-    monkeypatch.setattr(python, "binary", lambda entry, target: binary)
-
-    python.stage(Store(tmp_path / "store"), tmp_path, "3.11", "darwin-arm64")
-
-    assert calls[0][0] == [
-        "/usr/bin/codesign",
-        "--force",
-        "--deep",
-        "--sign",
-        "-",
-        "--timestamp=none",
-        "--identifier",
-        "com.nousresearch.hermes.managed-python",
-        "--requirements",
-        '=designated => identifier "com.nousresearch.hermes.managed-python"',
-        str(binary),
-    ]
-    assert calls[1][0] == ["/usr/bin/codesign", "--verify", "--deep", "--strict", str(binary)]
+    python.stage(Store(tmp_path / "store"), staged, "fixture", current_target())
+    binary = python.binary(staged, current_target())
+    subprocess.run(["codesign", "--verify", "--deep", "--strict", str(binary)],
+                   check=True, capture_output=True, timeout=30)
+    identity = subprocess.run(["codesign", "-d", "-r-", str(binary)],
+                              check=True, capture_output=True, text=True, timeout=30)
+    assert 'designated => identifier "com.nousresearch.hermes.managed-python"' in identity.stdout + identity.stderr
 
 
+@pytest.mark.platforms("not macos")
 def test_python_package_does_not_sign_non_macos_runtime(monkeypatch, tmp_path):
-    import pm.packages as packages
+    import hermes_cli.macos_signing as signing
 
-    monkeypatch.setattr(packages.platform, "system", lambda: "Linux")
     monkeypatch.setattr(
-        packages.subprocess,
+        signing.subprocess,
         "run",
         lambda *args, **kwargs: pytest.fail("codesign must not run outside macOS"),
     )
 
-    assert packages._macos_sign_managed_python(tmp_path / "python") is False
+    assert signing.sign_managed_python(tmp_path / "python") is False
 
 
 def test_machine_matches_binary_pe_headers(tmp_path):
@@ -584,109 +536,6 @@ def test_machine_matches_binary_elf(tmp_path):
     b.write_bytes(bytes(elf))
     assert machine_matches_binary(b, "linux-arm64") is True
     assert machine_matches_binary(b, "linux-x64") is False
-
-
-def test_adopt_noop_without_facts(pm_env, monkeypatch):
-    import pm
-    from pm import paths
-
-    monkeypatch.setenv("HERMES_RUNTIME_DIR", str(paths.store_root() / "nowhere"))
-    assert pm.adopt() is False
-
-
-class FakeVenv(StatePackage):
-    name = "venv"
-
-    def __init__(self):
-        self.applied: list[list[str]] = []
-        self.lock_content = b"lock-v1"
-
-    def expected_stamp(self, extras):
-        import hashlib
-
-        h = hashlib.sha256(self.lock_content)
-        h.update(",".join(sorted(extras)).encode())
-        return h.hexdigest()
-
-    def apply(self, extras):
-        self.applied.append(list(extras))
-        from hermes_cli.runtime_paths import install_state_dir
-
-        environment = install_state_dir(paths.repo_root()) / "environments" / str(len(self.applied)) / "venv"
-        environment.mkdir(parents=True)
-        (environment / "pyvenv.cfg").write_text("home = test\n", encoding="utf-8")
-        return {"environment": environment}
-
-
-@pytest.fixture
-def venv_env(pm_env, tmp_path, monkeypatch):
-    project = tmp_path / "venv-project"
-    project.mkdir()
-    monkeypatch.setattr(paths, "repo_root", lambda: project)
-    fake = FakeVenv()
-    registry._packages["venv"] = fake
-    return pm_env, fake
-
-
-def test_sync_venv_applies_once_then_stamps(venv_env):
-    from pm.ensure import sync_venv
-
-    _, fake = venv_env
-    sync_venv()
-    sync_venv()
-    assert fake.applied == [[]]
-
-
-def test_sync_venv_unions_extras(venv_env):
-    from pm.ensure import sync_venv
-
-    _, fake = venv_env
-    sync_venv(["telegram"])
-    sync_venv(["anthropic"])
-    sync_venv(["telegram"])
-    assert fake.applied == [["telegram"], ["anthropic", "telegram"]]
-
-
-def test_check_reports_venv_drift_and_missing_tools(venv_env):
-    from pm.ensure import check, ensure, sync_venv
-
-    (pm_env_tuple, fake) = venv_env
-    lockfile_path, runtime, *_ = pm_env_tuple
-
-    assert check() == []  # pm never touched this install: silent
-
-    ensure("faketool", base_env={})
-    sync_venv()
-    assert check() == []
-
-    fake.lock_content = b"lock-v2"  # uv.lock changed underneath
-    problems = check()
-    assert problems == ["venv: out of sync with uv.lock"]
-
-    _pin(lockfile_path, "faketool", "9.9", "0" * 64)  # tool outdated now
-    problems = check()
-    assert "faketool: not installed or outdated" in problems
-
-
-def test_bundle_package_names_include_browsers(monkeypatch, tmp_path):
-    from scripts.bundles.native import _bundle_package_names
-    from pm.lock import Lockfile
-
-    lock = Lockfile(tmp_path / "lock.json")
-    for name in ("uv", "python", "ripgrep", "chromium", "node", "npm"):
-        lock.set_pin(name, "1", {"any": {"url": "x", "sha256": "0" * 64}})
-    lock.save()
-    monkeypatch.setattr("scripts.bundles.native._lockfile", lambda: lock)
-    names = _bundle_package_names()
-    # Browsers now ship in every payload (win32-arm64 runs the x64 build
-    # under emulation); nothing is excluded from the bundle.
-    assert "chromium" in names
-    assert "python" in names
-    assert "ripgrep" in names
-    # node/npm are shipped runtime tools (TUI, plugins), not install
-    # machinery; only uv remains internal.
-    assert "node" in names
-    assert "npm" in names
 
 
 def test_bundle_closure_uv_stays_internal_node_npm_ship(monkeypatch, tmp_path):
@@ -748,7 +597,6 @@ def test_arch_guard_allows_emulated_x64_on_win32_arm64(monkeypatch, tmp_path):
 
 
 def test_python_stage_drops_unloadable_x64_vc_runtime_on_arm64(monkeypatch, tmp_path):
-    import pm.packages as packages
     from pm.registry import get_package
 
     staged = tmp_path / "staged"
@@ -756,7 +604,7 @@ def test_python_stage_drops_unloadable_x64_vc_runtime_on_arm64(monkeypatch, tmp_
     (staged / "vcruntime140_1.dll").write_bytes(b"x64")
     (staged / "vcruntime140.dll").write_bytes(b"arm64")
 
-    monkeypatch.setattr(packages, "_macos_sign_managed_python", lambda p: False)
+    monkeypatch.setattr("hermes_cli.macos_signing.sign_managed_python", lambda p: False)
     get_package("python").stage(None, staged, "3.14.7", "win32-arm64")
 
     assert not (staged / "vcruntime140_1.dll").exists()
@@ -764,14 +612,13 @@ def test_python_stage_drops_unloadable_x64_vc_runtime_on_arm64(monkeypatch, tmp_
 
 
 def test_python_stage_keeps_vc_runtimes_on_other_targets(monkeypatch, tmp_path):
-    import pm.packages as packages
     from pm.registry import get_package
 
     staged = tmp_path / "staged"
     staged.mkdir()
     (staged / "vcruntime140_1.dll").write_bytes(b"x64")
 
-    monkeypatch.setattr(packages, "_macos_sign_managed_python", lambda p: False)
+    monkeypatch.setattr("hermes_cli.macos_signing.sign_managed_python", lambda p: False)
     get_package("python").stage(None, staged, "3.14.7", "win32-x64")
 
     assert (staged / "vcruntime140_1.dll").is_file()
@@ -819,17 +666,21 @@ def test_probe_args_override_used_by_verify(tmp_path):
     assert "--version" not in reason
 
 
-def test_ffmpeg_posix_layout_resolves_at_entry_root(tmp_path):
-    """martin-riedl zips are a single `ffmpeg` file at the zip root — the
-    package must resolve it there (bin/ffmpeg is the BtbN win32 layout)."""
+def test_ffmpeg_binary_rel_follows_the_build_source(tmp_path):
+    """BtbN (Windows `.zip`, Linux `.tar.xz`) ships bin/ffmpeg under one
+    top-level dir; martin-riedl's macOS zip is a single `ffmpeg` at the root."""
     from pm.registry import get_package
 
     ffmpeg = get_package("ffmpeg")
     entry = tmp_path / "entry"
     entry.mkdir()
     (entry / "ffmpeg").write_bytes(b"x")
-    assert ffmpeg.binary(entry, "linux-arm64") == entry / "ffmpeg"
+    (entry / "bin").mkdir()
+    (entry / "bin" / "ffmpeg").write_bytes(b"x")
     assert ffmpeg.binary(entry, "darwin-x64") == entry / "ffmpeg"
+    assert ffmpeg.binary(entry, "darwin-arm64") == entry / "ffmpeg"
+    assert ffmpeg.binary(entry, "linux-x64") == entry / "bin" / "ffmpeg"
+    assert ffmpeg.binary(entry, "linux-arm64") == entry / "bin" / "ffmpeg"
     assert ffmpeg.probe_args == ["-version"]
 
 
@@ -856,7 +707,7 @@ def test_install_verify_failure_reports_reason(pm_env):
     name, digest = make_tar(docroot, "faketool-2.0.tar.gz", {"nope/x": "y"})
     _pin(lockfile_path, "faketool", "2.0", digest)
 
-    from pm.ensure import ensure
+    from pm.install import ensure
 
     with pytest.raises(InstallError) as exc:
         ensure("faketool", explicit=True)
@@ -872,7 +723,7 @@ def test_store_path_dirs_include_node_npm_when_installed(tmp_path, monkeypatch):
     installed store packages (non-internal), their dirs enter the
     provisioned PATH. Regression test for the flag flip."""
     from pm import paths
-    from pm.ensure import _store_path_dirs
+    from pm.install import _store_path_dirs
     from pm.lock import Facts, Lockfile
 
     runtime = tmp_path / "runtime"

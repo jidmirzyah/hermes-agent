@@ -31,7 +31,9 @@ def runtime_environment() -> dict[str, str]:
 
 
 def _python(environment: Path) -> Path:
-    return environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    from pm.environments import venv_python
+
+    return venv_python(environment)
 
 
 def _inputs(project: Path, python: Path) -> str:
@@ -59,8 +61,9 @@ def _resident_runtime() -> tuple[Path, Path] | None:
     if payload is not None:
         runtime = payload / "pm-runtime"
     else:
-        install_root = Path(os.environ.get("HERMES_INSTALL_ROOT") or project)
-        stamp_path = install_root / "install-stamp.json"
+        from pm.paths import install_root
+
+        stamp_path = install_root() / "install-stamp.json"
         try:
             stamp = json.loads(stamp_path.read_text(encoding="utf-8-sig"))
         except FileNotFoundError:
@@ -100,7 +103,8 @@ def _validate(python: Path, env: dict[str, str]) -> str:
 
 
 def prepare_runtime(uv: Path, python: Path, root: Path, *, offline: bool = False,
-                    project: Path | None = None, bootstrap: bool = True) -> Path:
+                    project: Path | None = None, bootstrap: bool = True,
+                    cache: Path | None = None) -> Path:
     """Publish a locked PM environment without resolving the application.
 
     Generations are immutable after publication. Failed preparation leaves the
@@ -132,7 +136,7 @@ def prepare_runtime(uv: Path, python: Path, root: Path, *, offline: bool = False
         environment = root / generation
         try:
             print("Preparing the isolated PM runtime…", file=sys.stderr, flush=True)
-            executable = stage_runtime(uv, python, environment, project=project, offline=offline)
+            executable = stage_runtime(uv, python, environment, project=project, offline=offline, cache=cache)
             _write(environment / "pm-runtime.json", {"inputs": identity})
             _write(selected, {"inputs": identity, "generation": generation.as_posix()})
             return executable
@@ -142,11 +146,11 @@ def prepare_runtime(uv: Path, python: Path, root: Path, *, offline: bool = False
 
 
 
-def runtime_python(*, bootstrap: bool = True) -> Path:
+def runtime_python(*, bootstrap: bool = True, cache: Path | None = None) -> Path:
     """Resolve PM without selecting, repairing, or importing the app environment."""
     if is_runtime():
         return Path(sys.executable)
-    from hermes_cli.runtime_paths import install_state_dir
+    from pm.environments import install_state_dir
     from pm._uv import _toolchain
     from pm.paths import repo_root
 
@@ -179,14 +183,15 @@ def runtime_python(*, bootstrap: bool = True) -> Path:
         raise InstallError("pm-runtime", "pinned uv and Python are unavailable")
     uv, python = tools
     return prepare_runtime(uv, python, install_state_dir(project) / "pm-runtime",
-                           bootstrap=bootstrap)
+                           bootstrap=bootstrap, cache=cache)
 
 
-def runtime_command(script: Path, args: tuple[str, ...] | list[str] = (), *, bootstrap: bool = True) -> list[str]:
+def runtime_command(script: Path, args: tuple[str, ...] | list[str] = (), *,
+                    bootstrap: bool = True, cache: Path | None = None) -> list[str]:
     """One launch contract for mutable venvs and resident signed payloads."""
     resident = _resident_runtime()
     if resident is None:
-        python = runtime_python() if bootstrap else runtime_python(bootstrap=False)
+        python = runtime_python(bootstrap=bootstrap, cache=cache)
         return [str(python), "-I", "-B", str(script), *args]
     python, site = resident
     launcher = (

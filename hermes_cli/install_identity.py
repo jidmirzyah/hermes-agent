@@ -72,24 +72,13 @@ def read_or_create_install_id(root: Path | None = None) -> Optional[str]:
         if existing is not None:
             return existing  # Existing identities remain readable on read-only roots.
         try:
-            from hermes_constants import mkdir_under_hermes_home; mkdir_under_hermes_home(root)
+            from hermes_constants import mkdir_under_hermes_home
+            mkdir_under_hermes_home(root)
             with _install_id_file_lock(root):
                 existing, mint = _read_existing(path)
                 if not mint:
                     return existing
-                fd, tmp_name = tempfile.mkstemp(dir=str(root), prefix=".install_id-")
-                try:
-                    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                        handle.write(uuid.uuid4().hex + "\n")
-                        handle.flush()
-                        os.fsync(handle.fileno())
-                    os.replace(tmp_name, path)
-                    _fsync_directory(root)
-                except BaseException:
-                    with contextlib.suppress(OSError):
-                        os.unlink(tmp_name)
-                    raise
-
+                atomic_write_text(path, uuid.uuid4().hex + "\n", tmp_prefix=".install_id-", fsync_dir=True, mode=0o600)
                 committed = path.read_text(encoding="utf-8-sig").strip().lower()
                 return committed if _INSTALL_ID_RE.fullmatch(committed) else None
         except OSError:

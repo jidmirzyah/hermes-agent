@@ -5,7 +5,6 @@ Origin helpers are imported lazily per function (no cycle; test patches on the o
 """
 
 import logging
-import re
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -75,7 +74,7 @@ def _print_first_line(text: str) -> None:
 
 def _stash_local_changes_if_needed(git_cmd: list[str], cwd: Path) -> Optional[str]:
     from hermes_cli.update_cmd_git import _git_run
-    status = _git_run(git_cmd, ["status", "--porcelain"], cwd, check=True)
+    status = _git_run(git_cmd, ["status", "--porcelain", "-z"], cwd, check=True)
     if not status.stdout.strip():
         return None
     # Unmerged index entries (interrupted merge/rebase) make `git stash` fail with
@@ -129,8 +128,7 @@ def _resolve_stash_selector(git_cmd: list[str], cwd: Path, stash_ref: str) -> Op
     for line in stash_list.stdout.splitlines():
         selector, _, commit = line.partition(" ")
         if commit.strip() == stash_ref:
-            match = re.fullmatch(r"stash@\{(\d+)\}", selector.strip())
-            return match.group(1) if match else selector.strip()
+            return selector.strip()
     return None
 
 
@@ -201,7 +199,7 @@ def _print_stash_cleanup_guidance(stash_ref: str, stash_selector: Optional[str] 
     if stash_selector:
         print(f"  Remove it with: git stash drop {stash_selector}")
     else:
-        print(f"  Look for commit {stash_ref}, then drop it by index with: git stash drop <N>")
+        print(f"  Look for commit {stash_ref}, then drop its selector with: git stash drop stash@{{N}}")
 
 
 def _stash_apply_failed_only_on_existing_untracked(stderr: str) -> bool:

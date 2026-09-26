@@ -785,7 +785,7 @@ class TestFailSemanticsEndToEnd:
 
 
 class TestRoutedProfileEnv:
-    @pytest.mark.linux_only
+    @pytest.mark.platforms("linux")
     def test_hook_child_sees_routed_profile_home_and_no_default_secrets(self, tmp_path, monkeypatch):
         """Under multiplexing the child gets the ROUTED HERMES_HOME, the default profile's secrets
         stay out of its env, and the payload names the firing profile."""
@@ -820,7 +820,7 @@ class TestRoutedProfileEnv:
 # faking ``sys.platform``.
 
 
-@pytest.mark.windows_only
+@pytest.mark.platforms("windows")
 def test_bare_script_hook_path_executes_on_windows(tmp_path):
     """A hook whose command is a bare script path — the shape every example in
     ``website/docs/user-guide/features/hooks.md`` uses — must run. POSIX gets there through the
@@ -841,7 +841,7 @@ def test_bare_script_hook_path_executes_on_windows(tmp_path):
     assert missing["error"] == "command not found"
 
 
-@pytest.mark.windows_only
+@pytest.mark.platforms("windows")
 def test_unroutable_script_hook_names_the_remediation(tmp_path):
     """A suffix we deliberately do not route still fails, but the diagnostic has to say what to do:
     the raw WinError text is localized, so a non-English Windows install could not act on it."""

@@ -138,7 +138,7 @@ def test_run_job_no_agent_reloads_dotenv_before_script(hermes_env, monkeypatch):
 
 
 _PRESENCE_PROBE = (
-    "#!/bin/bash\n"
+    "#!/usr/bin/env bash\n"
     'for n in JOB_SVC_TOKEN LAUNCH_ONLY_TOKEN; do [ -n "${!n}" ] && echo "$n=set" || echo "$n=MISSING"; done\n'
 )
 

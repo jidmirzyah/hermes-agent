@@ -1,26 +1,23 @@
 """Validate and conditionally publish macOS update feeds."""
 from __future__ import annotations
 
-import json
-from pathlib import Path
 import re
 from typing import Any, Callable
 
 from . import r2 as r2_module
 from .semver import compare, is_valid_version
+from hermes_cli.update_channel import is_canary_tag
 
 ARCHES = ("arm64", "x64")
 _HASH_PATTERN = re.compile(r"^[A-Za-z0-9+/]{86}==$")
-_TAG_PATTERN = re.compile(r"^v\d+\.\d+\.\d+(?:-canary\.\d{14})?$")
 
 
 def _darwin_feed(channel: str, light: bool = False) -> dict[str, Any]:
-    """Read the same feed facts as the desktop runtime."""
-    with (Path(__file__).resolve().parents[2] / "apps/desktop/update-feed.json").open(encoding="utf-8") as file:
-        feeds = json.load(file)
-    if channel not in feeds:
-        raise TypeError(f"Unknown update channel: {channel}")
-    return feeds[channel]["light" if light else "bundled"]
+    """Legacy URL shape only, not a channel existence registry."""
+    if not isinstance(channel, str) or not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", channel):
+        raise ValueError("Invalid legacy feed path component")
+    return {"directory": f"releases/darwin/{'light/' if light else ''}{channel}",
+            "channel": channel, "fileName": f"{channel}-mac.yml"}
 
 
 # ---------------------------------------------------------------------------
@@ -84,9 +81,9 @@ def merge_mac_feeds(legs: dict[str, str], tag: str, light: bool = False) -> dict
     import hermes_yaml as yaml  # lazy
 
     version = tag[1:] if isinstance(tag, str) and tag.startswith("v") else ""
-    if not is_valid_version(version) or not _TAG_PATTERN.match(tag):
+    if not is_valid_version(version):
         raise ValueError("Invalid macOS release tag")
-    selection = _darwin_feed("canary" if "-canary." in version else "stable", light)
+    selection = _darwin_feed("canary" if is_canary_tag(tag) else "stable", light)
     expected = [f"{arch}-{selection['fileName']}" for arch in ARCHES]
     if sorted(legs.keys()) != sorted(expected):
         raise ValueError("Expected exactly one ARM64 and one x64 macOS feed")
@@ -169,7 +166,7 @@ def finalize(tag: str, dir: str, variant: str | None = None) -> None:
     import os
 
     legs = {
-        name: open(os.path.join(dir, name), encoding="utf-8").read()
+        name: open(os.path.join(dir, name), encoding="utf-8-sig").read()
         for name in sorted(os.listdir(dir))
         if name.endswith("-mac.yml")
     }

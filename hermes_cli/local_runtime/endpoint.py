@@ -34,13 +34,7 @@ def _pid_alive(pid: int) -> bool:
 def _state_endpoint() -> dict | None:
     from hermes_cli.local_runtime.recovery import is_modern, read_state, recorded_process
 
-    path = state_path()
-    if not path.exists():
-        return None
-    try:
-        state = json.loads(path.read_text(encoding="utf-8-sig"))
-    except (json.JSONDecodeError, OSError):
-        return None
+    state = read_state()
     base_url = state.get("base_url", "")
     if not isinstance(base_url, str) or not base_url:
         return None
@@ -142,12 +136,12 @@ def _kick_managed_boot(config: dict | None) -> None:
 
 
 def _boot_in_flight(config: dict | None) -> bool:
-    """Wait only when an enabled runtime has a PM-installed engine to boot."""
+    """True when the managed runtime is enabled and PM holds an installed engine."""
     with suppress(Exception):
         config = _load_config_if_none(config)
         if not ((config or {}).get("local_runtime") or {}).get("enabled"):
             return False
         from hermes_cli.local_runtime.binaries import installed_engine
 
-        return installed_engine(config["local_runtime"].get("backend", "auto")) is not None
+        return installed_engine() is not None
     return False

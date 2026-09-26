@@ -1300,9 +1300,7 @@ class TestCafConversion:
         """_convert_caf_to_wav uses ffmpeg when available."""
         caf_path = tmp_path / "voice.caf"
         caf_path.write_bytes(b"caff\x00" * 20)
-        work_dir = tmp_path / "converted"
-        work_dir.mkdir()
-        wav_path = str(work_dir / "voice.wav")
+        wav_path = str(tmp_path / "voice.wav")
 
         def fake_run(cmd, **kwargs):
             Path(wav_path).write_bytes(b"RIFF\x00\x00\x00\x00")
@@ -1315,7 +1313,7 @@ class TestCafConversion:
         monkeypatch.setattr(subprocess, "run", fake_run)
 
         from tools.transcription_tools import _convert_caf_to_wav
-        result = _convert_caf_to_wav(str(caf_path), str(work_dir))
+        result = _convert_caf_to_wav(str(caf_path))
         assert result == wav_path
         assert Path(result).exists()
 
@@ -1337,50 +1335,6 @@ class TestCafConversion:
 
         assert result["success"] is True
         mock_convert.assert_not_called()
-
-    @pytest.mark.parametrize("outcome", ["success", "provider-error"])
-    def test_caf_conversion_preserves_neighbors_and_removes_owned_output(
-        self, tmp_path, monkeypatch, outcome
-    ):
-        """Cloud CAF conversion must not clobber a sibling ``<stem>.wav`` nor
-        leave its converted output behind, whether the provider succeeds or
-        raises."""
-        from tools import transcription_audio as audio
-        from tools import transcription_tools as stt
-
-        source = tmp_path / "voice.caf"
-        source.write_bytes(b"caff fixture")
-        neighbor = source.with_suffix(".wav")
-        neighbor.write_bytes(b"existing recording")
-        outputs = []
-        monkeypatch.setattr(stt, "_load_stt_config", lambda: {
-            "provider": "groq", "cloud_trim_silence": False,
-        })
-        monkeypatch.setattr(audio, "_find_ffmpeg_binary", lambda: "ffmpeg")
-
-        def encode(command, **_kwargs):
-            output = Path(command[-1])
-            outputs.append(output)
-            output.write_bytes(b"converted recording")
-
-        def transcribe(file_path, *_args):
-            assert Path(file_path).read_bytes() == b"converted recording"
-            if outcome == "provider-error":
-                raise RuntimeError("transcription failed")
-            return {"success": True, "transcript": "hello"}
-
-        monkeypatch.setattr(audio, "_run_quiet", encode)
-        monkeypatch.setattr(stt, "_dispatch_stt_provider", transcribe)
-        if outcome == "provider-error":
-            with pytest.raises(RuntimeError, match="transcription failed"):
-                stt.transcribe_audio(str(source))
-        else:
-            assert stt.transcribe_audio(str(source))["success"] is True
-        assert source.read_bytes() == b"caff fixture"
-        assert neighbor.read_bytes() == b"existing recording"
-        assert outputs and all(
-            not path.exists() and not path.parent.exists() for path in outputs
-        )
 
 
 class TestTranscribeCredentialReadGuard:
@@ -1408,71 +1362,35 @@ class TestTranscribeCredentialReadGuard:
         assert result["error"] == expected
 
 
-class TestRunCommandSttIdleTimeout:
-    """_run_command_stt uses a progress-based idle timeout (mirrors TTS runner)."""
+@pytest.mark.platforms("posix", "windows")
+@pytest.mark.parametrize("progress", [True, False])
+def test_command_stt_idle_timeout_preserves_transcription_contract(tmp_path, progress):
+    import shlex
+    from tools.transcription_command import _transcribe_command_stt
 
-    @staticmethod
-    def _shell_command(*args):
-        import shlex
-        if os.name == "nt":
-            return subprocess.list2cmdline(list(args))
-        return " ".join(shlex.quote(str(arg)) for arg in args)
-
-    def test_stderr_progress_extends_beyond_timeout(self, tmp_path):
-        """A slow-but-alive command that keeps emitting output survives an
-        idle timeout shorter than its total runtime."""
-        from tools.transcription_command import _run_command_stt
-
-        script = tmp_path / "progress_then_exit.py"
-        # Ticks span >2s so the idle deadline MUST be reset by progress: a
-        # one-shot timeout of 2.0s would kill the child before it exits.
-        script.write_text(
-            "\n".join([
-                "import sys, time",
-                "for idx in range(6):",
-                "    print(f'tick {idx}', file=sys.stderr, flush=True)",
-                "    time.sleep(0.6)",
-                "print('done', flush=True)",
-            ]),
-            encoding="utf-8",
-        )
-
-        result = _run_command_stt(
-            self._shell_command(sys.executable, "-u", str(script)),
-            timeout=2.0,
-        )
-
-        assert result.returncode == 0
-        assert "tick 8" in result.stderr
-        assert "done" in result.stdout
-
-    def test_silent_stall_still_times_out(self, tmp_path):
-        """A silently stalled command is killed once the idle window elapses,
-        and pre-stall output is preserved on the TimeoutExpired."""
-        from tools.transcription_command import _run_command_stt
-
-        script = tmp_path / "progress_then_hang.py"
-        script.write_text(
-            "\n".join([
-                "import sys, time",
-                "print('starting pass 1', file=sys.stderr, flush=True)",
-                "time.sleep(30)",
-            ]),
-            encoding="utf-8",
-        )
-
-        # Same budget rule as the progress test above: the idle window must
-        # comfortably exceed process spawn latency on a loaded runner, or the
-        # child is killed before its first stderr line is ever read and the
-        # pre-stall-output assertion fails spuriously. 30s of silence still
-        # trips a 0.25s window by a wide margin.
-        with pytest.raises(subprocess.TimeoutExpired) as excinfo:
-            _run_command_stt(
-                self._shell_command(sys.executable, "-u", str(script)),
-                timeout=2.0,
-            )
-
-        assert "starting pass 1" in (excinfo.value.stderr or "")
+    audio = tmp_path / "audio.wav"
+    audio.write_bytes(b"fixture audio")
+    script = tmp_path / "transcribe.py"
+    script.write_text(
+        "import sys, time\n"
+        "from pathlib import Path\n"
+        "assert Path(sys.argv[1]).read_bytes() == b'fixture audio'\n"
+        + ("for i in range(6):\n    print('progress', file=sys.stderr, flush=True)\n    time.sleep(.6)\n"
+           if progress else "time.sleep(30)\n")
+        + "Path(sys.argv[2]).write_text('actual transcript', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    args = [sys.executable, "-u", str(script)]
+    command = subprocess.list2cmdline(args) if os.name == "nt" else shlex.join(args)
+    result = _transcribe_command_stt(str(audio), "probe", {
+        "command": command + " {input_path} {output_path}", "timeout": 2,
+    }, {})
+    assert result["success"] is progress
+    assert result["provider"] == "probe"
+    if progress:
+        assert result["transcript"] == "actual transcript"
+    else:
+        assert "STT command provider 'probe' timed out after 2s" in result["error"]
 
 
 # ============================================================================

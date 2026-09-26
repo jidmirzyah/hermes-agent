@@ -7,7 +7,7 @@ description: "Use Hermes Agent with Microsoft Foundry — OpenAI-style and Anthr
 # Microsoft Foundry
 
 Python dependency commands on this page use a
-[PM-prepared source checkout](/reference/package-management#developer-workflow).
+[PM-prepared source checkout](../reference/package-management.md#developer-workflow).
 After a dependency change, reactivate the checkout and restart Hermes.
 
 Hermes Agent's `azure-foundry` provider supports Microsoft Foundry (formerly Azure AI Foundry) and Azure OpenAI. A single Foundry resource can host models with two different wire formats:

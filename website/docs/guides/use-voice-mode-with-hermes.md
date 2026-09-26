@@ -7,10 +7,10 @@ description: "A practical guide to setting up and using Hermes voice mode across
 # Use Voice Mode with Hermes
 
 Python dependency commands on this page use a
-[PM-prepared source checkout](/reference/package-management#developer-workflow).
+[PM-prepared source checkout](../reference/package-management.md#developer-workflow).
 After a dependency change, reactivate the checkout and restart Hermes.
 
-This guide is the practical companion to the [Voice Mode feature reference](/user-guide/features/voice-mode).
+This guide is the practical companion to the [Voice Mode feature reference](../user-guide/features/voice-mode.md).
 
 If the feature page explains what voice mode can do, this guide shows how to actually use it well.
 

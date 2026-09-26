@@ -1,7 +1,6 @@
 """Release gates and package transitions bind the intended immutable artifacts."""
 import copy
 import hashlib
-import io
 import json
 import os
 import subprocess
@@ -31,7 +30,9 @@ def candidates(tag, commit, digest):
                 "artifact": {"sha256": digest,
                              "url": f"{BASE}/releases/tag/{tag}/{arch}" + (".msixbundle" if platform == "windows" else ".zip")},
             })
-    return {"schema": 1, "tag": tag, "commit": commit, "packages": packages}
+    return {"schema": 2, "tag": tag, "commit": commit, "packages": packages,
+            "smoke_results": {name: {"result": "success"} for name in (
+                "smoke-darwin", "smoke-win32", "smoke-win32-universal")}}
 
 
 def test_gate_requires_every_success_including_real_cli(tmp_path):
@@ -64,6 +65,10 @@ def test_gate_requires_every_success_including_real_cli(tmp_path):
 
 def test_transitions_bind_all_arches_identity_version_and_archive():
     old = candidates("v1.2.3", "a" * 40, "1" * 64)
+    old["schema"] = 1
+    del old["smoke_results"]
+    with pytest.raises(ValueError, match="Legacy candidate"):
+        validate_candidates(old, old["tag"], old["commit"], BASE)
     new = candidates("v1.2.4", "b" * 40, "2" * 64)
     require_stable_identity(new["tag"], new["commit"], "refs/tags/v1.2.4")
     for tag, ref in [("v1.2.4", "refs/heads/main"), ("v1.2.4-canary.20260907143420", "refs/tags/v1.2.4-canary.20260907143420")]:
@@ -93,10 +98,11 @@ def test_transitions_bind_all_arches_identity_version_and_archive():
         with pytest.raises(ValueError, match="path encoding"):
             plan_transitions(old, traversal, BASE)
     with pytest.raises(ValueError, match="increase"):
-        plan_transitions(new, old, BASE)
+        plan_transitions(new, candidates("v1.2.3", "a" * 40, "1" * 64), BASE)
 
 
-def test_manifest_origin_checks_with_real_https(tmp_path):
+@pytest.fixture
+def https_origin(tmp_path, monkeypatch):
     import datetime
     import ipaddress
     import ssl
@@ -123,7 +129,6 @@ def test_manifest_origin_checks_with_real_https(tmp_path):
     key_file.write_bytes(key.private_bytes(serialization.Encoding.PEM,
                                          serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
     requests = []
-    data = b'{"schema":1}'
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
@@ -134,7 +139,9 @@ def test_manifest_origin_checks_with_real_https(tmp_path):
                 self.send_header("Location", f"https://{host}:{self.server.server_port}/manifest")
                 self.end_headers()
             else:
-                self.send_response(200)
+                item = self.server.store.get(self.path.lstrip('/'))
+                data = item[0] if item else b'not found'
+                self.send_response(200 if item else 404)
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
                 self.wfile.write(data)
@@ -143,6 +150,8 @@ def test_manifest_origin_checks_with_real_https(tmp_path):
             pass
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.store = {'manifest': (b'{"schema":1}', '"e"')}
+    server.requests = requests
     server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     server_context.load_cert_chain(cert_file, key_file)
     server.socket = server_context.wrap_socket(server.socket, server_side=True)
@@ -150,36 +159,34 @@ def test_manifest_origin_checks_with_real_https(tmp_path):
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}),
                                         urllib.request.HTTPSHandler(context=client_context)).open
     base = f"https://127.0.0.1:{server.server_port}"
+    server.base, server.opener = base, opener
+    monkeypatch.setenv('SSL_CERT_FILE', str(cert_file))
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        digest = hashlib.sha256(data).hexdigest()
-        assert read_manifest(f"{base}/same", digest, expected_origin=base, opener=opener) == {"schema": 1}
-        with pytest.raises(ValueError, match="origin"):
-            read_manifest(f"{base}/cross", opener=opener)
-        requests.clear()
-        with pytest.raises(ValueError, match="origin"):
-            read_manifest(f"https://localhost:{server.server_port}/manifest", expected_origin=base, opener=opener)
-        assert requests == []
+        yield server
     finally:
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
 
 
-def test_manifest_digest_and_tag_movement_fail_closed(tmp_path, monkeypatch):
-    data = b'{"schema":1}'
+def test_manifest_origin_checks_with_real_https(https_origin):
+    server = https_origin
+    base, opener = server.base, server.opener
+    digest = hashlib.sha256(b'{"schema":1}').hexdigest()
+    assert read_manifest(f'{base}/same', digest, expected_origin=base, opener=opener) == {'schema': 1}
+    with pytest.raises(ValueError, match='digest'):
+        read_manifest(f'{base}/manifest', 'f' * 64, opener=opener)
+    with pytest.raises(ValueError, match='origin'):
+        read_manifest(f'{base}/cross', opener=opener)
+    server.requests.clear()
+    with pytest.raises(ValueError, match='origin'):
+        read_manifest(f'https://localhost:{server.server_port}/manifest', expected_origin=base, opener=opener)
+    assert server.requests == []
 
-    class Response(io.BytesIO):
-        def geturl(self):
-            return BASE + "/manifest.json"
 
-    def opener(url, timeout):
-        return Response(data)
-
-    assert read_manifest(BASE, hashlib.sha256(data).hexdigest(), opener=opener) == {"schema": 1}
-    with pytest.raises(ValueError, match="digest"):
-        read_manifest(BASE, "f" * 64, opener=opener)
+def test_tag_movement_fails_closed(tmp_path, monkeypatch):
     commit = "a" * 40
     env = {"RELEASE_TAG": "v1.2.3", "GITHUB_SHA": commit, "GITHUB_REF": "refs/tags/v1.2.3"}
 
@@ -203,7 +210,7 @@ def test_manifest_digest_and_tag_movement_fail_closed(tmp_path, monkeypatch):
     (repo / "input").write_text("first", encoding="utf-8")
     subprocess.run(["git", "add", "input"], check=True)
     subprocess.run(["git", "commit", "-m", "first"], check=True, capture_output=True)
-    actual = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+    actual = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True, encoding="utf-8").strip()
     subprocess.run(["git", "remote", "add", "origin", str(remote)], check=True)
     subprocess.run(["git", "tag", "v1.2.3"], check=True)
     subprocess.run(["git", "push", "origin", "main", "v1.2.3"], check=True, capture_output=True)

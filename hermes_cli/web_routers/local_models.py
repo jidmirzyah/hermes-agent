@@ -9,6 +9,7 @@ start-POST -> {job_id} -> GET poll with byte progress.
 from __future__ import annotations
 
 import asyncio
+import collections
 import contextlib
 import json
 import logging
@@ -52,6 +53,11 @@ _QUICKSTART_LOCK = threading.Lock()
 _LLAMACPP_PROVIDERS = ("llamacpp", "llama.cpp", "llama-cpp")
 _SPLIT_PART_RE = r"-\d{5}-of-\d{5}"
 _DOWNLOAD_PHASES = frozenset({"starting", "installing-runtime", "downloading-runtime", "downloading"})
+# Trailing window the transfer rate averages over. Long enough that a bursty
+# tick (a chunk flush, a mirror switch) doesn't spike the estimate, short
+# enough that the number tracks what the link is doing NOW.
+_RATE_WINDOW = 8.0
+_RATE_MIN_ELAPSED = 0.5  # below this a two-sample slope is noise, not a rate
 _SERVER_START_FAILED = "The local server could not start — check the runtime is installed"
 
 
@@ -136,6 +142,48 @@ def _job(kind: str, target: str, model_id: str | None = None) -> Dict[str, Any]:
     return job
 
 
+def _rate_and_eta(samples: "collections.deque[tuple[float, int]]", done: int,
+                  total: int | None) -> "tuple[float | None, int | None]":
+    """Transfer rate and remaining seconds from a trailing sample window.
+
+    The rate is the slope across the window, not the last two ticks, so a
+    burst reads as throughput rather than a spike. Anything that cannot be
+    turned into an honest number (one sample, a window too short to divide
+    by, a transfer that hasn't moved) reports unknown rather than a guess.
+    """
+    first_at, first_done = samples[0]
+    elapsed = samples[-1][0] - first_at
+    if elapsed < _RATE_MIN_ELAPSED or done <= first_done:
+        return None, None
+    rate = (done - first_done) / elapsed
+    if total:
+        return rate, max(0, round(max(0, total - done) / rate))
+    return rate, None
+
+
+def _record_rate(job: Dict[str, Any], done: int) -> None:
+    """Refresh the job's smoothed rate + ETA from the sample it just reported.
+
+    Samples live on the running entry, not the job, so the wire payload stays
+    the derived facts and the history dies with the transfer.
+    """
+    running = _RUNNING.get(job["job_id"])
+    if running is None:
+        return
+    now = time.monotonic()
+    samples = running.setdefault("samples", collections.deque())
+    samples.append((now, done))
+    while len(samples) > 1 and now - samples[0][0] > _RATE_WINDOW:
+        samples.popleft()
+    rate, eta = _rate_and_eta(samples, done, job.get("total_bytes"))
+    if rate is None:
+        job.pop("bytes_per_sec", None)
+        job.pop("eta_seconds", None)
+    else:
+        job["bytes_per_sec"] = rate
+        job["eta_seconds"] = eta
+
+
 def _job_view(job: Dict[str, Any]) -> Dict[str, Any]:
     out = dict(job)
     running = _RUNNING.get(job["job_id"], {})
@@ -146,6 +194,11 @@ def _job_view(job: Dict[str, Any]) -> Dict[str, Any]:
     out["can_resume"] = out["status"] == "paused" and "resume" in running
     if out["total_bytes"]:
         out["percent"] = min(100, round(out["done_bytes"] / out["total_bytes"] * 100))
+    # A rate and ETA describe a transfer in motion; a parked or settled job
+    # would otherwise freeze a stale speed that reads as the live one.
+    if out["status"] != "running":
+        out.pop("bytes_per_sec", None)
+        out.pop("eta_seconds", None)
     return out
 
 
@@ -208,6 +261,11 @@ def _spawn_job(job: Dict[str, Any], name: str, body: Callable[[], None], *, fail
                 guard.release()
                 return False
             pause.clear()
+            # A resume starts a fresh window: the gap parked in the queue
+            # would otherwise read as a rate of roughly zero bytes/sec.
+            running = _RUNNING.get(job["job_id"])
+            if running is not None:
+                running.pop("samples", None)
             job["status"] = "running"
             job["error"] = None
         try:
@@ -357,97 +415,6 @@ def _variant_files_on_disk(model_id: str) -> "list[Path]":
     return files
 
 
-def _probe_range_support(url: str) -> int:
-    """Total size when the server honors Range requests, else 0. 401/403 = gated repo or wrong catalog
-    repo — raise a plain-language message, not a bare status."""
-    req = urllib.request.Request(url, headers={"Range": "bytes=0-0"})
-    try:
-        with urllib.request.urlopen(req, timeout=60) as r:
-            content_range = r.headers.get("Content-Range", "") if r.status == 206 else ""
-            if "/" in content_range:
-                return int(content_range.rsplit("/", 1)[1])
-    except urllib.error.HTTPError as exc:
-        if exc.code in (401, 403):
-            raise RuntimeError("The model host refused the download (gated or moved). "
-                               "This is a catalog problem, not yours — please report it.") from exc
-        raise
-    except Exception:  # noqa: BLE001
-        pass
-    return 0
-
-
-def download_file(url: str, dest: Path, job: Dict[str, Any], *, base_done: int = 0, keep_totals: bool = False) -> None:
-    """Download url -> dest with byte progress on ``job``; ranged-parallel when the server supports it,
-    single-stream otherwise. Never leaves a .part. Completeness is checked only against what the SERVER
-    declared (range-probe total / Content-Length), never the CATALOG (its sizes may lag a re-upload), so a
-    dropped connection still errors instead of staging a truncated file. Multi-file variants: ``base_done``
-    offsets progress onto earlier files; ``keep_totals=True`` keeps the per-file size from overwriting the
-    variant's total."""
-    tmp = dest.with_suffix(".part")
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    file_done = [0]
-    progress_lock = threading.Lock()
-    errors: list[Exception] = []
-
-    def pump(r, f) -> None:
-        for chunk in iter(lambda: r.read(_CHUNK), b""):
-            f.write(chunk)
-            with progress_lock:
-                file_done[0] += len(chunk)
-                job["done_bytes"] = base_done + file_done[0]
-
-    def fetch_range(start: int, end: int) -> None:
-        try:
-            req = urllib.request.Request(url, headers={"Range": f"bytes={start}-{end}"})
-            with urllib.request.urlopen(req, timeout=120) as r, open(tmp, "r+b") as f:
-                f.seek(start)
-                pump(r, f)
-        except Exception as exc:  # noqa: BLE001
-            errors.append(exc)
-
-    try:
-        # Probe and preallocation take real seconds on a 20+ GB file — narrate them, or the pane shows a dead '— of X GB'.
-        job["detail"] = "Connecting"
-        total = _probe_range_support(url)
-        if total:
-            if not keep_totals:
-                job["total_bytes"] = total
-            # Preallocate so each worker writes at its own offset.
-            job["detail"] = f"Reserving {_human_gb(total)} of disk space"
-            with open(tmp, "wb") as f:
-                f.truncate(total)
-            job["detail"] = ""
-            n = _DOWNLOAD_CONNECTIONS
-            threads = [threading.Thread(target=fetch_range, daemon=True, name=f"lm-dl-{i}",
-                                        args=(i * total // n, (i + 1) * total // n - 1)) for i in range(n)]
-            for t in threads:
-                t.start()
-            for t in threads:
-                t.join()
-            if errors:
-                raise errors[0]
-            if file_done[0] != total:
-                raise RuntimeError(f"download incomplete ({file_done[0]} of {total} bytes)")
-        else:
-            # No range support: single stream; completeness judged by the server's
-            # own Content-Length when it sent one — never the catalog.
-            with urllib.request.urlopen(url, timeout=120) as r, open(tmp, "wb") as f:
-                length = int(r.headers.get("Content-Length") or 0)
-                if length and not keep_totals:
-                    job["total_bytes"] = length
-                pump(r, f)
-            if length and file_done[0] != length:
-                raise RuntimeError(f"Download ended at {file_done[0]:,} bytes but the server "
-                                   f"said {length:,} — connection dropped? Removed; try again")
-        job["detail"] = "Finishing"
-        binaries.replace_when_released(tmp, dest)
-    except Exception:
-        # Best effort: a leftover that cannot be removed must not hide the error that left it.
-        with contextlib.suppress(OSError):
-            tmp.unlink(missing_ok=True)
-        raise
-
-
 def _download_plan(entry, variant) -> list:
     """Everything a variant needs: split parts + mmproj/draft assets, as (url, dest, bytes) tuples."""
     plan = [(_hf_url(entry.repo, a.path), bootstrap.models_dir() / a.local_name, a.size_bytes) for a in variant.files]
@@ -466,6 +433,7 @@ def _download_progress_hook(job: Dict[str, Any]):
     def tick(done: int, total: int, ranges: dict) -> None:
         with _JOBS_LOCK:
             job.update(done_bytes=done, total_bytes=total or None, ranges=ranges)
+            _record_rate(job, done)
     return tick
 
 
@@ -686,17 +654,18 @@ def _install_engine_job(job: Dict[str, Any], backend: str):
 
 
 @router.post("/api/local-models/runtime/install")
-def local_models_runtime_install(body: RuntimeInstallBody):
+def local_models_runtime_install(body: RuntimeInstallBody, profile: Optional[str] = None):
     tag, backend = _runtime_target(body.backend)
     job = _job("runtime-install", f"llama.cpp {tag} ({backend})")
 
     def run():
-        previous = binaries.installed_engine(backend)
-        engine = _install_engine_job(job, backend)
-        running = bootstrap.get_supervisor()
-        if running is not None and previous != engine:
-            _step(job, "restarting", "Switching the running server to the pinned build")
-            bootstrap.refresh_local_runtime()
+        with _config_profile_scope(profile):
+            previous = binaries.installed_engine(backend)
+            engine = _install_engine_job(job, backend)
+            running = bootstrap.get_supervisor()
+            if running is not None and previous != engine:
+                _step(job, "restarting", "Switching the running server to the pinned build")
+                bootstrap.refresh_local_runtime()
         _finish(job, f"llama.cpp {tag} ready ({backend})")
 
     _spawn_job(job, "lr-runtime-install", run, fail_msg="runtime install failed: %s", resumable=True)
@@ -801,7 +770,7 @@ def _quickstart_target(body: QuickstartBody, budget):
 
 
 @router.post("/api/local-models/quickstart")
-def local_models_quickstart(body: QuickstartBody):
+def local_models_quickstart(body: QuickstartBody, profile: Optional[str] = None):
     """One job: install the runtime (if missing), download this machine's build of the recommended model (if
     missing), make it the default. Each leg uses the same code as the individual setup routes.
     Preflight rejects (no automatic recommendation or no servable choice) fail the POST
@@ -827,9 +796,7 @@ def local_models_quickstart(body: QuickstartBody):
                 with _JOBS_LOCK:
                     job.update(done_bytes=0, total_bytes=None, ranges={})
             _run_download_plan(job, download_plan, entry.display_name)
-        # Activate: same sequence as /activate's job body, and the same scope. Quickstart IS
-        # `activate` plus a download: _set_runtime_enabled and _assign_default both reach
-        # save_config, so without this the config.yaml write lands in the launch profile.
+        _step(job, "starting-server", "Starting the local server")
         with _config_profile_scope(profile):
             _ensure_server(job, _set_runtime_enabled(True), variant.model_id,
                            fail_detail="The local server could not start — open Local Models for details",

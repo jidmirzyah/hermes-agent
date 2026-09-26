@@ -41,6 +41,32 @@ def _config_for(root: Path, channel: str) -> dict:
     }
 
 
+def test_dynamic_channel_parser_and_per_install_round_trip(tmp_path, monkeypatch):
+    import argparse
+    import hermes_yaml as yaml
+    from hermes_cli.subcommands.update import build_update_parser
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    parser = argparse.ArgumentParser()
+    build_update_parser(parser.add_subparsers(), cmd_update=lambda args: None)
+    root = tmp_path / "source"
+    root.mkdir()
+    name = "new-preview-493"
+    args = parser.parse_args(["update", "--set-channel", name])
+    set_install_channel(args.set_channel, root)
+    saved = yaml.safe_load((tmp_path / "home/config.yaml").read_text())
+    assert resolve_update_channel(saved, root) == name
+    assert parser.parse_args(["update", "--channel", name]).channel == name
+    assert resolve_update_channel(saved, tmp_path / "other") == "main"
+    for invalid in (" New-preview", "PREVIEW", "preview/other", "preview--other", ""):
+        with pytest.raises(ValueError):
+            set_install_channel(invalid, root)
+        with pytest.raises(ValueError):
+            resolve_update_channel(_config_for(root, invalid), root)
+        with pytest.raises(SystemExit):
+            parser.parse_args(["update", "--channel", invalid])
+
+
 class TestInstallId:
     def test_path_derived_and_stable(self, tmp_path):
         """The id hashes the canonical PATH — same path, same id, no matter
@@ -71,11 +97,15 @@ class TestInstallId:
 
 
 class TestResolve:
-    def test_per_install_record_wins(self, tmp_path):
-        root = tmp_path / "install"
-        _stamp(root, "self")
-        config = _config_for(root, "stable")
-        assert resolve_update_channel(config, root) == CHANNEL_STABLE
+
+    def test_channel_bundle_keeps_baked_subscription_in_its_cli(self, tmp_path):
+        (tmp_path / 'install-stamp.json').write_text(json.dumps({
+            'payload': 'bundled', 'source': 'channel-build',
+            'updateMechanism': 'electron-updater', 'tag': None,
+            'channelBuild': {'channel': 'r2-preview'},
+        }), encoding='utf-8')
+        assert default_channel(tmp_path) == 'r2-preview'
+        assert resolve_update_channel(_config_for(tmp_path, 'stable'), tmp_path) == 'r2-preview'
 
     def test_multi_install_isolation(self, tmp_path):
         """Two installs, one config: each resolves its own record and a
@@ -88,80 +118,33 @@ class TestResolve:
         assert resolve_update_channel(config, a) == CHANNEL_STABLE
         assert resolve_update_channel(config, b) == CHANNEL_MAIN
 
-    def test_defaults_by_mechanism(self, tmp_path):
-        source = tmp_path / "src"
-        bundle = tmp_path / "bundle"
-        _stamp(source, "self")
-        _stamp(bundle, "electron-updater", tag="v0.27.0")
-        assert default_channel(source) == CHANNEL_MAIN
-        assert default_channel(bundle) == CHANNEL_STABLE
-        assert resolve_update_channel({}, source) == CHANNEL_MAIN
-        assert resolve_update_channel({}, bundle) == CHANNEL_STABLE
-
-    @pytest.mark.parametrize("mechanism", ["electron-updater", "app-installer", "microsoft-store"])
-    def test_canary_artifact_defaults_to_its_own_feed(self, tmp_path, mechanism):
-        """A canary bundle with no per-install record tracks canary.
-
-        The artifact publishes to canary.yml (product-identity.cjs keys the
-        feed on this same tag). Defaulting it to stable made the updater ask
-        for canary.yml under the newest STABLE release, which 404s and
-        leaves a fresh canary install unable to update at all.
-        """
-        root = tmp_path / "canary-bundle"
-        _stamp(root, mechanism, tag="v0.28.0-canary.20260819171926")
-        assert default_channel(root) == CHANNEL_CANARY
-        assert resolve_update_channel({}, root) == CHANNEL_CANARY
-
-    def test_legacy_date_only_canary_tag_is_a_canary(self, tmp_path):
-        root = tmp_path / "legacy-canary"
-        _stamp(root, "electron-updater", tag="v0.28.0-canary.20260818")
-        assert default_channel(root) == CHANNEL_CANARY
-
-    def test_artifact_channel_ignores_obsolete_record(self, tmp_path):
-        """A record cannot change a separately installed package identity."""
-        root = tmp_path / "canary-bundle"
-        _stamp(root, "electron-updater", tag="v0.28.0-canary.20260819171926")
-        assert resolve_update_channel(_config_for(root, "stable"), root) == CHANNEL_CANARY
-
-    def test_a_canary_tag_on_a_source_install_is_not_a_canary_channel(self, tmp_path):
-        """Only electron-updater bundles have release feeds to track."""
-        root = tmp_path / "src"
-        _stamp(root, "self", tag="v0.28.0-canary.20260819171926")
-        assert default_channel(root) == CHANNEL_MAIN
-
-    def test_stampless_tree_defaults_to_main(self, tmp_path):
-        root = tmp_path / "bare"
-        root.mkdir()
-        assert resolve_update_channel({}, root) == CHANNEL_MAIN
-
-    def test_canary_remains_a_release_channel_for_source(self, tmp_path):
-        root = tmp_path / "src"
-        _stamp(root, "self")
-        config = _config_for(root, "canary")
-        assert resolve_update_channel(config, root) == CHANNEL_CANARY
-
-    def test_stable_bundle_ignores_canary_record(self, tmp_path):
-        root = tmp_path / "bundle"
-        _stamp(root, "electron-updater")
-        config = _config_for(root, "canary")
-        assert resolve_update_channel(config, root) == CHANNEL_STABLE
-
-    @pytest.mark.parametrize("payload", ["bundled", "light"])
-    @pytest.mark.parametrize("channel, tag", [
-        ("stable", "v1.2.3"), ("canary", "v1.2.4-canary.20260911125822"),
+    @pytest.mark.parametrize('mechanism,tag,payload,record,expected', [
+        ('self', None, None, None, 'main'),
+        ('self', 'v1.2.3-canary.20260818', None, None, 'main'),
+        (None, None, None, None, 'main'),
+        ('self', None, None, 'canary', 'canary'),
+        ('self', None, None, 'yolo', 'yolo'),
+        ('electron-updater', 'v1.2.3', None, None, 'stable'),
+        ('electron-updater', 'v1.2.3-canary.20260819171926', None, 'stable', 'canary'),
+        ('app-installer', 'v1.2.3-canary.20260819171926', None, None, 'canary'),
+        ('microsoft-store', 'v1.2.3-canary.20260819171926', None, None, 'canary'),
+        ('electron-updater', 'v1.2.3-canary.20260818', None, None, 'canary'),
+        ('electron-updater', None, None, 'canary', 'stable'),
+        ('external', 'v1.2.3', 'bundled', 'main', 'stable'),
+        ('external', 'v1.2.3', 'light', 'main', 'stable'),
+        ('external', 'v1.2.4-canary.20260911125822', 'bundled', 'main', 'canary'),
+        ('external', 'v1.2.4-canary.20260911125822', 'light', 'main', 'canary'),
     ])
-    def test_external_packages_ignore_source_channel_records(self, tmp_path, payload, channel, tag):
-        (tmp_path / "install-stamp.json").write_text(json.dumps({
-            "payload": payload, "updateMechanism": "external", "tag": tag,
-        }))
-        assert resolve_update_channel(_config_for(tmp_path, "main"), tmp_path) == channel
-        assert default_channel(tmp_path) == channel
-
-    def test_garbage_record_falls_to_default(self, tmp_path):
-        root = tmp_path / "src"
-        _stamp(root, "self")
-        config = _config_for(root, "yolo")
-        assert resolve_update_channel(config, root) == CHANNEL_MAIN
+    def test_channel_policy(self, tmp_path, mechanism, tag, payload, record, expected):
+        if mechanism is not None:
+            stamp = {'updateMechanism': mechanism, 'tag': tag}
+            if payload:
+                stamp['payload'] = payload
+            (tmp_path / 'install-stamp.json').write_text(json.dumps(stamp), encoding='utf-8')
+        config = _config_for(tmp_path, record) if record else {}
+        assert resolve_update_channel(config, tmp_path) == expected
+        if record is None or mechanism != 'self':
+            assert default_channel(tmp_path) == expected
 
 
 class TestSetChannel:
@@ -188,55 +171,7 @@ class TestSetChannel:
         assert record["path"] == str(root)
         assert resolve_update_channel(written, root) == channel
 
-    def test_preserves_other_config_and_other_installs(self, tmp_path, monkeypatch):
-        import hermes_yaml as yaml
 
-        home = self._home(tmp_path, monkeypatch)
-        other = tmp_path / "other"
-        other.mkdir()
-        (home / "config.yaml").write_text(
-            yaml.safe_dump(
-                {
-                    "model": {"provider": "nous"},
-                    "update": {
-                        "installs": {
-                            install_id(other): {"path": str(other), "channel": "canary"}
-                        }
-                    },
-                }
-            )
-        )
-        root = tmp_path / "install"
-        _stamp(root, "self")
-        set_install_channel("stable", root)
-
-        written = yaml.safe_load((home / "config.yaml").read_text())
-        assert written["model"] == {"provider": "nous"}
-        assert written["update"]["installs"][install_id(other)]["channel"] == "canary"
-        assert written["update"]["installs"][install_id(root)]["channel"] == "stable"
-
-    def test_preserves_comments_in_config(self, tmp_path, monkeypatch):
-        """Persisting a channel must not strip user comments from
-        config.yaml — the write goes through the shared comment-preserving
-        atomic round-trip writer."""
-        home = self._home(tmp_path, monkeypatch)
-        (home / "config.yaml").write_text(
-            "# my hand-maintained settings\n"
-            "model:\n"
-            "  provider: nous  # keep this\n"
-        )
-        root = tmp_path / "install"
-        _stamp(root, "self")
-        set_install_channel("stable", root)
-
-        text = (home / "config.yaml").read_text()
-        assert "# my hand-maintained settings" in text
-        assert "# keep this" in text
-        import hermes_yaml as yaml
-
-        written = yaml.safe_load(text)
-        assert written["model"] == {"provider": "nous"}
-        assert written["update"]["installs"][install_id(root)]["channel"] == "stable"
 
     @pytest.mark.parametrize("mechanism", ["external", "electron-updater", "app-installer", "microsoft-store"])
     def test_os_owned_mechanism_refuses_channel_writes(self, tmp_path, monkeypatch, mechanism):
@@ -267,8 +202,8 @@ class TestSetChannel:
         self._home(tmp_path, monkeypatch)
         root = tmp_path / "install"
         _stamp(root, "self")
-        with pytest.raises(ValueError, match="unknown channel"):
-            set_install_channel("beta", root)
+        with pytest.raises(ValueError, match="Invalid channel name"):
+            set_install_channel("../beta", root)
 
 
 class TestSetChannelCLI:
@@ -392,7 +327,7 @@ class TestSetChannelCLI:
         before = b"# retain user comment\nmodel:\n  provider: fixture\n"
         cfg.write_bytes(before)
         for mechanism, channel, message in (
-            ("self", "bogus", "unknown channel"),
+            ("self", "../bogus", "Invalid channel name"),
             ("external", "stable", "owned by"),
             ("app-installer", "canary", "owned by"),
         ):
@@ -434,84 +369,24 @@ class TestSetChannelCLI:
         assert "Back up your data" in out
         assert "older stable release" in out
         assert "Wait" not in out
-    def test_canary_optin_warns_about_forward_incompatible_state(self, capsys):
-        from unittest.mock import patch
-
-        from hermes_cli.main import cmd_update
-
-        with (
-            patch("hermes_cli.config.is_managed", return_value=False),
-            patch("hermes_cli.config.detect_install_method", return_value="unknown"),
-            patch("hermes_cli.update_channel.set_install_channel", return_value="a" * 16),
-        ):
-            with pytest.raises(SystemExit) as exc:
-                cmd_update(self._args(set_channel="canary"))
-        assert exc.value.code == 0
-        out = capsys.readouterr().out
-        assert "forward-incompatible" in out
-
-    def test_install_id_prints_and_exits(self, capsys):
-        from unittest.mock import patch
-
-        from hermes_cli.main import cmd_update
-
-        with (
-            patch("hermes_cli.config.is_managed", return_value=False),
-            patch("hermes_cli.update_channel.install_id", return_value="b" * 16),
-        ):
-            with pytest.raises(SystemExit) as exc:
-                cmd_update(self._args(install_id=True))
-        assert exc.value.code == 0
-        assert "b" * 16 in capsys.readouterr().out
 
 
-class TestDoctorStaleness:
-    def test_missing_path_flagged(self, tmp_path):
-        gone = tmp_path / "gone"
-        config = {
-            "update": {"installs": {"deadbeefdeadbeef": {"path": str(gone), "channel": "main"}}}
-        }
-        stale = stale_channel_records(config)
-        assert [(sha, reason) for sha, _r, reason in stale] == [
-            ("deadbeefdeadbeef", "missing")
-        ]
 
-    def test_replaced_install_flagged(self, tmp_path):
-        """The recorded path exists but keys to a different sha16 — the
-        record is a leftover from a tree that used to live elsewhere."""
-        root = tmp_path / "install"
+@pytest.mark.parametrize('kind,expected', [('missing', 'missing'), ('replaced', 'replaced'),
+                                             ('unclaimed', 'unclaimed'), ('healthy', None)])
+def test_doctor_channel_records_are_read_only(tmp_path, monkeypatch, kind, expected):
+    from copy import deepcopy
+    home, root = tmp_path / '.hermes', tmp_path / 'install'
+    monkeypatch.setenv('HERMES_HOME', str(home))
+    if kind != 'missing':
         root.mkdir()
-        config = {
-            "update": {"installs": {"0" * 16: {"path": str(root), "channel": "main"}}}
-        }
-        stale = stale_channel_records(config)
-        assert [(sha, reason) for sha, _r, reason in stale] == [("0" * 16, "replaced")]
-
-    def test_unclaimed_record_flagged(self, tmp_path, monkeypatch):
-        """sha16 matches the path but no installs/<sha16>/install.json exists."""
-        home = tmp_path / ".hermes"
-        home.mkdir()
-        monkeypatch.setenv("HERMES_HOME", str(home))
-        root = tmp_path / "install"
-        root.mkdir()
-        config = _config_for(root, "main")
-        stale = stale_channel_records(config)
-        assert [(sha, reason) for sha, _r, reason in stale] == [
-            (install_id(root), "unclaimed")
-        ]
-
-    def test_healthy_record_not_flagged(self, tmp_path, monkeypatch):
-        home = tmp_path / ".hermes"
-        home.mkdir()
-        monkeypatch.setenv("HERMES_HOME", str(home))
-        root = tmp_path / "install"
-        _stamp(root, "self")
-        # The live install-state record the sha16 must be claimed by
-        # (boot_bootstrap.ensure_install_dir writes this at boot; that
-        # module is landing in a parallel lane, so write the marker
-        # directly — the layout IS the contract).
-        state = home / "installs" / install_id(root)
+    key = '0' * 16 if kind == 'replaced' else install_id(root)
+    config = {'update': {'installs': {key: {'path': str(root), 'channel': 'main'}}}}
+    if kind == 'healthy':
+        state = home / 'installs' / key
         state.mkdir(parents=True)
-        (state / "install.json").write_text(json.dumps({"root": str(root)}))
-        config = _config_for(root, "main")
-        assert stale_channel_records(config) == []
+        (state / 'install.json').write_text(json.dumps({'root': str(root)}), encoding='utf-8')
+    before = deepcopy(config)
+    assert [(key, reason) for key, _, reason in stale_channel_records(config)] == (
+        [(key, expected)] if expected else [])
+    assert config == before

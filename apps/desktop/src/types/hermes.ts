@@ -1429,6 +1429,11 @@ export interface LocalRuntimeJob {
   total_bytes: number | null
   done_bytes: number
   percent?: number
+  /** Smoothed transfer rate (bytes/sec) and remaining seconds. Present only
+   * while a download is actually moving — absent when parked or settled, so a
+   * stale speed never reads as the live one. */
+  bytes_per_sec?: number | null
+  eta_seconds?: number | null
   error: string | null
   /** Which file ranges of the source plan are fetched vs banked — present
    * while a plan (multi-file or cached+fresh mix) is in flight. */

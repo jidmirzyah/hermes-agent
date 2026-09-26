@@ -403,6 +403,10 @@ _HERMES_BEHAVIORAL_VARS = frozenset({
     "HERMES_TUI_PROVIDER",
     "HERMES_MANAGED",
     "HERMES_MANAGED_DIR",
+    # A Nix-wrapped `hermes` on the developer's host exports the store's read-only plugins
+    # tree; tests must discover the checkout's plugins/ (get_bundled_plugins_dir), not a
+    # different release's.
+    "HERMES_BUNDLED_PLUGINS",
     "HERMES_DEV",
     "HERMES_CONTAINER",
     "HERMES_EPHEMERAL_SYSTEM_PROMPT",
@@ -1757,6 +1761,9 @@ def pytest_configure(config):  # noqa: D401 — pytest hook
         "markers", "allow_real_home_io: explicitly bypass the test-only home I/O guard."
     )
     config.addinivalue_line(
+        "markers", "real_release_channels: keep the real R2 channel reader (no local source-branch stub)."
+    )
+    config.addinivalue_line(
         "markers",
         f"{_GATEWAY_LOOKALIKE_MARK}: the test spawns and reaps its own stub "
         "child whose argv matches the gateway runtime matcher; only the "
@@ -1865,10 +1872,21 @@ def _reject_contradictory_platform_marks(items):
     marker: platforms("linux", arch="arm64").
     """
     offenders = []
+    retired = []
     for item in items:
         marks = list(item.iter_markers("platforms"))
         if len(marks) > 1:
             offenders.append(f"  {item.nodeid}: {len(marks)} platforms() marks")
+        for legacy in ("linux_only", "macos_only", "windows_only"):
+            if item.get_closest_marker(legacy):
+                retired.append(f"  {item.nodeid}: {legacy}")
+    if retired:
+        # An unregistered mark is a warning, so a merge that resurrects the old
+        # trio would make a host-gated test RUN on every host, unnoticed.
+        raise pytest.UsageError(
+            "linux_only/macos_only/windows_only were replaced by platforms(...); rewrite:\n"
+            + "\n".join(retired)
+        )
     if offenders:
         raise pytest.UsageError(
             "a test may carry at most one platforms() marker — combine the "
@@ -2496,3 +2514,18 @@ def _forbid_real_hermes_home_io(monkeypatch, request):
     from tests.home_io_guard import HomeIOGuard
 
     HomeIOGuard(lambda: _REAL_HERMES_ROOT_CANDIDATES).install(monkeypatch)
+
+
+@pytest.fixture
+def real_bash() -> str:
+    """A bash that runs shell scripts: on the Windows runners PATH resolves ``bash`` to
+    System32's WSL launcher, which prints a UTF-16 "no installed distributions" notice and
+    exits 1. Prefer Git for Windows' bash there; elsewhere the PATH one is real."""
+    found = shutil.which("bash")
+    if sys.platform == "win32" and (
+            not found or any(marker in found.lower() for marker in ("system32", "windowsapps"))):
+        for rel in (("Git", "bin", "bash.exe"), ("Git", "usr", "bin", "bash.exe")):
+            candidate = Path(os.environ.get("ProgramFiles", r"C:\Program Files")).joinpath(*rel)
+            if candidate.exists():
+                return str(candidate)
+    return found or "bash"

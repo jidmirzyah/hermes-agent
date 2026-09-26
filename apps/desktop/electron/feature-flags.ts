@@ -1,36 +1,21 @@
-// feature-flags.ts — the desktop's feature-flag resolver.
-//
-// One place that decides which gated surfaces are on for this artifact.
-// Flags resolve from two inputs:
-//   - launch argv (e.g. `--local` on Hermes.exe, or `hermes desktop --local`)
-//   - the release channel of the artifact (canary builds preview features)
-// The verdict is static for the process lifetime; the renderer reads it
-// once via the preload bridge (`hermes:feature-flags`).
-
-export interface FeatureFlags {
+const featureFlags = {
   /** Local-models GUI surfaces (settings pane, pickers, statusbar, tips). */
-  localModels: boolean
-}
+  localModels: ({ argv }) => process.platform === 'win32' || process.platform === 'darwin' || argv.includes('--local')
+} satisfies Record<string, (args: FeatureFlagInput) => boolean>
 
-/** True when a baked install tag names a canary-channel build. */
+export type FeatureFlags = { [K in keyof typeof featureFlags]: boolean }
+
 export function isCanaryTag(tag: string | null | undefined): boolean {
   return /-canary\./.test(tag || '')
 }
 
 export interface FeatureFlagInput {
-  /** The main process argv (launch flags like `--local`). */
+  /** desktop launch flags */
   argv: readonly string[]
   /** Whether this artifact is a canary-channel build. */
   canary: boolean
 }
 
-/**
- * Resolve every feature flag for this process. A flag is on when the launch
- * argv opts in (`--local`) OR the artifact is a canary build — canary is the
- * preview channel, so gated features ride along by default there.
- */
-export function resolveFeatureFlags({ argv, canary }: FeatureFlagInput): FeatureFlags {
-  return {
-    localModels: canary || argv.includes('--local')
-  }
+export function resolveFeatureFlags(input: FeatureFlagInput): FeatureFlags {
+  return Object.fromEntries(Object.entries(featureFlags).map(([k, v]) => [k, v(input)])) as FeatureFlags
 }

@@ -21,8 +21,8 @@ same path, and the channel opt-in must survive that.
 * Written by ``hermes update --set-channel <x>`` from inside an install
   (it knows its own id — the user never types a sha).
 * Shown by ``hermes update --install-id`` and the desktop About page.
-* Source installs select main or a published stable/canary release. Bundles
-  derive their channel from the baked tag, never from these records.
+* Source installs select an R2 channel name, or use an explicit branch override.
+  Bundles derive their channel from their baked identity, never these records.
   ``external`` installs have no configurable channel; the steward owns updates.
 
 Pure-stdlib leaf module (plus hermes-internal imports done lazily): the
@@ -31,19 +31,22 @@ installers and boot paths read it before the full config machinery loads.
 
 from __future__ import annotations
 
-from hermes_cli.runtime_paths import install_key, installs_root
+from pm.environments import install_key, installs_root
+from hermes_cli.release_channels import validate_name
+from contextlib import contextmanager
 import logging
 import os
 import re
 from pathlib import Path
 from typing import Any, Optional
+from pm.paths import install_root
 
 logger = logging.getLogger(__name__)
 
 CHANNEL_MAIN = "main"
 CHANNEL_STABLE = "stable"
 CHANNEL_CANARY = "canary"
-VALID_CHANNELS = (CHANNEL_MAIN, CHANNEL_STABLE, CHANNEL_CANARY)
+
 
 # A canary release tag: v<major>.<minor>.<patch>-canary.<YYYYMMDDHHMMSS>,
 # or the legacy date-only shape. THIS is the single authority for the
@@ -51,7 +54,7 @@ VALID_CHANNELS = (CHANNEL_MAIN, CHANNEL_STABLE, CHANNEL_CANARY)
 # scripts/write_install_stamp.py (validates the feed key) import it rather
 # than re-typing the rule. Canaries are current-stable patch+1, so any
 # patch is accepted here.
-_CANARY_TAG_RE = re.compile(r"^v(?:0|[1-9]\d{0,2})\.\d+\.\d+-canary\.20\d{6}(?:\d{6})?$")
+_CANARY_TAG_RE = re.compile(r"^v(?:0|[1-9]\d*)\.\d+\.\d+-canary\.20\d{6}(?:\d{6})?$")
 
 
 def is_canary_tag(tag: Any) -> bool:
@@ -73,16 +76,6 @@ def canary_tag_for_date(version: str, date_utc: str) -> str:
     return f"v{major}.{minor}.{patch + 1}-canary.{date_utc}"
 
 
-def _default_root() -> Path:
-    """This process's install root.
-
-    Mirrors version_info's stamp resolution: HERMES_INSTALL_ROOT when the
-    steward wrapper sets it (Nix points it at the sealed tree), else the
-    code root of the executing checkout.
-    """
-    root = os.environ.get("HERMES_INSTALL_ROOT")
-    return Path(root) if root else Path(__file__).parent.parent.resolve()
-
 
 def install_id(project_root: Optional[Path] = None) -> str:
     """The sha16 id of the install at ``project_root`` (default: this one).
@@ -90,7 +83,7 @@ def install_id(project_root: Optional[Path] = None) -> str:
     Same identity as the ``installs/<sha16>/`` state folder key.
     """
     if project_root is None:
-        project_root = _default_root()
+        project_root = install_root()
     return install_key(Path(project_root))
 
 
@@ -137,10 +130,15 @@ def default_channel(project_root: Optional[Path] = None) -> str:
     newest STABLE release, where that file does not exist (404), leaving
     the install unable to update at all.
     """
-    root = Path(project_root) if project_root is not None else _default_root()
+    root = Path(project_root) if project_root is not None else install_root()
     stamp = _read_stamp(root)
     if not _package_channel(stamp):
         return CHANNEL_MAIN
+    if stamp.get("source") == "channel-build":
+        request = stamp.get("channelBuild")
+        if not isinstance(request, dict):
+            raise ValueError("Channel bundle has no baked subscription")
+        return validate_name(request.get("channel"))
     return CHANNEL_CANARY if is_canary_tag(stamp.get("tag")) else CHANNEL_STABLE
 
 
@@ -149,12 +147,12 @@ def resolve_update_channel(
     project_root: Optional[Path] = None,
 ) -> str:
     """Source records select releases or main; package tags fix bundle identity."""
-    root = Path(project_root) if project_root is not None else _default_root()
+    root = Path(project_root) if project_root is not None else install_root()
     if _package_channel(_read_stamp(root)):
         return default_channel(root)
     configured: Any = channel_record(config, root).get("channel")
-    if isinstance(configured, str) and configured.strip().lower() in VALID_CHANNELS:
-        return configured.strip().lower()
+    if configured is not None:
+        return validate_name(configured)
     return default_channel(root)
 
 
@@ -170,14 +168,10 @@ def set_install_channel(
     """
     from hermes_cli.update_contract import COMMIT_BUILD_UPDATE_MESSAGE, is_commit_build
 
-    root = Path(project_root) if project_root is not None else _default_root()
+    root = Path(project_root) if project_root is not None else install_root()
     if is_commit_build(root):
         raise ValueError(COMMIT_BUILD_UPDATE_MESSAGE)
-    channel = (channel or "").strip().lower()
-    if channel not in VALID_CHANNELS:
-        raise ValueError(
-            f"unknown channel {channel!r} (one of {', '.join(VALID_CHANNELS)})"
-        )
+    channel = validate_name(channel)
 
     stamp = _read_stamp(root)
     if _package_channel(stamp) or stamp.get("updateMechanism") == "external":
@@ -212,7 +206,54 @@ def handle_metadata_args(args, project_root: Path) -> bool:
     return True
 
 
-def _write_channel_record(sha16: str, path: str, channel: str) -> None:
+@contextmanager
+def _channel_write_lock(config_path: Path):
+    """Serialize channel selection and retirement across CLI processes."""
+    from hermes_cli.config import _CONFIG_LOCK
+
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    with _CONFIG_LOCK, config_path.with_suffix(".channels.lock").open("a+b") as lock:
+        if os.name == "nt":
+            import msvcrt
+            lock.write(b"\0")
+            lock.flush()
+            lock.seek(0)
+            msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                lock.seek(0)
+                msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+def adopt_retired_channel(request: dict) -> bool:
+    """After verified completion, adopt only an unchanged persistent subscription."""
+    retirement = request.get("channel_retirement")
+    if retirement is None:
+        return False
+    return _write_channel_record(
+        install_id(Path(request["source"])), request["source"],
+        validate_name(retirement["destination"]),
+        expected=retirement["original"], config_path=Path(request["home"]) / "config.yaml")
+
+
+def _write_channel_record(sha16: str, path: str, channel: str, *,
+                          expected: dict | None = None, config_path: Path | None = None) -> bool:
+    from hermes_cli.config import get_config_path
+
+    config_path = config_path if config_path is not None else get_config_path()
+    with _channel_write_lock(config_path):
+        return _write_channel_record_locked(sha16, path, channel, expected, config_path)
+
+
+def _write_channel_record_locked(sha16: str, path: str, channel: str,
+                                 expected: dict | None, config_path: Path) -> bool:
     """Write ``update.installs.<sha16>`` into config.yaml, preserving the rest.
 
     Persists through the shared comment-preserving atomic writer
@@ -225,12 +266,7 @@ def _write_channel_record(sha16: str, path: str, channel: str) -> None:
     """
     from utils import atomic_roundtrip_yaml_update
 
-    from hermes_cli.config import (
-        get_config_path,
-        require_readable_config_before_write,
-    )
-
-    config_path = get_config_path()
+    from hermes_cli.config import require_readable_config_before_write
     existing = require_readable_config_before_write(config_path)
     update_cfg = existing.get("update")
     if update_cfg is not None and not isinstance(update_cfg, dict):
@@ -239,10 +275,13 @@ def _write_channel_record(sha16: str, path: str, channel: str) -> None:
     if installs is not None and not isinstance(installs, dict):
         raise ValueError("config key 'update.installs' is not a mapping")
     record = installs.get(sha16) if isinstance(installs, dict) else None
+    if expected is not None and (record or {}) != expected:
+        return False
     new_record = dict(record) if isinstance(record, dict) else {}
     new_record["path"] = path  # DATA, for humans + doctor GC
     new_record["channel"] = channel
     atomic_roundtrip_yaml_update(config_path, f"update.installs.{sha16}", new_record)
+    return True
 
 
 def stale_channel_records(config: Optional[dict]) -> list[tuple[str, dict, str]]:

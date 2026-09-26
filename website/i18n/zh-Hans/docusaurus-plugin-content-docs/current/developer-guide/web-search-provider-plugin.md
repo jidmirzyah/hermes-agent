@@ -141,7 +141,7 @@ requires_env:
 |---|---|
 | `kind: backend` | 将插件路由至后端加载路径 |
 | `provides_web_providers` | 该插件注册的提供商 `name` 列表——在 `register()` 运行之前，加载器即可通过此字段在 `hermes tools` 中公示插件 |
-| `requires_env` | 在 `hermes plugins install` 期间进行交互式凭据提示（富格式说明参见[构建 Hermes 插件](/developer-guide/plugins#根据环境变量决定是否启用)） |
+| `requires_env` | 在 `hermes plugins install` 期间进行交互式凭据提示（富格式说明参见[构建 Hermes 插件](./plugins/index.md#根据环境变量决定是否启用)） |
 
 ## ABC 参考
 
@@ -237,7 +237,7 @@ web:
 `pm.ensure_import("extra-name")`。`is_available()` 必须保持只读，可使用 `pm.available`，
 不能通过它安装依赖。`pm.InstallError` 可以表示依赖不可用或新环境需要重启。
 第三方目录插件在自己的 `pyproject.toml` 或 `plugin.yaml` 中声明依赖，由 PM 统一准备。
-详见[插件依赖指南](/developer-guide/plugins#lazy-install-optional-python-dependencies)。
+详见[插件依赖指南](./plugins/index.md#lazy-install-optional-python-dependencies)。
 
 ## 参考实现
 
@@ -255,7 +255,7 @@ web:
 my-backend-web = "my_backend_web_package"
 ```
 
-`my_backend_web_package` 必须暴露顶层 `register` 函数。完整配置说明参见通用插件指南中的[通过 pip 分发](/developer-guide/plugins#通过-pip-分发)。
+`my_backend_web_package` 必须暴露顶层 `register` 函数。完整配置说明参见通用插件指南中的[通过 pip 分发](./plugins/index.md#通过-pip-分发)。
 
 ## 相关页面
 

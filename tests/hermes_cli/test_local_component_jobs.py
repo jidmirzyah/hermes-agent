@@ -16,15 +16,20 @@ from tests.pm._range_server import RangeHandler, dl_server, url  # noqa: F401
 from tests.pm.test_install_download_control import archive
 
 
+class ArchiveEngine(LlamaCppCpu):
+    probe_version = False
+
+
 @pytest.mark.parametrize("endpoint", ["runtime/install", "quickstart"])
 def test_component_job_pause_retains_pin_and_stops_sequence(client, monkeypatch, tmp_path, dl_server, endpoint):
     from hermes_cli.web_routers import local_models as lm
 
-    class ArchiveEngine(LlamaCppCpu):
-        probe_version = False
-
     package = ArchiveEngine()
     monkeypatch.setitem(registry._packages, package.name, package)
+    # The router hands `ensure` to PM's client; a fixture package definition only exists in this
+    # process, so take the resident-runtime path and run the same engine in-process. The pause
+    # contract under test lives in pm.install/pm.downloader either way.
+    monkeypatch.setattr("pm.client.is_runtime", lambda: True)
     root = tmp_path / "store"
     lock_path = tmp_path / "lock.json"
     monkeypatch.setattr(paths, "store_root", lambda: root)
@@ -99,3 +104,4 @@ def test_component_job_pause_retains_pin_and_stops_sequence(client, monkeypatch,
     if endpoint == "quickstart":
         assert calls == ["server", "default"] and model.read_bytes() == RangeHandler.payloads["/model"]
     assert job_id not in lm._RUNNING
+

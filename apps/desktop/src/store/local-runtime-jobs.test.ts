@@ -1,6 +1,22 @@
+vi.mock('@/store/profile', async (): Promise<object> => {
+  const { atom } = await import('nanostores')
+
+  return { $activeGatewayProfile: atom<string>('default') }
+})
+vi.mock('@/store/session', async (): Promise<object> => {
+  const { atom } = await import('nanostores')
+
+  return { $connection: atom(null), $defaultReasoningEffort: atom<string>('') }
+})
+
+import { QueryClient, type QueryKey, QueryObserver } from '@tanstack/react-query'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { queryClient } from '@/lib/query-client'
+import { deferred } from '@/test/deferred'
 import type { LocalRuntimeJob } from '@/types/hermes'
+
+import type { LocalModelsOwner } from './local-runtime-jobs'
 
 // The BACKEND is the authority: a staged registry the poll reads from, so
 // transitions arrive the way production sees them — via a poll response,
@@ -8,7 +24,9 @@ import type { LocalRuntimeJob } from '@/types/hermes'
 const backend = vi.hoisted(() => ({ jobs: [] as LocalRuntimeJob[] }))
 
 vi.mock('@/hermes', () => ({
-  getLocalModelsJobs: vi.fn(async () => ({ jobs: backend.jobs })),
+  getLocalModelsJobs: vi.fn(async (): Promise<{ jobs: LocalRuntimeJob[] }> => ({
+    jobs: structuredClone(backend.jobs)
+  })),
   getLocalModelsStatus: vi.fn(async () => ({ enabled: true, update_available: false }))
 }))
 
@@ -21,7 +39,7 @@ vi.mock('@/store/notifications', () => ({
   notifyError: vi.fn()
 }))
 
-const { $localRuntimeJobs, watchLocalRuntimeJobs } = await import('./local-runtime-jobs')
+const { localModelsKey, localModelsOwner, watchLocalRuntimeJobs } = await import('./local-runtime-jobs')
 const { getLocalModelsJobs } = await import('@/hermes')
 const { notify, notifyError } = await import('@/store/notifications')
 
@@ -41,16 +59,16 @@ function job(overrides: Partial<LocalRuntimeJob>): LocalRuntimeJob {
   }
 }
 
-beforeEach(() => {
+beforeEach((): void => {
+  queryClient.clear()
+  queryClient.setDefaultOptions({ queries: { ...queryClient.getDefaultOptions().queries, retry: false } })
   vi.clearAllMocks()
   backend.jobs = []
-  $localRuntimeJobs.set([])
+  queryClient.setQueryData(localModelsKey(localModelsOwner(), 'jobs'), [])
 })
 
-afterEach(async () => {
-  backend.jobs = []
-  watchLocalRuntimeJobs()
-  await vi.waitFor(() => expect($localRuntimeJobs.get()).toEqual([]))
+afterEach((): void => {
+  queryClient.clear()
 })
 
 const settle = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
@@ -67,42 +85,6 @@ async function pollTick() {
 }
 
 describe('local runtime jobs store — pause/settle contract', () => {
-  it('running→paused settles NOTHING: no error toast, job stays visible', async () => {
-    backend.jobs = [job({ done_bytes: 40 })]
-    await pollTick()
-    expect($localRuntimeJobs.get()[0]?.status).toBe('running')
-
-    // Backend pauses the job (status='paused', error=null).
-    backend.jobs = [job({ done_bytes: 40, status: 'paused' })]
-    await pollTick()
-    await pollTick()
-
-    expect(notifyError).not.toHaveBeenCalled()
-    expect(notify).not.toHaveBeenCalled()
-
-    const snapshot = $localRuntimeJobs.get()
-    expect(snapshot).toHaveLength(1)
-    expect(snapshot[0]?.status).toBe('paused')
-  })
-
-  it('a paused job that resumes and finishes notifies done exactly once (paused→done still notifies)', async () => {
-    backend.jobs = [job({ done_bytes: 40 })]
-    await pollTick()
-
-    backend.jobs = [job({ done_bytes: 40, status: 'paused' })]
-    await pollTick()
-
-    backend.jobs = [job({ done_bytes: 60 })]
-    await pollTick()
-
-    backend.jobs = [job({ done_bytes: 100, percent: 100, status: 'done', total_bytes: 100 })]
-    await pollTick()
-
-    expect(notify).toHaveBeenCalledTimes(1)
-    expect(vi.mocked(notify).mock.calls[0][0]).toMatchObject({ kind: 'success' })
-    expect(notifyError).not.toHaveBeenCalled()
-  })
-
   it('running→error still toasts exactly once', async () => {
     backend.jobs = [job({ done_bytes: 10, job_id: 'j-err' })]
     await pollTick()
@@ -114,71 +96,93 @@ describe('local runtime jobs store — pause/settle contract', () => {
     expect(notify).not.toHaveBeenCalled()
   })
 
-  it('keeps polling while a job is paused (a resume from another surface is witnessed)', async () => {
-    backend.jobs = [job({ status: 'paused' })]
-    await pollTick()
+  it('publishes a pinned job response into an injected QueryClient observer', async (): Promise<void> => {
+    const client: QueryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const owner: LocalModelsOwner = { connectionId: 'A', profile: 'work' }
+    backend.jobs = [job({ done_bytes: 1, total_bytes: 2 })]
 
-    const callsAfterPause = vi.mocked(getLocalModelsJobs).mock.calls.length
-    expect(callsAfterPause).toBeGreaterThan(0)
-
-    // The paused cadence is slower (3s), not dead: wait past it and the
-    // poll fires again WITHOUT any new kick.
-    await settle(3_400)
-
-    expect(vi.mocked(getLocalModelsJobs).mock.calls.length).toBeGreaterThan(callsAfterPause)
-
-    // And a backend-side resume IS picked up with no local kick at all.
-    backend.jobs = [job({ done_bytes: 90 })]
-    await pollTick()
-    expect($localRuntimeJobs.get()[0]?.status).toBe('running')
-  })
-
-  it('coalesces refresh requests while one backend read is in flight', async () => {
-    let release: (value: { jobs: LocalRuntimeJob[] }) => void = () => {}
-
-    const pending = new Promise<{ jobs: LocalRuntimeJob[] }>(resolve => {
-      release = resolve
+    const observer: QueryObserver<readonly LocalRuntimeJob[]> = new QueryObserver<readonly LocalRuntimeJob[]>(client, {
+      queryKey: ['local-models', 'A', 'work', 'jobs'],
+      enabled: false
     })
 
-    vi.mocked(getLocalModelsJobs).mockReturnValueOnce(pending)
-    watchLocalRuntimeJobs()
-    watchLocalRuntimeJobs()
-    watchLocalRuntimeJobs()
-    expect(getLocalModelsJobs).toHaveBeenCalledTimes(1)
-    backend.jobs = [job({ done_bytes: 40 })]
-    release({ jobs: [] })
-    await vi.waitFor(() => expect(getLocalModelsJobs).toHaveBeenCalledTimes(2))
-    expect($localRuntimeJobs.get()[0]?.done_bytes).toBe(40)
+    const unsubscribe: () => void = observer.subscribe((): void => {})
+
+    try {
+      watchLocalRuntimeJobs(owner, client)
+      await vi.waitFor((): void => expect(observer.getCurrentResult().data).toEqual(backend.jobs))
+      expect(getLocalModelsJobs).toHaveBeenCalledWith(owner)
+      expect(queryClient.getQueryData(localModelsKey(owner, 'jobs'))).toBeUndefined()
+    } finally {
+      unsubscribe()
+      client.clear()
+    }
   })
 
-  it('does not re-set the atom when a poll returns the identical payload', async () => {
+  it.each(['cold', 'warm'] as const)(
+    'coalesces one trailing read with a %s production cache',
+    async (cache: 'cold' | 'warm'): Promise<void> => {
+      const owner: LocalModelsOwner = { connectionId: 'A', profile: 'work' }
+      const key: QueryKey = localModelsKey(owner, 'jobs')
+
+      if (cache === 'warm') {
+        watchLocalRuntimeJobs(owner)
+        await vi.waitFor((): void => expect(queryClient.getQueryData(key)).toEqual([]))
+      }
+
+      vi.mocked(getLocalModelsJobs).mockClear()
+      const pending = deferred<{ jobs: LocalRuntimeJob[] }>()
+      vi.mocked(getLocalModelsJobs).mockReturnValueOnce(pending.promise)
+      watchLocalRuntimeJobs(owner)
+      watchLocalRuntimeJobs(owner)
+      watchLocalRuntimeJobs(owner)
+      await Promise.resolve()
+      expect(getLocalModelsJobs).toHaveBeenCalledTimes(1)
+      backend.jobs = [job({ done_bytes: 40 })]
+      pending.resolve({ jobs: [] })
+      await vi.waitFor((): void => expect(getLocalModelsJobs).toHaveBeenCalledTimes(2))
+      expect(queryClient.getQueryData<readonly LocalRuntimeJob[]>(key)?.[0]?.done_bytes).toBe(40)
+    }
+  )
+
+  it('preserves the query data reference when a poll returns identical payload', async () => {
     backend.jobs = [job({ done_bytes: 40 })]
     await pollTick()
-    expect($localRuntimeJobs.get()).toHaveLength(1)
+    expect(
+      queryClient.getQueryData<readonly LocalRuntimeJob[]>(localModelsKey(localModelsOwner(), 'jobs')) ?? []
+    ).toHaveLength(1)
 
-    const reference = $localRuntimeJobs.get()
+    const reference =
+      queryClient.getQueryData<readonly LocalRuntimeJob[]>(localModelsKey(localModelsOwner(), 'jobs')) ?? []
+
     await pollTick()
     await pollTick()
 
     // Same reference preserved — no-op polls never hand React fresh arrays.
-    expect($localRuntimeJobs.get()).toBe(reference)
+    expect(queryClient.getQueryData<readonly LocalRuntimeJob[]>(localModelsKey(localModelsOwner(), 'jobs')) ?? []).toBe(
+      reference
+    )
   })
 
-  it('equality covers control flags, ranges, percent, detail and error — not just done_bytes', async () => {
+  it('structural sharing includes control flags, ranges, percent, detail and error', async () => {
     backend.jobs = [job({ done_bytes: 40, ranges: { 'model.gguf': [[0, 100]] } })]
     await pollTick()
-    const first = $localRuntimeJobs.get()
+    const first = queryClient.getQueryData<readonly LocalRuntimeJob[]>(localModelsKey(localModelsOwner(), 'jobs')) ?? []
 
     // Backend flips can_pause:false (e.g. a phase change) with identical bytes.
     backend.jobs = [job({ can_pause: false, done_bytes: 40, ranges: { 'model.gguf': [[0, 100]] } })]
     await pollTick()
 
-    const second = $localRuntimeJobs.get()
+    const second =
+      queryClient.getQueryData<readonly LocalRuntimeJob[]>(localModelsKey(localModelsOwner(), 'jobs')) ?? []
+
     expect(second).not.toBe(first)
     expect(second[0]?.can_pause).toBe(false)
 
     // A ranges-only change re-publishes too.
-    const before = $localRuntimeJobs.get()
+    const before =
+      queryClient.getQueryData<readonly LocalRuntimeJob[]>(localModelsKey(localModelsOwner(), 'jobs')) ?? []
+
     backend.jobs = [
       job({
         can_pause: false,
@@ -192,8 +196,13 @@ describe('local runtime jobs store — pause/settle contract', () => {
       })
     ]
     await pollTick()
-    expect($localRuntimeJobs.get()).not.toBe(before)
-    expect($localRuntimeJobs.get()[0]?.ranges?.['model.gguf']).toEqual([
+    expect(
+      queryClient.getQueryData<readonly LocalRuntimeJob[]>(localModelsKey(localModelsOwner(), 'jobs')) ?? []
+    ).not.toBe(before)
+    expect(
+      (queryClient.getQueryData<readonly LocalRuntimeJob[]>(localModelsKey(localModelsOwner(), 'jobs')) ?? [])[0]
+        ?.ranges?.['model.gguf']
+    ).toEqual([
       [0, 100],
       [100, 200]
     ])

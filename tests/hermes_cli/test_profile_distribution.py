@@ -214,7 +214,7 @@ class TestLooksLikeGitUrl:
     def test_accepts_git_sources(self, src):
         assert _looks_like_git_url(src)
 
-    @pytest.mark.windows_only
+    @pytest.mark.platforms("windows")
     def test_git_source_removes_read_only_git_metadata(self, tmp_path, monkeypatch):
         origin = tmp_path / "origin"
         subprocess.run(["git", "init", "--quiet", str(origin)], check=True)

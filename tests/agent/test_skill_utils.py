@@ -246,21 +246,20 @@ def test_skill_support_path_uses_explicit_discovery_root_not_cwd(tmp_path, monke
 
 
 class TestSkillMatchesPlatform:
+    @pytest.mark.platforms("any")
     def test_no_platforms_field_matches_everywhere(self):
         # Backward-compat default — skills without a platforms tag load
         # on any OS.
-        with patch("agent.skill_utils.sys.platform", "linux"):
-            assert skill_matches_platform({}) is True
-            assert skill_matches_platform({"name": "foo"}) is True
+        assert skill_matches_platform({}) is True
+        assert skill_matches_platform({"name": "foo"}) is True
 
+    @pytest.mark.platforms("any")
     def test_linux_skill_matches_only_linux(self):
         fm = {"platforms": ["linux"]}
-        with patch("agent.skill_utils.sys.platform", "linux"):
-            assert skill_matches_platform(fm) is True
-            assert skill_matches_platform_list(fm["platforms"]) is True
-        with patch("agent.skill_utils.sys.platform", "darwin"):
-            assert skill_matches_platform(fm) is False
-            assert skill_matches_platform_list(fm["platforms"]) is False
+        import sys
+
+        assert skill_matches_platform(fm) is sys.platform.startswith("linux")
+        assert skill_matches_platform_list(fm["platforms"]) is sys.platform.startswith("linux")
 
 
     def test_relative_path_unchanged(self, tmp_path, monkeypatch):

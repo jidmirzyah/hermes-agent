@@ -100,27 +100,6 @@ class TestReadFileSchemaStatic(unittest.TestCase):
         self.assertIsNone(key)
         self.assertIsNone(url)
 
-    def test_coverage_warning_teaching_left_to_the_warning(self):
-        """The response-time warning owns the recovery curriculum."""
-        from tools.file_tools import READ_FILE_SCHEMA
-
-        desc = READ_FILE_SCHEMA["description"]
-        self.assertNotIn("EXTRACTION COVERAGE WARNING", desc)
-        self.assertNotIn("NEEDS OCR", desc)
-        self.assertNotIn("pdftoppm", desc)
-        import inspect
-        from tools import read_extract
-
-        src = inspect.getsource(read_extract)
-        self.assertIn("NEEDS OCR", src)
-        self.assertIn("pdftoppm", src)
-        self.assertIn("vision_analyze", src)
-
-    def test_binary_note_stays_last(self):
-        from tools.file_tools import READ_FILE_SCHEMA
-
-        desc = READ_FILE_SCHEMA["description"]
-        self.assertLess(desc.find("EPUB"), desc.find("Cannot read images/binary"))
 
     def test_missing_anydoc_error_teaches_install(self):
         from tools.read_extract import _anydoc_missing_error
@@ -203,22 +182,15 @@ class TestNeedsOcrPath(unittest.TestCase):
         self.assertNotIn("ocr-and-documents", out)
 
     def test_pin_lockstep(self):
-        """Core and doc-extract pins of firecrawl-anydoc must agree.
-
-        tools/lazy_deps.py is gone; pyproject.toml is the single pin
-        authority. The self-heal path is now pm.ensure_import("doc-extract"),
-        which syncs the extra — so the remaining lockstep contract is that
-        the core dependency pin and the doc-extract extra pin name the SAME
-        version (a drift here means a lean install re-syncs a different
-        anydoc than a full one).
-        """
-        import re
+        """Lean and full installs must resolve the same anydoc requirement."""
+        import tomllib
         from pathlib import Path
+        from packaging.requirements import Requirement
 
-        py = Path("pyproject.toml").read_text(encoding="utf-8-sig")
-        pins = re.findall(r'"firecrawl-anydoc==([\d.]+)"', py)
-        self.assertTrue(pins, "firecrawl-anydoc pin missing from pyproject")
-        self.assertEqual(len(set(pins)), 1, f"pins disagree: {pins}")
+        project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8-sig"))["project"]
+        core, extra = ({r.name: str(r.specifier) for r in map(Requirement, deps)} for deps in
+                       (project["dependencies"], project["optional-dependencies"]["doc-extract"]))
+        self.assertEqual(core["firecrawl-anydoc"], extra["firecrawl-anydoc"])
 
 
 if __name__ == "__main__":

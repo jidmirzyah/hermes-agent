@@ -3,10 +3,11 @@ live in pm/lock.json (written by `pm lock`), never here."""
 
 from __future__ import annotations
 
+import logging
 import os
-import platform
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -19,7 +20,7 @@ from pm.package import (
     _probe_reason,
 )
 from pm.registry import register
-from pm.store import ALL_TARGETS, Store, flatten_single_dir, merge_tree
+from pm.store import ALL_TARGETS, Store, current_target, flatten_single_dir, merge_tree
 from pm.update import (
     btbn_index,
     btbn_versions,
@@ -32,6 +33,8 @@ from pm.update import (
     npm_dist_tags,
     pbs_versions,
 )
+
+LOG = logging.getLogger(__name__)
 
 _RUST_TRIPLE = {
     "win32-x64": "x86_64-pc-windows-msvc",
@@ -80,16 +83,15 @@ class BinaryPackage(Package):
         return entry / rel if rel else None
 
     def verify(self, entry: Path, target: str) -> str:
-        """Return '' when the entry is usable on target, else why not:
-        a missing binary, a wrong-arch binary, or a --version probe that
-        fails to exec, times out, or exits nonzero."""
+        """Check file/architecture evidence for every target, plus a smoke
+        probe only on the native target. Never execute cross-staged bytes."""
         binary = self.binary(entry, target)
         if binary is None:
             return "no binary_rel for this target"
         reason = self._binary_reason(binary, entry, target)
         if reason:
             return reason
-        if not self.probe_version:
+        if not self.probe_version or target != current_target():
             return ""
         try:
             proc = subprocess.run(
@@ -112,9 +114,38 @@ class BinaryPackage(Package):
         must find the node it extends on PATH."""
         if not self.deps:
             return dict(os.environ)
-        from pm.ensure import env_for
+        from pm.install import env_for
 
         return env_for(*self.deps)
+
+
+@register
+class Dmgbuild(BinaryPackage):
+    """Build-only DMG supplier, independently pinned by PM rather than dmg-builder.
+
+    The lock version is <release>+<bundle revision>. Updates are manual: review
+    the official electron-builder-binaries bundle and re-pin both Darwin targets.
+    Keep the paired Python tree intact for the launcher and diagnostic hook.
+    """
+
+    name = "dmgbuild"
+    internal = True
+    on_path = False
+    flatten = False
+    probe_version = False
+    binary_rel = {"posix": "dmgbuild"}
+    gaps = {target: "DMG creation requires macOS" for target in ALL_TARGETS if not target.startswith("darwin-")}
+
+    def fetch_url(self, version: str, target: str) -> str:
+        release, _, revision = version.partition("+")
+        arch = {"darwin-arm64": "arm64", "darwin-x64": "x86_64"}[target]
+        return (
+            "https://github.com/electron-userland/electron-builder-binaries/releases/download/"
+            f"dmg-builder@{release}/dmgbuild-bundle-{arch}-{revision}.tar.gz"
+        )
+
+    def verify(self, entry: Path, target: str) -> str:
+        return super().verify(entry, target) or self._binary_reason(entry / "python/bin/python3", entry, target)
 
 
 class _BionicDebArm:
@@ -181,54 +212,6 @@ class Uv(_BionicDebArm, BinaryPackage, DebPackage):
         return github_release_tags("astral-sh/uv")
 
 
-_MACOS_MANAGED_PYTHON_IDENTIFIER = "com.nousresearch.hermes.managed-python"
-
-
-def _macos_sign_managed_python(python: Path) -> bool:
-    """Give a downloaded Python a stable macOS code identity."""
-    if platform.system() != "Darwin":
-        return False
-
-    codesign = shutil.which("codesign")
-    if not codesign:
-        return False
-
-    requirement = (
-        "=designated => identifier "
-        f'"{_MACOS_MANAGED_PYTHON_IDENTIFIER}"'
-    )
-    try:
-        signed = subprocess.run(
-            [
-                codesign,
-                "--force",
-                "--deep",
-                "--sign",
-                "-",
-                "--timestamp=none",
-                "--identifier",
-                _MACOS_MANAGED_PYTHON_IDENTIFIER,
-                "--requirements",
-                requirement,
-                str(python),
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        if signed.returncode != 0:
-            return False
-        verified = subprocess.run(
-            [codesign, "--verify", "--deep", "--strict", str(python)],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        return verified.returncode == 0
-    except Exception:
-        return False
-
-
 @register
 class Python(_BionicDebArm, BinaryPackage, DebPackage):
     """The pinned interpreter for launchers and every PM-managed uv command.
@@ -259,8 +242,10 @@ class Python(_BionicDebArm, BinaryPackage, DebPackage):
     def stage(self, store: Store, staged: Path, version: str, target: str) -> None:
         super().stage(store, staged, version, target)
         binary = self.binary(staged, target)
-        if binary is not None:
-            _macos_sign_managed_python(binary)
+        if binary is not None and sys.platform == "darwin":
+            from hermes_cli.macos_signing import sign_managed_python
+
+            sign_managed_python(binary)
         # python-build-standalone ships the x64 VC runtime (vcruntime140_1.dll)
         # beside ARM64 Windows Python; it cannot load on ARM64 and would fail
         # the arch guard. Drop it HERE, before publish: the tree digest is
@@ -326,32 +311,33 @@ def uv_cache_dir() -> Path:
     marker = machine_cache / ".seeded"
     if not marker.is_file():
         # Seed from a shipped bundle cache when present (payload root =
-        # store_root().parent on a sealed install).
+        # store_root().parent on a sealed install). Record completion ONLY after a clean copy: a
+        # partial seed that marked itself done would never be retried, and every later offline
+        # sync that needs the missing entries fails closed.
         try:
             from pm.paths import store_root
 
             payload_cache = store_root().parent / "uv-cache"
             if payload_cache.is_dir():
                 machine_cache.mkdir(parents=True, exist_ok=True)
-                import shutil as _shutil
-
                 for entry in payload_cache.iterdir():
                     if entry.name == ".seeded":
                         continue
                     dest = machine_cache / entry.name
                     if not dest.exists():
                         (
-                            _shutil.copytree(entry, dest)
+                            shutil.copytree(entry, dest)
                             if entry.is_dir()
-                            else _shutil.copy2(entry, dest)
+                            else shutil.copy2(entry, dest)
                         )
-        except OSError:
-            pass  # seeding is best-effort; a cold sync still works
-        try:
-            marker.parent.mkdir(parents=True, exist_ok=True)
-            marker.write_text("1", encoding="utf-8")
-        except OSError:
-            pass
+        except OSError as exc:
+            LOG.warning("uv cache seed incomplete, retrying on the next install: %s", exc)
+        else:
+            try:
+                marker.parent.mkdir(parents=True, exist_ok=True)
+                marker.write_text("1", encoding="utf-8")
+            except OSError:
+                pass
     return machine_cache
 
 
@@ -372,7 +358,7 @@ class Venv(StatePackage):
         return repo_root() if self._project_root is None else self._project_root
 
     def venv_dir(self) -> Path:
-        from hermes_cli.runtime_paths import selected_venv
+        from pm.environments import selected_venv
 
         return selected_venv(self.project_root())
 
@@ -398,10 +384,10 @@ class Venv(StatePackage):
         h.update(members_stamp(enabled_member_dirs() if plugin_dirs is None else plugin_dirs).encode())
         return h.hexdigest()
 
-    def apply(self, extras: list[str], *, plugin_dirs=None, repair: bool = False) -> dict:
+    def apply(self, extras: list[str], *, plugin_dirs=None, repair: bool = False, explicit: bool = False) -> dict:
         """Prepare one complete environment; the caller commits its selection."""
         import uuid
-        from hermes_cli.runtime_paths import install_state_dir, runtime_facts_path
+        from pm.environments import install_state_dir, runtime_facts_path
         from pm.environment import managed_environment
         from pm.lock import Facts
         from pm.workspace import enabled_member_dirs, lock_and_sync
@@ -409,7 +395,7 @@ class Venv(StatePackage):
         project = self.project_root()
         generation = install_state_dir(project) / "environments" / uuid.uuid4().hex
         candidate = generation / "venv"
-        environment = managed_environment(candidate, explicit=repair)
+        environment = managed_environment(candidate, explicit=explicit or repair, output=sys.stderr)
         members = [] if repair else (enabled_member_dirs() if plugin_dirs is None else plugin_dirs)
         try:
             generation.mkdir(parents=True)
@@ -429,7 +415,7 @@ class Venv(StatePackage):
                 replay = recorded.parent
             seed = (Path(prior["resolved_lock"]) if members and prior.get("resolved_lock")
                     else project / "uv.lock")
-            lock_and_sync(members, extras, venv_dir=candidate, root=generation / "workspace",
+            lock_and_sync(members, extras, root=generation / "workspace",
                           seed_lock=seed, frozen=repair or not members, replay=replay,
                           source=project, environment=environment)
             resolved_lock = generation / "workspace" / "uv.lock"
@@ -551,7 +537,7 @@ class Npm(BinaryPackage):
                 )
                 wrapper.chmod(0o755)
             return
-        from pm.ensure import _installed_location, _lockfile
+        from pm.install import _installed_location, _lockfile
         from pm.registry import get_package
 
         node = get_package("node")
@@ -676,10 +662,14 @@ class Ffmpeg(_BionicDebArm, BinaryPackage, DebPackage):
     optional=False: ffmpeg is a required runtime tool. Sealed bundles ship
     it baked into the payload (post_update skips provisioning sealed
     installs — the artifact is atomic); dev installs get it re-ensured by
-    step_provision_runtimes when the pin bumps. Windows: BtbN/FFmpeg-Builds
-    (dated autobuild tag; ships ffprobe too). Linux + macOS:
-    ffmpeg.martin-riedl.de (uniform ZIP, published sha256; single-binary —
-    no ffprobe)."""
+    step_provision_runtimes when the pin bumps. Windows + Linux:
+    BtbN/FFmpeg-Builds (dated autobuild tag; ships ffprobe too).
+    macOS: ffmpeg.martin-riedl.de (uniform ZIP, published sha256;
+    single-binary — no ffprobe).
+
+    Linux deliberately does NOT use martin-riedl: that build is compiled
+    without x11grab (confirmed on the pinned 9.0.1 amd64 binary), and
+    x11grab is how screen capture on X11 works."""
 
     name = "ffmpeg"
     deb_package = "ffmpeg"
@@ -688,14 +678,20 @@ class Ffmpeg(_BionicDebArm, BinaryPackage, DebPackage):
     def main_rel(self, target: str) -> str:
         return "bin/ffmpeg"
 
-    # The posix (martin-riedl) and win32 (BtbN) build streams have no shared
-    # release cadence — they drift in PATCH. The lockfile version label is
-    # major.minor; each target's exact patch lives in its artifact urls.
+    # macOS (martin-riedl, the only remaining posix stream) and Windows/Linux
+    # (BtbN) have no shared release cadence — they drift in PATCH. The lockfile
+    # version label is major.minor; each target's exact patch lives in its
+    # artifact urls.
     version_style = "minor"
-    # martin-riedl (posix) zips are a single `ffmpeg` file at the zip root;
-    # BtbN (win32) zips carry bin/ffmpeg.exe under one top-level dir that
-    # flatten hoists.
-    binary_rel = {"win32": "bin/ffmpeg.exe", "posix": "ffmpeg"}
+    # martin-riedl (macOS) zips are a single `ffmpeg` at the zip root; BtbN
+    # ships bin/ffmpeg (Linux, .tar.xz) and bin/ffmpeg.exe (Windows, .zip)
+    # under one top-level dir that flatten hoists.
+    binary_rel = {
+        "win32": "bin/ffmpeg.exe",
+        "linux-x64": "bin/ffmpeg",
+        "linux-arm64": "bin/ffmpeg",
+        "posix": "ffmpeg",
+    }
     flatten = True
     # BtbN autobuild n9.0.1-11-ge47273f4d9 rejects `--version`
     # ("Unrecognized option '-version'", exit 2880417800); `-version` works
@@ -706,7 +702,7 @@ class Ffmpeg(_BionicDebArm, BinaryPackage, DebPackage):
         if target == "linux-arm64-bionic":
             return f"https://packages.termux.dev/apt/termux-main/pool/main/f/ffmpeg/ffmpeg_{version}_aarch64.deb"
         osname, arch = target.split("-")
-        if osname == "win32":
+        if osname in ("win32", "linux"):
             artifact = btbn_index().get(target, {}).get(version)
             if artifact is not None:
                 tag, asset = artifact
@@ -714,16 +710,15 @@ class Ffmpeg(_BionicDebArm, BinaryPackage, DebPackage):
         else:
             epoch = martin_riedl_index().get(target, {}).get(version)
             if epoch is not None:
-                osdir = "macos" if osname == "darwin" else "linux"
                 source_arch = "amd64" if arch == "x64" else arch
-                return f"https://ffmpeg.martin-riedl.de/download/{osdir}/{source_arch}/{epoch}_{version}/ffmpeg.zip"
+                return f"https://ffmpeg.martin-riedl.de/download/macos/{source_arch}/{epoch}_{version}/ffmpeg.zip"
         # Existing installs read exact URLs from the lockfile. Re-pinning
         # must never silently substitute a different version or target.
         raise InstallError(self.name, f"no advertised {version} artifact for {target}",
                            "retry when the upstream index is available, or keep the existing pin")
 
     def latest_versions(self, target: str, locked=None) -> list[str]:
-        if target.startswith("win32"):
+        if target in ("win32-x64", "win32-arm64", "linux-x64", "linux-arm64"):
             return btbn_versions(target)
         return martin_riedl_versions(target)
 
@@ -756,7 +751,12 @@ class Ripgrep(BinaryPackage):
 class CuaDriver(BinaryPackage):
     name = "cua-driver"
     optional = True
-    binary_rel = {"win32": "cua-driver.exe", "posix": "cua-driver"}
+    binary_rel = {
+        "darwin-arm64": "CuaDriver.app/Contents/MacOS/cua-driver",
+        "darwin-x64": "CuaDriver.app/Contents/MacOS/cua-driver",
+        "win32": "cua-driver.exe",
+        "posix": "cua-driver",
+    }
 
     def fetch_url(self, version: str, target: str) -> str:
         arch = {
@@ -768,9 +768,13 @@ class CuaDriver(BinaryPackage):
             "win32-arm64": "windows-arm64",
         }[target]
         ext = "zip" if target.startswith("win32") else "tar.gz"
+        # Only the directory archive contains the signed macOS app identity
+        # needed by TCC and private sessions. Other targets' binary archives
+        # already carry their runtime helpers (including Windows UIAccess).
+        variant = "" if target.startswith("darwin") else "-binary"
         return (
             f"https://github.com/trycua/cua/releases/download/cua-driver-rs-v{version}/"
-            f"cua-driver-rs-{version}-{arch}-binary.{ext}"
+            f"cua-driver-rs-{version}-{arch}{variant}.{ext}"
         )
 
     def latest_versions(self, target: str, locked=None) -> list[str]:
@@ -990,29 +994,14 @@ class LlamaCpp(BinaryPackage):
 
 
 def _github_release_digests(repo: str, tag: str) -> dict[str, str]:
-    import json
-    import os
-    import urllib.request
+    from pm.update import _get_json
 
     cached = _release_digest_cache.get((repo, tag))
     if cached is not None:
         return cached
     url = f"https://api.github.com/repos/{repo}/releases/tags/{tag}"
-    headers = {"User-Agent": "hermes-pm"}
-    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    from pm.network import retry_network
-
-    def request():
-        with urllib.request.urlopen(
-            urllib.request.Request(url, headers=headers),
-            timeout=120,
-        ) as resp:
-            return json.load(resp)
-
     try:
-        release = retry_network(request)
+        release = _get_json(url)
     except Exception:
         return {}
     digests = {}

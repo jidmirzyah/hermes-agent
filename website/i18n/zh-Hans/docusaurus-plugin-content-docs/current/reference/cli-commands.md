@@ -6,7 +6,7 @@ description: "Hermes 终端命令及命令族的权威参考"
 
 # CLI 命令参考
 
-本页的 Python 依赖命令使用 [PM 准备的源码环境](/reference/package-management#developer-workflow)。
+本页的 Python 依赖命令使用 [PM 准备的源码环境](./package-management.md#developer-workflow)。
 依赖变更后，请重新激活该 checkout 并重启 Hermes。
 
 本页介绍从 shell 运行的**终端命令**。
@@ -230,7 +230,7 @@ hermes gateway <subcommand>
 | `--no-supervise` | 在 `run` 时：在 s6-overlay Docker 镜像内部，跳过 s6 自动监管，退回到 pre-s6 前台语义——gateway 作为容器主进程运行，无自动重启。在 s6 镜像之外为空操作。等同于设置 `HERMES_GATEWAY_NO_SUPERVISE=1`。 |
 
 :::tip WSL 用户
-使用 `hermes gateway run` 而非 `hermes gateway start`——WSL 的 systemd 支持不稳定。用 tmux 包裹以保持持久运行：`tmux new -s hermes 'hermes gateway run'`。详见 [WSL FAQ](/reference/faq#wsl网关持续断开连接或-hermes-gateway-start-失败)。
+使用 `hermes gateway run` 而非 `hermes gateway start`——WSL 的 systemd 支持不稳定。用 tmux 包裹以保持持久运行：`tmux new -s hermes 'hermes gateway run'`。详见 [WSL FAQ](./faq.md#wsl网关持续断开连接或-hermes-gateway-start-失败)。
 :::
 
 ## `hermes lsp`
@@ -1148,7 +1148,7 @@ hermes claw migrate --source /home/user/old-openclaw
 hermes dashboard [options]
 ```
 
-启动 Web 控制台，用于管理配置、API 密钥和会话。FastAPI、Uvicorn 和平台 PTY 辅助库是核心依赖。`web` extra 提供 HTTP 栈的精确约束，标准 PM 安装通过 `all` 选择它。如依赖损坏，请运行 `hermes pm repair`。内嵌 Chat 标签页需要 POSIX PTY 环境，例如 Linux、macOS 或 WSL2。请参阅 [Web 控制台](/user-guide/features/web-dashboard)。
+启动 Web 控制台，用于管理配置、API 密钥和会话。FastAPI、Uvicorn 和平台 PTY 辅助库是核心依赖。`web` extra 提供 HTTP 栈的精确约束，标准 PM 安装通过 `all` 选择它。如依赖损坏，请运行 `hermes pm repair`。内嵌 Chat 标签页需要 POSIX PTY 环境，例如 Linux、macOS 或 WSL2。请参阅 [Web 控制台](../user-guide/features/web-dashboard.md)。
 
 | 选项 | 默认值 | 说明 |
 |--------|---------|-------------|
@@ -1230,7 +1230,7 @@ hermes completion fish > ~/.config/fish/completions/hermes.fish
 PM 管理工具和 Python 依赖，不负责替换应用发布包。
 源码开发先运行一次 setup 脚本，然后用 Bash `source ./activate` 或 PowerShell `. .\activate.ps1` 激活已有环境。
 使用 `deactivate` 恢复激活前的环境。
-详见[PM 开发工作流](/reference/package-management#developer-workflow)，包括依赖更新和测试环境。
+详见[PM 开发工作流](./package-management.md#developer-workflow)，包括依赖更新和测试环境。
 
 ## `hermes update`
 

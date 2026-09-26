@@ -56,7 +56,10 @@ function appendUniquePathEntries(entries, { delimiter = path.delimiter } = {}) {
   return ordered.join(delimiter)
 }
 
-function normalizeHermesHomeRoot(hermesHome, { pathModule = pathModuleForPlatform(process.platform) }: any = {}) {
+function normalizeHermesHomeRoot(
+  hermesHome,
+  { pathModule = pathModuleForPlatform(process.platform), homedir = os.homedir() }: any = {}
+) {
   if (!hermesHome) {
     return hermesHome
   }

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { appendFile } from 'node:fs/promises'
-import { validateBundleInputs } from './bundle-inputs.mjs'
+import { validateBundleInputs } from './bundle-manifest.cjs'
 import { bundledMatrix } from '../../../scripts/sandbox/generate-e2e-matrix.mjs'
 
 const route = process.env.BUNDLE_ROUTE || 'all'

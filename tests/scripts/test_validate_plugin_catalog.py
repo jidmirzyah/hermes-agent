@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 
 import hermes_yaml as yaml
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "scripts" / "validate_plugin_catalog.py"
@@ -54,8 +55,10 @@ def run_validator(*args: str) -> subprocess.CompletedProcess:
 # ── valid input ────────────────────────────────────────────────────────
 
 
-def test_valid_entry_passes(tmp_path):
-    path = write_entry(tmp_path, VALID_ENTRY)
+@pytest.mark.parametrize("bom", [b"", b"\xef\xbb\xbf"])
+def test_valid_entry_passes(tmp_path, bom):
+    path = write_entry(tmp_path, {**VALID_ENTRY, "description": "café 東京"})
+    path.write_bytes(bom + path.read_bytes())
     result = run_validator(str(path))
     assert result.returncode == 0, result.stdout + result.stderr
 

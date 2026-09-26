@@ -1,113 +1,76 @@
+"""The emitted stamp must preserve build identity and reach the runtime reader."""
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
 import pytest
 
-from scripts.write_install_stamp import build_stamp
 
-
-def test_build_stamp_keeps_provenance_separate_from_distribution():
-    stamp = build_stamp(commit="a" * 40, source="ci", distribution="docker", update_mechanism="external")
-
-    assert stamp["source"] == "ci"
-    assert stamp["distribution"] == "docker"
-
-
-def test_default_build_is_a_bootstrap_artifact_regardless_of_tag(monkeypatch):
-    monkeypatch.delenv("HERMES_DESKTOP_VARIANT", raising=False)
-    monkeypatch.setenv("HERMES_PAYLOAD_TAG", "v9.9.9")
-
-    stamp = build_stamp(commit="a" * 40, update_mechanism="self")
-
-    assert stamp["payload"] == "bootstrap"
-    assert stamp["tag"] is None
-
-
-def test_explicit_bootstrap_variant_matches_the_default(monkeypatch):
-    monkeypatch.setenv("HERMES_DESKTOP_VARIANT", "bootstrap")
-    monkeypatch.setenv("HERMES_PAYLOAD_TAG", "v9.9.9")
-
-    stamp = build_stamp(commit="a" * 40, update_mechanism="self")
-
-    assert stamp["payload"] == "bootstrap"
-    assert stamp["tag"] is None
-
-
-def test_bundled_variant_records_payload_and_tag(monkeypatch):
-    monkeypatch.setenv("HERMES_DESKTOP_VARIANT", "bundled")
-    monkeypatch.setenv("HERMES_PAYLOAD_TAG", "v0.18.0")
-
-    stamp = build_stamp(commit="b" * 40, update_mechanism="self")
-
-    assert stamp["payload"] == "bundled"
-    assert stamp["tag"] == "v0.18.0"
-
-
-def test_light_variant_records_payload_and_tag(monkeypatch):
-    monkeypatch.setenv("HERMES_DESKTOP_VARIANT", "light")
-    monkeypatch.setenv("HERMES_PAYLOAD_TAG", "v0.18.0")
-
-    stamp = build_stamp(commit="b" * 40, update_mechanism="self")
-
-    assert stamp["payload"] == "light"
-    assert stamp["tag"] == "v0.18.0"
-
-
-@pytest.mark.parametrize("variant", ["bundled", "light"])
-def test_self_updating_variants_without_tag_stop_the_build(monkeypatch, variant):
-    monkeypatch.setenv("HERMES_DESKTOP_VARIANT", variant)
-    monkeypatch.delenv("HERMES_PAYLOAD_TAG", raising=False)
-
-    with pytest.raises(SystemExit, match="HERMES_PAYLOAD_TAG"):
-        build_stamp(commit="b" * 40, update_mechanism="self")
-
-
-def test_unknown_variant_stops_the_build(monkeypatch):
-    monkeypatch.setenv("HERMES_DESKTOP_VARIANT", "chonky")
-    monkeypatch.setenv("HERMES_PAYLOAD_TAG", "v0.18.0")
-
-    with pytest.raises(SystemExit, match="unknown HERMES_DESKTOP_VARIANT"):
-        build_stamp(commit="b" * 40, update_mechanism="self")
-
-
-def test_desktop_app_is_a_valid_distribution():
-    stamp = build_stamp(commit="c" * 40, source="ci", distribution="desktop-app", update_mechanism="electron-updater")
-
-    assert stamp["distribution"] == "desktop-app"
-
-
-def test_distribution_defaults_to_null():
-    stamp = build_stamp(commit="c" * 40, update_mechanism="self")
-
-    assert stamp["distribution"] is None
-
-
-@pytest.mark.parametrize("mechanism", ["electron-updater", "app-installer", "external"])
-def test_cli_stamp_is_accepted_by_runtime_readers(tmp_path, monkeypatch, mechanism):
-    import json
-    import subprocess
-    import sys
-    from pathlib import Path
-
-    out = tmp_path / "stamp.json"
-    repo_root = Path(__file__).resolve().parents[2]
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(repo_root / "scripts" / "write_install_stamp.py"),
-            "--output", str(out),
-            "--commit", "d" * 40,
-            "--distribution", "desktop-app",
-            "--update-mechanism", mechanism,
-        ],
-        capture_output=True, text=True,
-    )
-
+@pytest.mark.parametrize("variant,distribution,mechanism,payload,tag", [
+    ("", None, "self", "bootstrap", None),
+    ("bootstrap", "docker", "external", "bootstrap", None),
+    ("bundled", "desktop-app", "electron-updater", "bundled", "v0.18.0"),
+    ("bundled", "desktop-app", "app-installer", "bundled", "v0.18.0"),
+    ("bundled", "desktop-app", "microsoft-store", "bundled", "v0.18.0"),
+    ("bundled", "desktop-app", "external", "bundled", "v0.18.0"),
+    ("light", "desktop-app", "electron-updater", "light", "v0.18.0"),
+])
+def test_cli_stamp_roundtrip(tmp_path, monkeypatch, variant, distribution, mechanism, payload, tag):
+    out = tmp_path / "install-stamp.json"
+    script = Path(__file__).resolve().parents[2] / "scripts/write_install_stamp.py"
+    env = {**os.environ, "HERMES_DESKTOP_VARIANT": variant, "HERMES_PAYLOAD_TAG": "v0.18.0", "HERMES_BUILD_COMMIT": ""}
+    args = [sys.executable, str(script), "--output", str(out), "--commit", "d" * 40,
+            "--source", "ci", "--update-mechanism", mechanism]
+    if distribution:
+        args += ["--distribution", distribution]
+    result = subprocess.run(args, env=env, capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stderr
     data = json.loads(out.read_text(encoding="utf-8-sig"))
-    assert data["distribution"] == "desktop-app"
-    assert data["updateMechanism"] == mechanism
+    assert {key: data[key] for key in ("source", "distribution", "updateMechanism", "payload", "tag", "commit")} == {
+        "source": "ci", "distribution": distribution, "updateMechanism": mechanism,
+        "payload": payload, "tag": tag, "commit": "d" * 40}
     from hermes_cli.version_info import _stamp_version_info
     from hermes_cli.venv_sync import _is_sealed
-
-    out.rename(tmp_path / "install-stamp.json")
     monkeypatch.setenv("HERMES_INSTALL_ROOT", str(tmp_path))
-    assert _stamp_version_info() is not None
-    assert _is_sealed(tmp_path)
+    if payload == "light":
+        with pytest.raises(RuntimeError, match="light"):
+            _stamp_version_info()
+    else:
+        info = _stamp_version_info()
+        assert info is not None and info.commit == "d" * 40
+        assert _is_sealed(tmp_path)
+        (tmp_path / ".git").mkdir()
+        assert not _is_sealed(tmp_path), "a stamped source checkout is not sealed"
+
+
+@pytest.mark.parametrize("arguments", [[], ["--update-mechanism", "carrier-pigeon"]])
+def test_missing_or_invalid_mechanism_cannot_emit_stamp(tmp_path, arguments):
+    from scripts.write_install_stamp import build_stamp
+
+    out = tmp_path / "install-stamp.json"
+    result = subprocess.run(
+        [sys.executable, str(Path(__file__).resolve().parents[2] / "scripts/write_install_stamp.py"),
+         "--output", str(out), "--commit", "a" * 40, *arguments],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode != 0 and "--update-mechanism" in result.stderr
+    assert not out.exists()
+    with pytest.raises(SystemExit, match="invalid --update-mechanism"):
+        build_stamp(commit="a" * 40, update_mechanism=arguments[-1] if arguments else "")
+
+
+@pytest.mark.parametrize("variant,tag,error", [
+    ("bundled", "", "HERMES_PAYLOAD_TAG"), ("light", "", "HERMES_PAYLOAD_TAG"),
+    ("chonky", "v0.18.0", "unknown HERMES_DESKTOP_VARIANT"),
+])
+def test_invalid_variant_cannot_emit_stamp(tmp_path, variant, tag, error):
+    out = tmp_path / "install-stamp.json"
+    result = subprocess.run(
+        [sys.executable, str(Path(__file__).resolve().parents[2] / "scripts/write_install_stamp.py"),
+         "--output", str(out), "--commit", "d" * 40, "--update-mechanism", "self"],
+        env={**os.environ, "HERMES_DESKTOP_VARIANT": variant, "HERMES_PAYLOAD_TAG": tag, "HERMES_BUILD_COMMIT": ""},
+        capture_output=True, text=True, timeout=30)
+    assert result.returncode != 0 and error in result.stderr
+    assert not out.exists()

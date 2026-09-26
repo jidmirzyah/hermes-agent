@@ -14,7 +14,6 @@ import json
 import os
 import shlex
 import subprocess
-import sys
 import tempfile
 import threading
 import time
@@ -28,7 +27,7 @@ from rich import box as rich_box
 from rich.markup import escape as _escape
 from rich.panel import Panel
 
-from hermes_constants import display_hermes_home, is_termux as _is_termux_environment
+from hermes_constants import display_hermes_home
 from hermes_state_ids import new_session_id as mint_session_id
 from agent.turn_context import extract_api_content_sidecar
 from hermes_cli.cli_agent_setup_mixin import _retire_agent
@@ -1006,7 +1005,6 @@ class CLICommandsMixin:
         doesn't fire for image-only clipboard content (e.g., VSCode terminal,
         Windows Terminal with WSL2).
         """
-        from cli import _DIM, _RST, _cprint
         from hermes_cli.clipboard import has_clipboard_image
         if not has_clipboard_image():
             _cp(_dim_line('(._.) No image found in clipboard'))

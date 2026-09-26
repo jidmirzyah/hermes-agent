@@ -179,6 +179,7 @@ def test_systemd_install_targets_linger_at_system_service_user(monkeypatch, tmp_
     monkeypatch.setattr(gateway, "_require_root_for_system_service", lambda action: None)
     monkeypatch.setattr(gateway, "has_legacy_hermes_units", lambda: False)
     monkeypatch.setattr(gateway, "get_systemd_unit_path", lambda system=False: unit_path)
+    monkeypatch.setattr(gateway, "_prepare_service_launcher", lambda **kwargs: None)
     monkeypatch.setattr(
         gateway,
         "generate_systemd_unit",

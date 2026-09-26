@@ -8,73 +8,7 @@ import { Transform, Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { parseArgs } from 'node:util'
 import { pathToFileURL } from 'node:url'
-import semver from 'semver'
-
-const TAG = /^v\d+\.\d+\.\d+(?:-canary\.\d{14})?$/
-const COMMIT = /^[0-9a-f]{40}$/
-const SHA256 = /^[0-9a-f]{64}$/
-const FORMATS = { windows: '.msixbundle', macos: '.zip' }
-
-function artifactUrl(value) {
-  const url = new URL(value)
-  const local = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)
-  if (url.username || url.password || !(url.protocol === 'https:' || (url.protocol === 'http:' && local))) {
-    throw new Error('Bundle URLs must use HTTPS or loopback HTTP, without credentials')
-  }
-  return url
-}
-
-function windowsVersion(version) {
-  if (typeof version !== 'string' || !/^\d+\.\d+\.\d+\.\d+$/.test(version)) {
-    throw new Error('Windows package version must have four numeric components')
-  }
-  const parts = version.split('.').map(Number)
-  if (parts.some(n => n > 65535)) throw new Error('Windows package version exceeds 16 bits')
-  return parts
-}
-
-export function validateBundleInputs(value, platform, arch) {
-  if (!Object.hasOwn(FORMATS, platform) || !['x64', 'arm64'].includes(arch)) {
-    throw new Error('Unsupported bundled-update platform or architecture')
-  }
-  if (value?.schema !== 1 || value.platform !== platform || value.arch !== arch) {
-    throw new Error('Bundle manifest schema, platform or architecture mismatch')
-  }
-  for (const slot of ['old', 'new']) {
-    const item = value[slot]
-    if (!item || !TAG.test(item.tag) || !COMMIT.test(item.commit) || !item.identity) {
-      throw new Error(`${slot}: exact release tag, full commit and package identity are required`)
-    }
-    if (!item.artifact || !SHA256.test(item.artifact.sha256)) throw new Error(`${slot}: SHA-256 is required`)
-    const url = artifactUrl(item.artifact.url)
-    if (!url.pathname.endsWith(FORMATS[platform])) throw new Error(`${slot}: expected ${FORMATS[platform]} artifact`)
-    if (platform === 'windows') {
-      windowsVersion(item.version)
-      if (!item.publisher || !item.applicationId) throw new Error(`${slot}: publisher and applicationId are required`)
-    } else {
-      if (!semver.valid(item.version) || item.version !== item.tag.slice(1)) throw new Error(`${slot}: macOS version must match its release tag`)
-      if (!/^[A-Z0-9]{10}$/.test(item.teamId)) throw new Error(`${slot}: macOS signing teamId is required`)
-    }
-  }
-  if (value.old.identity !== value.new.identity || value.old.commit === value.new.commit) {
-    throw new Error('Update must preserve package identity and change the build commit')
-  }
-  if (value.old.artifact.sha256 === value.new.artifact.sha256) throw new Error('Update artifacts must differ')
-  if (platform === 'windows') {
-    if (value.old.publisher !== value.new.publisher || value.old.applicationId !== value.new.applicationId) {
-      throw new Error('Update must preserve publisher and applicationId')
-    }
-    const old = windowsVersion(value.old.version)
-    const newer = windowsVersion(value.new.version)
-    const first = newer.findIndex((n, i) => n !== old[i])
-    if (first < 0 || newer[first] <= old[first]) throw new Error('New package version must increase')
-  } else {
-    if (value.new.teamId !== value.old.teamId) throw new Error('Update must preserve signing team')
-    if (!semver.gt(value.new.version, value.old.version)) throw new Error('New package version must increase')
-    if (value.old.tag.includes('-canary.') !== value.new.tag.includes('-canary.')) throw new Error('Bundle transition must stay on one update channel')
-  }
-  return value
-}
+import { FORMATS, SHA256, artifactUrl, validateBundleInputs } from './bundle-manifest.cjs'
 
 export async function downloadArtifact(artifact, destination) {
   const url = artifactUrl(artifact.url)

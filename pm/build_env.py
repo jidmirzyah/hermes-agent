@@ -26,7 +26,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     operation.add_argument("--check-lock", action="store_true")
     operation.add_argument("--export-requirements", type=Path)
     operation.add_argument("--prune-cache", action="store_true")
+    operation.add_argument("--exact-lock", action="store_true",
+                           help="prune to the project lock: entries the uv.lock cannot resolve are deleted")
     operation.add_argument("--manager-runtime", action="store_true")
+    parser.add_argument("--lock-source", type=Path, default=None,
+                        help="repo whose uv.lock selects the kept entries for --exact-lock (default: cwd)")
     parser.add_argument("--upgrade", action="store_true")
     parser.add_argument("--ci", action="store_true")
     parser.add_argument("--sealed", action="store_true")
@@ -40,17 +44,31 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.requirements is not None:
         requirements.extend(line.strip() for line in args.requirements.read_text(encoding="utf-8").splitlines()
                             if line.strip() and not line.lstrip().startswith("#"))
-    if args.prune_cache:
+    if args.exact_lock:
+        if args.ci or args.prune_cache:
+            parser.error("--exact-lock replaces --ci/--prune-cache: downloaded wheels the lock keeps must survive")
+        if args.lock_source is None:
+            parser.error("--exact-lock requires --lock-source")
+        if args.cache is None:
+            parser.error("--exact-lock requires --cache")
+    elif args.prune_cache:
         if args.cache is None:
             parser.error("--prune-cache requires --cache")
     elif not requirements and args.source is None:
         parser.error("--source is required for project operations")
-    build = not (args.lock_only or args.check_lock or args.export_requirements or args.prune_cache)
+    build = not (args.lock_only or args.check_lock or args.export_requirements
+                 or args.prune_cache or args.exact_lock)
     if build and args.out is None:
         parser.error("--out is required when building an environment")
     if args.manager_runtime and args.python is None:
         parser.error("--manager-runtime requires the target --python")
     try:
+        if args.exact_lock:
+            from pm.cache_lock import prune_uv_cache_to_lock
+
+            pruned = prune_uv_cache_to_lock(args.cache, args.lock_source)
+            print(f"pruned {pruned} cache entries outside the lock")
+            return 0
         if args.prune_cache:
             pm.prune_cache(args.cache, ci=args.ci)
             return 0

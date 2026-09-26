@@ -9,6 +9,8 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "fs"
 import { resolve, join, relative, posix } from "path"
 import productIdentity from "../product-identity.cjs"
+import { channelBuildRequest } from "../../../scripts/msix-shared.mjs"
+import { validateBundleEnvironment } from "./bundle-env.mjs"
 import { execFileSync } from "child_process"
 
 import { isMain } from "./utils.mjs"
@@ -88,6 +90,12 @@ export function resolveStamp({
   execFn = tryExec,
   fallbackBranch = FALLBACK_BRANCH
 } = {}) {
+  const channelBuild = channelBuildRequest(env)
+  if (channelBuild) {
+    const local = fromLocalGit(repoRoot, execFn)
+    if (!local || local.commit !== channelBuild.commit || local.dirty) throw new Error('Channel build identity does not match clean checkout HEAD')
+    return { ...local, branch: null, source: 'channel-build', baseVersion: channelBuild.sourceVersion, channelBuild }
+  }
   if (env.HERMES_BUILD_COMMIT) {
     if (!/^[a-f0-9]{40}$/.test(env.HERMES_BUILD_COMMIT) || env.HERMES_PAYLOAD_TAG) {
       throw new Error('Commit builds require an exact full SHA without a release tag')
@@ -198,6 +206,8 @@ function main() {
  */
 export function buildStampPayload(stamp, env = process.env, platform = process.platform, payload = null) {
   const variant = (env.HERMES_DESKTOP_VARIANT || "").trim()
+  const channelBuild = channelBuildRequest(env)
+  if (channelBuild && (stamp.commit !== channelBuild.commit || stamp.dirty)) throw new Error('Channel build identity does not match stamp')
   const commitBuild = env.HERMES_BUILD_COMMIT || null
   if (commitBuild && (!/^[a-f0-9]{40}$/.test(commitBuild) || commitBuild !== stamp.commit)) {
     throw new Error('Commit build identity does not match the stamp commit')
@@ -206,18 +216,34 @@ export function buildStampPayload(stamp, env = process.env, platform = process.p
     throw new Error('Commit builds cannot also set a release tag')
   }
   const version = env.HERMES_PAYLOAD_VERSION || (env.HERMES_PAYLOAD_TAG || '').replace(/^v/, '') || null
+  // The bundle's baked runtime defaults/clears, recorded as data so the smoke
+  // driver can predict the app's resolved Hermes home without reimplementing
+  // the banner. Only commit bundles carry one, but the field is harmless when
+  // absent elsewhere.
+  const bundleEnv = env.HERMES_BUNDLE_ENV_JSON ? validateBundleEnvironment(JSON.parse(env.HERMES_BUNDLE_ENV_JSON)) : undefined
   const base = {
     schemaVersion: STAMP_SCHEMA_VERSION,
     commit: stamp.commit,
-    branch: commitBuild ? null : stamp.branch,
+    branch: commitBuild || channelBuild ? null : stamp.branch,
     builtAt: new Date().toISOString(),
     dirty: stamp.dirty,
-    source: commitBuild ? 'commit-build' : stamp.source,
+    source: channelBuild ? 'channel-build' : commitBuild ? 'commit-build' : stamp.source,
     commitDate: stamp.commitDate ?? null,
-    baseVersion: stamp.baseVersion ?? version?.split('-')[0] ?? null,
-    displayVersion: stamp.displayVersion ?? version,
+    baseVersion: channelBuild?.sourceVersion ?? stamp.baseVersion ?? version?.split('-')[0] ?? null,
+    displayVersion: channelBuild
+      ? `${channelBuild.sourceVersion} (${channelBuild.channel} #${channelBuild.sequence}, ${channelBuild.commit.slice(0, 7)})`
+      : stamp.displayVersion ?? version,
     distance: stamp.distance ?? null
   }
+
+  if (channelBuild) base.channelBuild = channelBuild
+  // Rehearsal receivers use the real stable update path, never preview resolution.
+  if (channelBuild?.receiverCandidate) {
+    delete base.channelBuild
+    base.source = 'build'
+    base.displayVersion = channelBuild.version
+  }
+  if (variant === 'bundled') base.receiverProtocol = 1
 
   const updateMechanism = {
     '': 'self',
@@ -227,6 +253,7 @@ export function buildStampPayload(stamp, env = process.env, platform = process.p
     light: platform === 'darwin' ? 'electron-updater' : 'external'
   }[variant]
   if (!updateMechanism) throw new Error(`Unknown desktop variant: ${variant}`)
+  if (channelBuild && updateMechanism === 'external') throw new Error('Channel builds require a supported native update owner')
   const bundled = variant === 'bundled' || variant === 'store'
   if (bundled && !payload?.runtime?.commands?.hermes) {
     throw new Error('PM payload has no completed launch contract; stage the bundle before packaging')
@@ -235,8 +262,10 @@ export function buildStampPayload(stamp, env = process.env, platform = process.p
     ...base,
     payload: variant === "store" ? "bundled" : variant || "bootstrap",
     distribution: "desktop-app",
+
     updateMechanism: commitBuild ? 'external' : updateMechanism,
-    tag: env.HERMES_PAYLOAD_TAG || null,
+    tag: channelBuild?.receiverCandidate ? channelBuild.releaseTag : env.HERMES_PAYLOAD_TAG || null,
+    ...(bundleEnv ? { bundleEnv } : {}),
     ...(bundled ? { runtime: payload.runtime } : {})
   }
 }

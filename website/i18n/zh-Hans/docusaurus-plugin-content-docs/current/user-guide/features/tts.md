@@ -6,7 +6,7 @@ description: "跨所有平台的文字转语音与语音消息转录"
 
 # 语音与 TTS
 
-本页的 Python 依赖命令使用 [PM 准备的源码环境](/reference/package-management#developer-workflow)。
+本页的 Python 依赖命令使用 [PM 准备的源码环境](../../reference/package-management.md#developer-workflow)。
 依赖变更后，请重新激活该 checkout 并重启 Hermes。
 
 Hermes Agent 支持跨所有消息平台的文字转语音（TTS）输出和语音消息转录（STT）。

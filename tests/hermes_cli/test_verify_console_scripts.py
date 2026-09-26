@@ -7,6 +7,8 @@ import textwrap
 import pytest
 from hermes_cli import main_install_repair
 
+pytestmark = pytest.mark.platforms("windows")
+
 
 @pytest.fixture
 def temp_pyproject(tmp_path, monkeypatch):

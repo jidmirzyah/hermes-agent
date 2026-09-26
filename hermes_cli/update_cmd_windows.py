@@ -446,8 +446,7 @@ def _relaunch_stopped_serves(token: dict) -> None:
     """Idempotent atexit relaunch of manual serves stopped by the venv guard.
 
     `pending` flips False on first invocation so explicit call + atexit registration cannot double-spawn."""
-    from hermes_cli.update_cmd import _m
-    from hermes_cli.update_receipt import record_step as _record_update_step
+    from hermes_cli.update_cmd import _m, _record_update_step
     if not token.get("pending"):
         return
     token["pending"] = False
@@ -653,6 +652,7 @@ def _desktop_owns_gateway_lifecycle() -> bool:
 
     See #76129, #92091.
     """
+    from hermes_cli.update_cmd import _m
     with _best_effort('Desktop-lifecycle ledger probe failed: %s'):
         from hermes_cli.process_identity import ledger_entries, spawner_is_dead
         if any(e.get("purpose") in _BACKEND_PURPOSES and spawner_is_dead(e) is False for e in ledger_entries()):
@@ -1369,8 +1369,7 @@ def _clear_windows_venv_holders_or_exit(args, gateway_mode: bool, _windows_gatew
     Rungs in order: leftover pausable gateways -> ledger orphaned backends -> orphaned Desktop backends ->
     ledger manual serve (relaunched at exit on the same bind) -> GUI hand-off leaks. Remaining holders are
     refused (the sync would corrupt against a locked .pyd)."""
-    from hermes_cli.update_cmd import _m, _refuse_gateway_ancestor_tree_kill
-    from hermes_cli.update_receipt import record_step as _record_update_step
+    from hermes_cli.update_cmd import _m, _record_update_step, _refuse_gateway_ancestor_tree_kill
 
     def _resume_and_exit():
         _m()._resume_windows_gateways_after_update(_windows_gateway_resume)

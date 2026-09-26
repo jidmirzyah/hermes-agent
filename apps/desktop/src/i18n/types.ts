@@ -64,7 +64,7 @@ export interface Translations {
     message: string
     copyUrl: string
     close: string
-  };
+  }
   connectors: {
     title: string
     connect: string
@@ -90,8 +90,6 @@ export interface Translations {
     search: string
     empty: string
     disclaimer: string
-    connectTitle: (app: string) => string
-    describe: (app: string) => string
     execution: string
     setup: (server: string) => string
     openInBrowser: string
@@ -1430,6 +1428,9 @@ export interface Translations {
       downloaded: string
       downloadAction: (size: string) => string
       downloadProgress: (done: string, total: string) => string
+      downloadStatusRunning: string
+      downloadSpeed: (rate: string) => string
+      downloadEta: (time: string) => string
       downloadPausedLabel: string
       downloadPauseAction: string
       downloadResumeAction: string
@@ -3025,6 +3026,8 @@ export interface Translations {
   }
 
   updates: {
+    discontinuedTitle: string
+    discontinuedBody: string
     channels: { stable: string; canary: string }
     bundleSwapPending: string
     bundleSwapPendingDesc: string
@@ -3133,6 +3136,10 @@ export interface Translations {
     versionDetailsBuildOrigin: string
     versionDetailsDistribution: string
     versionDetailsDistributionDesktop: string
+    versionDetailsDistributionDesktopMsix: string
+    versionDetailsDistributionDesktopInstaller: string
+    versionDetailsDistributionSourceInstaller: string
+    versionDetailsDistributionSource: string
     versionDetailsDistributionStore: string
     versionDetailsRuntime: string
     versionDetailsRuntimeEmbedded: string

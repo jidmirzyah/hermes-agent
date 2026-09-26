@@ -196,6 +196,6 @@ def test_resolve_stamp_file_falls_back_to_code_root_when_env_unset(tmp_path, mon
     monkeypatch.delenv("HERMES_INSTALL_ROOT", raising=False)
     stamp = {"commit": "f" * 40, "source": "docker", "updateMechanism": "external"}
     (tmp_path / "install-stamp.json").write_text(json.dumps(stamp))
-    monkeypatch.setattr("hermes_cli.version_info._CODE_ROOT", tmp_path)
+    monkeypatch.setattr("pm.paths.repo_root", lambda: tmp_path)
 
     assert _resolve_stamp_file() == tmp_path / "install-stamp.json"

@@ -92,7 +92,7 @@ empty because its dependencies are already core. Standard PM setup includes
 `web` through `all`.
 
 If these dependencies are damaged, run `hermes pm repair` and restart Hermes.
-For source setup, use the [PM developer workflow](/reference/package-management#developer-workflow).
+For source setup, use the [PM developer workflow](../../reference/package-management.md#developer-workflow).
 Messaging and voice extras are separate requests, not implied by `all`.
 
 When you run `hermes dashboard` without the dependencies, it will tell you what to install. If the frontend hasn't been built yet and `npm` is available, it builds automatically on first launch.

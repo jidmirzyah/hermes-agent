@@ -442,7 +442,6 @@ Ordinary Hermes application updates preserve user plugin directories, including
 wrapper files and external sidecar links. Explicit plugin updates or removals
 can change those files. See [Package management](../../reference/package-management.md)
 and the [plugin authoring guide](../../developer-guide/plugins/index.md#lazy-install-optional-python-dependencies).
-
 ### One-click install links (Desktop)
 
 Hermes Desktop registers the `hermes://` URL scheme, so a website, README, or

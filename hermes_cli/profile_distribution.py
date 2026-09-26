@@ -21,8 +21,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import hermes_yaml as yaml
 
 from hermes_cli._subprocess_compat import noninteractive_git_env
-from utils import rmtree_readonly
 from hermes_cli.archive_safe import normalize_archive_parts
+from utils import rmtree_readonly
 
 
 MANIFEST_FILENAME = "distribution.yaml"
@@ -464,10 +464,6 @@ def _copy_dist_payload(staged: Path, target: Path, manifest: DistributionManifes
 
     # Make sure the manifest on disk reflects resolved name + source
     write_manifest(target, manifest)
-    # A shipped profile.yaml must not carry a backend-assigned role.
-    if any(rel_parts == ("profile.yaml",) for _, rel_parts in entries):
-        from hermes_cli.profiles import drop_profile_role
-        drop_profile_role(target)
 
 
 def _bootstrap_user_dirs(target: Path) -> None:

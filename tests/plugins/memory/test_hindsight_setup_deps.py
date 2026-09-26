@@ -4,7 +4,6 @@ local_embedded wizard must ACTUALLY install the isolated side-env runtime via
 embedded_runtime.ensure_sideenv (hindsight-embed + hindsight-api-slim[all],
 pinned, built by PM's isolated-environment operation). Never the deleted ``tools.lazy_deps``."""
 
-import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -36,26 +35,26 @@ def _no_network_setup(monkeypatch, setup_mod, tmp_path, mode):
     return _fake_provider(), str(tmp_path / "home"), {"memory": {}}
 
 
-class TestClientModeUsesDeclaredExtra:
-    def test_cloud_mode_syncs_hindsight_extra(self, monkeypatch, setup_mod, tmp_path):
-        calls = []
-        import pm
-        monkeypatch.setattr(pm, "sync_venv", lambda extras=None, *, explicit=False: calls.append((extras, explicit)))
-        provider, home, config = _no_network_setup(monkeypatch, setup_mod, tmp_path, "cloud")
+@pytest.mark.parametrize("mode", ["cloud", "local_external", "local_embedded"])
+def test_setup_installs_selected_mode_and_saves(monkeypatch, setup_mod, tmp_path, capsys, mode):
+    import pm
+    import plugins.memory.hindsight.embedded_runtime as rt
 
-        setup_mod.run_setup(provider, home, config)
-
-        assert calls == [(["hindsight"], True)]
-
-    def test_local_external_mode_syncs_hindsight_extra(self, monkeypatch, setup_mod, tmp_path):
-        calls = []
-        import pm
-        monkeypatch.setattr(pm, "sync_venv", lambda extras=None, *, explicit=False: calls.append((extras, explicit)))
-        provider, home, config = _no_network_setup(monkeypatch, setup_mod, tmp_path, "local_external")
-
-        setup_mod.run_setup(provider, home, config)
-
-        assert calls == [(["hindsight"], True)]
+    sync = MagicMock()
+    side = MagicMock(return_value=rt.sideenv_root())
+    monkeypatch.setattr(pm, "sync_venv", sync)
+    monkeypatch.setattr(rt, "ensure_sideenv", side)
+    provider, home, config = _no_network_setup(monkeypatch, setup_mod, tmp_path, mode)
+    setup_mod.run_setup(provider, home, config)
+    sync.assert_called_once_with(["hindsight"], explicit=True)
+    assert side.call_count == (1 if mode == "local_embedded" else 0)
+    assert config["memory"]["provider"] == "hindsight"
+    saved = provider.save_config.call_args.args[0]
+    assert saved["mode"] == mode
+    assert saved["bank_id"] == "hermes"
+    if mode == "local_embedded":
+        out = capsys.readouterr().out
+        assert "Isolated Hindsight runtime installed" in out and "not modified" in out
 
 
 class TestSyncFailureSurfaces:
@@ -76,25 +75,6 @@ class TestSyncFailureSurfaces:
 
 
 class TestEmbeddedInstallsIsolatedSideEnv:
-    def test_embedded_installs_isolated_runtime_not_shared_venv(self, monkeypatch, setup_mod, tmp_path, capsys):
-        calls = []
-        import pm
-        monkeypatch.setattr(pm, "sync_venv", lambda extras=None, *, explicit=False: calls.append(extras))
-        installed = []
-        import plugins.memory.hindsight.embedded_runtime as rt
-        monkeypatch.setattr(rt, "ensure_sideenv", lambda: installed.append("gen") or rt.sideenv_root())
-        provider, home, config = _no_network_setup(monkeypatch, setup_mod, tmp_path, "local_embedded")
-
-        setup_mod.run_setup(provider, home, config)
-
-        out = capsys.readouterr().out
-        # The client extra goes through pm; the heavy stack installs into the
-        # isolated side env — never the shared venv.
-        assert calls == [["hindsight"]]
-        assert installed == ["gen"]
-        assert "Isolated Hindsight runtime installed" in out
-        assert "not modified" in out
-
     def test_embedded_install_failure_is_truthful_and_non_fatal(self, monkeypatch, setup_mod, tmp_path, capsys):
         import pm
         monkeypatch.setattr(pm, "sync_venv", lambda extras=None, *, explicit=False: None)
@@ -110,27 +90,3 @@ class TestEmbeddedInstallsIsolatedSideEnv:
         assert "disk full" in out
         provider.save_config.assert_not_called()
         assert config["memory"] == {}
-
-    def test_embedded_config_still_saved(self, monkeypatch, setup_mod, tmp_path):
-        import pm
-        monkeypatch.setattr(pm, "sync_venv", lambda extras=None, *, explicit=False: None)
-        import plugins.memory.hindsight.embedded_runtime as rt
-        monkeypatch.setattr(rt, "ensure_sideenv", lambda: rt.sideenv_root())
-        provider, home, config = _no_network_setup(monkeypatch, setup_mod, tmp_path, "local_embedded")
-
-        setup_mod.run_setup(provider, home, config)
-
-        saved = provider.save_config.call_args[0][0]
-        assert saved["mode"] == "local_embedded"
-        assert saved["bank_id"] == "hermes"
-
-
-class TestNoLazyDeps:
-    def test_tools_lazy_deps_absent_after_setup(self, monkeypatch, setup_mod, tmp_path):
-        import pm
-        monkeypatch.setattr(pm, "sync_venv", lambda extras=None, *, explicit=False: None)
-        provider, home, config = _no_network_setup(monkeypatch, setup_mod, tmp_path, "cloud")
-
-        setup_mod.run_setup(provider, home, config)
-
-        assert "tools.lazy_deps" not in sys.modules

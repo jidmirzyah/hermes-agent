@@ -6,7 +6,7 @@ description: "通过 AI Bot WebSocket 网关将 Hermes Agent 连接到 WeCom"
 
 # WeCom（企业微信）
 
-本页的 Python 依赖命令使用 [PM 准备的源码环境](/reference/package-management#developer-workflow)。
+本页的 Python 依赖命令使用 [PM 准备的源码环境](../../reference/package-management.md#developer-workflow)。
 依赖变更后，请重新激活该 checkout 并重启 Hermes。
 
 将 Hermes 连接到 [WeCom](https://work.weixin.qq.com/)（企业微信），腾讯的企业即时通讯平台。该适配器使用 WeCom 的 AI Bot WebSocket 网关实现实时双向通信——无需公开端点或 webhook。

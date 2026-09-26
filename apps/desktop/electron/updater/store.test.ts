@@ -38,6 +38,20 @@ function dependencies(failAt?: string): { deps: StoreStrategyDeps; calls: string
 }
 
 describe('Microsoft Store update lifecycle', () => {
+  it('requires automatic relaunch and cancels registration without stopping the backend', async (): Promise<void> => {
+    const { deps, calls } = dependencies()
+    deps.registerPendingRelaunch = async (): Promise<
+      Awaited<ReturnType<StoreStrategyDeps['registerPendingRelaunch']>>
+    > => ({
+      automatic: false,
+      cancel: async (): Promise<void> => {
+        calls.push('cancel')
+      }
+    })
+    await expect(new StoreStrategy(deps).apply()).rejects.toThrow('Could not register automatic relaunch')
+    expect(calls).toEqual(['download', 'cancel'])
+  })
+
   it('downloads before shutdown, owns relaunch before install, and keeps no-update non-destructive', async () => {
     const { deps, calls } = dependencies()
     const strategy = new StoreStrategy(deps)

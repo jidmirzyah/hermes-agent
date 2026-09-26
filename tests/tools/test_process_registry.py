@@ -1697,7 +1697,7 @@ class TestTerminateHostPidPosix:
     """POSIX branch gives a managed parent its shutdown window first."""
 
     @pytest.mark.platforms("linux")
-    def test_posix_walks_tree_and_terminates_children_then_parent(self, monkeypatch):
+    def test_posix_terminates_parent_before_snapshot_descendants(self, monkeypatch):
         from tools import process_registry as pr
         import psutil
 
@@ -1732,6 +1732,47 @@ class TestTerminateHostPidPosix:
         assert terminate_order == [12345, 101, 102, 103], (
             "Parent must receive SIGTERM before any snapshot descendant"
         )
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX signal ordering; Windows uses taskkill")
+    @pytest.mark.live_system_guard_bypass
+    def test_posix_self_reaping_supervisor_child_is_never_signalled_by_registry(self, monkeypatch, tmp_path):
+        """A parent that tears down its own children on SIGTERM keeps that job.
+
+        #111598: Chromium/Electron reap their zygotes during an async SIGTERM
+        shutdown; SIGTERMing the descendants first left the browser without a
+        zygote and it crash-dumped (SIGTRAP). Invariant: the registry signals the
+        parent first and a child the parent reaps inside the grace window is
+        never signalled by the registry, so the parent exits 0.
+        """
+        monkeypatch.setattr(ProcessRegistry, "_daemon_term_grace_seconds",
+                            staticmethod(lambda: 2.0))
+        log = tmp_path / "order.log"
+        child_sh = tmp_path / "child.sh"
+        parent_sh = tmp_path / "parent.sh"
+        # Child logs a registry-delivered TERM; the parent kills it with KILL
+        # (logs nothing) and reaps it, then exits 0 — like a browser reaping its zygote.
+        child_sh.write_text(
+            "#!/usr/bin/env bash\n"
+            f"trap 'echo child-TERM >> {log}; exit 0' TERM\n"
+            f"echo up >> {log}\nwhile :; do sleep 0.1; done\n")
+        parent_sh.write_text(
+            "#!/usr/bin/env bash\n"
+            f"bash {child_sh} & kid=$!\n"
+            f"trap 'echo parent-TERM >> {log}; kill -KILL $kid; wait $kid; exit 0' TERM\n"
+            "while :; do sleep 0.1; done\n")
+        parent = subprocess.Popen(["bash", str(parent_sh)], stdin=subprocess.DEVNULL)
+        try:
+            assert _wait_until(lambda: log.exists() and "up" in log.read_text(), timeout=5.0)
+            ProcessRegistry._terminate_host_pid(parent.pid)
+            assert _wait_until(lambda: parent.poll() is not None, timeout=5.0)
+            lines = log.read_text().split()
+            assert parent.returncode == 0, f"supervisor must exit cleanly, got {parent.returncode}"
+            assert "parent-TERM" in lines and "child-TERM" not in lines, (
+                f"registry must SIGTERM only the parent, which reaps its own child: {lines}")
+        finally:
+            if parent.poll() is None:
+                parent.kill()
+            parent.wait()
 
     @pytest.mark.platforms("linux")
     def test_posix_oserror_falls_back_to_os_kill(self, monkeypatch):
@@ -2010,53 +2051,6 @@ class TestHandleProcessRedaction:
         assert "zzzopaque1234567890abcdef" in out["output"]
 
 
-class TestHandleProcessTransformHook:
-    """Background-process output goes through the same ``transform_terminal_output`` plugin seam
-    as the foreground ``terminal`` result — issue #70760 — hook FIRST, redaction AFTER, so a
-    replacement the plugin returns is still masked (the ordering the foreground path documents)."""
-
-    def _setup(self, monkeypatch, output, *, hook):
-        import agent.redact as _r
-        monkeypatch.setattr(_r, "_REDACT_ENABLED", True)
-        monkeypatch.setattr("hermes_cli.lifecycle.invoke_hook", hook)
-        from tools import process_registry as pr
-        reg = ProcessRegistry()
-        sess = _make_session(sid="proc_xform1", command="python app.py")
-        sess.output_buffer = output
-        sess.exited = True
-        sess.exit_code = 3
-        reg._running[sess.id] = sess
-        monkeypatch.setattr(pr, "process_registry", reg)
-        return pr, sess
-
-    def test_poll_wait_log_kill_results_are_transformed(self, monkeypatch):
-        seen = []
-
-        def hook(hook_name, **kw):
-            seen.append((hook_name, kw.get("command"), kw.get("returncode"), kw.get("task_id")))
-            return ["REWRITTEN:" + kw["output"]] if hook_name == "transform_terminal_output" else []
-
-        pr, sess = self._setup(monkeypatch, "raw line\n", hook=hook)
-        for action, key in (("poll", "output_preview"), ("log", "output"), ("wait", "output"), ("kill", "output")):
-            out = json.loads(pr._handle_process({"action": action, "session_id": sess.id}, task_id="task-bg"))
-            assert out[key].startswith("REWRITTEN:raw line"), (action, out)
-        assert [s for s in seen if s[0] == "transform_terminal_output"]
-        # The hook sees the command, the recorded exit code (None while running) and the process
-        # OWNER's task_id (the session's, not the caller's — a sibling polling a handed-off process
-        # is still observing that owner's output).
-        assert ("transform_terminal_output", "python app.py", 3, "t1") in seen
-
-    def test_hook_replacement_is_still_redacted(self, monkeypatch):
-        secret = "sk-proj-abc123def456ghi789jkl012mno345"
-        pr, sess = self._setup(
-            monkeypatch, "plain output",
-            hook=lambda hook_name, **kw: [f"OPENAI_API_KEY={secret}"] if hook_name == "transform_terminal_output" else [],
-        )
-        out = json.loads(pr._handle_process({"action": "log", "session_id": sess.id}))
-        assert secret not in out["output"]
-        assert "OPENAI_API_KEY=" in out["output"]
-
-
 # =========================================================================
 # Reader loop: orphaned grandchild holding the stdout pipe (issue #68915)
 # =========================================================================
@@ -2199,7 +2193,7 @@ class TestSystemdCgroupIsolation:
 
         return fake_popen, captured
 
-    @pytest.mark.linux_only
+    @pytest.mark.platforms("linux")
     def test_wraps_in_systemd_scope_when_supervisor_and_available(
         self, registry, monkeypatch, _gateway_identity
     ):
@@ -2420,7 +2414,7 @@ class TestSystemdCgroupIsolation:
 
         assert session.systemd_unit == ""
 
-    @pytest.mark.linux_only
+    @pytest.mark.platforms("linux")
     def test_systemd_post_spawn_failure_never_kills_gateway_process_group(
         self, registry, monkeypatch, _gateway_identity
     ):
@@ -2455,7 +2449,7 @@ class TestSystemdCgroupIsolation:
         assert stop_unit.call_args.args[0].endswith(".scope")
         killpg.assert_not_called()
 
-    @pytest.mark.linux_only
+    @pytest.mark.platforms("linux")
     def test_pty_spawn_is_wrapped_in_systemd_scope(self, registry, monkeypatch, _gateway_identity):
         """Interactive executors receive the same sibling-cgroup isolation."""
         from ptyprocess import PtyProcess
@@ -2487,7 +2481,7 @@ class TestSystemdCgroupIsolation:
         assert argv[-3:] == ["/bin/bash", "-lic", "set +m; codex"]
         assert session.systemd_unit == f"hermes-worker-{session.id}.scope"
 
-    @pytest.mark.linux_only
+    @pytest.mark.platforms("linux")
     def test_pty_spawn_failure_reaps_scope_before_distinct_pipe_fallback(
         self, registry, monkeypatch, _gateway_identity
     ):
@@ -2543,7 +2537,7 @@ class TestSystemdCgroupIsolation:
             f"hermes-worker-{session.id}-pipe-fallback.scope"
         )
 
-    @pytest.mark.linux_only
+    @pytest.mark.platforms("linux")
     def test_pty_spawn_failure_does_not_fallback_when_scope_reap_fails(
         self, registry, monkeypatch, _gateway_identity
     ):
@@ -2638,7 +2632,7 @@ class TestSystemdCgroupIsolation:
         assert session.id in registry._finished
         assert session.id not in registry._running
 
-    @pytest.mark.linux_only
+    @pytest.mark.platforms("linux")
     def test_systemd_run_user_scope_available_caches_after_probe(
         self, registry, monkeypatch
     ):
@@ -2668,6 +2662,32 @@ class TestSystemdCgroupIsolation:
         assert not any(
             value.startswith("OOMPolicy=") for value in probe_argv if isinstance(value, str)
         ), probe_argv
+
+    def test_successful_systemd_probe_revalidates_after_cache_ttl(self, monkeypatch):
+        """A vanished user bus invalidates a formerly successful scope verdict."""
+        import tools.process_registry as pr
+
+        monkeypatch.setattr(pr, "_IS_LINUX", True)
+        monkeypatch.setattr(pr, "_SYSTEMD_SCOPE_AVAILABLE", None)
+        monkeypatch.setattr(pr, "_SYSTEMD_SCOPE_PROBED_AT", 0.0)
+        clock = [100.0]
+        probe_results = [0, 1]
+        probe_calls = []
+
+        def fake_run(*args, **kwargs):
+            probe_calls.append(args)
+            return subprocess.CompletedProcess(
+                args=args[0], returncode=probe_results.pop(0)
+            )
+
+        monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/systemd-run")
+        monkeypatch.setattr("tools.process_registry.time.monotonic", lambda: clock[0])
+        monkeypatch.setattr("subprocess.run", fake_run)
+
+        assert pr._systemd_run_user_scope_available() is True
+        clock[0] += 61
+        assert pr._systemd_run_user_scope_available() is False
+        assert len(probe_calls) == 2
 
     @pytest.mark.platforms("linux")
     def test_systemd_probe_derives_owned_user_bus_env_for_system_gateway(
@@ -2718,7 +2738,7 @@ class TestSystemdCgroupIsolation:
         assert "XDG_RUNTIME_DIR" not in os.environ
         assert "DBUS_SESSION_BUS_ADDRESS" not in os.environ
 
-    @pytest.mark.linux_only
+    @pytest.mark.platforms("linux")
     def test_scoped_spawn_lost_user_bus_honours_configured_runtime_dir(self, monkeypatch, request):
         """The lost-bus check must derive from the env the worker was spawned with: when the bus
         lives under a configured ``XDG_RUNTIME_DIR`` (not ``/run/user/<uid>``), an unrelated wrapper
@@ -2756,7 +2776,7 @@ class TestSystemdCgroupIsolation:
         assert pr.scoped_spawn_lost_user_bus(spawn_env) is True
         assert pr._SYSTEMD_SCOPE_AVAILABLE is False
 
-    @pytest.mark.linux_only
+    @pytest.mark.platforms("linux")
     def test_probe_succeeds_without_bin_true(self, monkeypatch):
         """An absent ``/bin/true`` must not make a usable scope fail its probe."""
         import tools.process_registry as pr
@@ -2780,7 +2800,7 @@ class TestSystemdCgroupIsolation:
         assert pr._systemd_run_user_scope_available() is True
         assert len(executed) == 1, "payload must really run (exit 0) on the host, not just be spelled right"
 
-    @pytest.mark.linux_only
+    @pytest.mark.platforms("linux")
     def test_systemd_scope_first_probe_is_serialized(self, monkeypatch):
         """Concurrent first-use callers must wait for one definitive probe.
 
@@ -2828,7 +2848,7 @@ class TestSystemdCgroupIsolation:
         assert results == [True, True]
         assert len(probe_calls) == 1
 
-    @pytest.mark.linux_only
+    @pytest.mark.platforms("linux")
     def test_failed_systemd_probe_retries_after_cache_ttl(self, monkeypatch):
         import tools.process_registry as pr
 

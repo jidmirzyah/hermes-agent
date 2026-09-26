@@ -50,7 +50,11 @@ The official, SHA-pinned `actions/cache` transports three independent caches:
 
 All restores use the exact primary key, without fallback prefixes, matching
 setup-uv and setup-node's npm behavior. Successful jobs save at teardown;
-exact hits are not saved again. PM re-verifies restored tools before use.
+exact hits are not saved again. Only dependency-carrying callers
+(`extras` set) auto-save the uv cache: a tool-only job never runs a
+dependency operation, so letting it save would freeze an empty cache under
+the production key, where an immutable exact hit blocks real saves forever.
+PM re-verifies restored tools before use.
 Dependency caches never contain `node_modules` or virtual environments.
 Keep an installed-tree cache in the caller if that job needs one.
 
@@ -62,20 +66,22 @@ that toolchain. `python-cache-dependency-glob` defaults to `pyproject.toml` and
 An npm cache without a matching lockfile fails, rather than caching an
 unversioned dependency set.
 
-`prune-python-cache: true` registers PM's CI cache-pruning operation at teardown,
+`prune-python-cache: true` registers PM's lock-exact cache-pruning operation at teardown,
 after the caller's installs and before the cache save. It is skipped on an
 exact hit. The default is `false`, as in setup-uv v9; migrated v8 callers opt in
 to retain their former policy. The small nested JavaScript action exists only
 because GitHub composite actions cannot declare their own post step. It uses
-Node's standard library and has no bundled dependencies.
+Node's standard library and has no bundled dependencies. Pruning deletes cache
+entries the project's `uv.lock` cannot resolve (the same exactness contract the
+bundle ship gate enforces) and keeps downloaded wheels the lock still needs —
+`uv cache prune --ci` would discard them, leaving a snapshot that warms almost
+nothing.
 
 Outputs include `python-version`, `uv-version`, `node-version`, `npm-version`,
 `python-path`, `venv`, `target`, and the three `*-cache-hit` flags.
 Use the version outputs in installed-tree cache keys instead of repeating pins.
 
-`.github/workflows/pm-toolchain.yml` exercises cold setup and a separate warm
-runner for Linux, macOS and Windows on both architectures. Its optional cache
-suffix isolates cache lookup, not the repository's storage budget. The trusted
-`pm-toolchain-cache-cleanup.yml` completion workflow deletes only that run's
-smoke keys after all cache saves finish, including failed or cancelled runs.
-It must be on the default branch for GitHub to run it.
+The tools cache key hashes `pm/**`, this action, and `scripts/ci/setup_toolchain.py`,
+so a provisioning change re-runs the cold path on every lane that uses the action
+(`tests-os.yml` covers macOS and both Windows architectures). `cache-suffix` is an
+optional namespace for isolated cache experiments; it changes lookup, not storage.

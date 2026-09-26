@@ -6,7 +6,7 @@ description: "与 Hermes Agent 的第一次对话——从安装到开始聊天�
 
 # 快速入门
 
-本页的 Python 依赖命令使用 [PM 准备的源码环境](/reference/package-management#developer-workflow)。
+本页的 Python 依赖命令使用 [PM 准备的源码环境](../reference/package-management.md#developer-workflow)。
 依赖变更后，请重新激活该 checkout 并重启 Hermes。
 
 本指南带你从零开始搭建一个能够应对实际使用的 Hermes 环境。完成安装、选择 provider（服务提供商）、验证对话正常运行，并了解出现问题时的处理方法。

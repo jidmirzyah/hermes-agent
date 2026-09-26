@@ -2891,7 +2891,6 @@ class BasePlatformAdapter(ABC):
         (Signal). Returns success when at least one image was delivered — the outcome
         the turn-level delivery tracker records; every override must return the same
         aggregate, or a media-only turn on that platform reports FAILURE (#106153)."""
-        from urllib.parse import unquote as _unquote
         delivered = False
         for image_url, alt_text in images:
             if human_delay > 0:

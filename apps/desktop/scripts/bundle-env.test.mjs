@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { expect, test } from 'vitest'
 
-import { environmentDefaultsBanner } from './bundle-env.mjs'
+import { applyBundleEnvironment, environmentDefaultsBanner } from './bundle-env.mjs'
 
 test('explicit clears beat inherited homes and prevent Windows registry fallback before spawning', async () => {
   const root = mkdtempSync(join(tmpdir(), 'hermes-bundle-clear-'))
@@ -36,6 +36,31 @@ test('explicit clears beat inherited homes and prevent Windows registry fallback
     const actual = JSON.parse(execFileSync(process.execPath, [outfile], { env, encoding: 'utf8' }))
     expect(actual).toEqual({ cleared: '', home: 'C:\\Users\\test\\AppData\\Local\\hermesmagic-test',
       child: 'C:\\Users\\test\\AppData\\Local\\hermesmagic-test', registryReads: 0 })
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('applyBundleEnvironment replays the banner semantics for defaults, runtime overrides and clears', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'hermes-bundle-pure-'))
+  const defaults = { KEEP: 'default', MISSING: 'default', CLEARED: null, OVERRIDDEN: 'default', SUFFIX: 'baked' }
+  const keys = Object.keys(defaults)
+  const base = { KEEP: 'x', CLEARED: 'runtime', OVERRIDDEN: 'runtime', SUFFIX: 'explicit' }
+  try {
+    // The bundled banner must produce the same effective environment the pure
+    // function computes, so the smoke driver can predict the app's home from
+    // the same bundle env data without running a child process.
+    writeFileSync(join(root, 'reader.mjs'), `export const values = Object.fromEntries(${JSON.stringify(keys)}.map(key => [key, process.env[key]]));`, 'utf8')
+    const entry = join(root, 'entry.mjs')
+    writeFileSync(entry, `import {values} from './reader.mjs'; console.log(JSON.stringify(values));`, 'utf8')
+    const outfile = join(root, 'bundle.mjs')
+    await build({ entryPoints: [entry], bundle: true, platform: 'node', format: 'esm', outfile, banner: { js: environmentDefaultsBanner(JSON.stringify(defaults)) } })
+    const viaBanner = JSON.parse(execFileSync(process.execPath, [outfile], { env: { ...process.env, ...base }, encoding: 'utf8' }))
+    const viaFunction = Object.fromEntries(keys.map(key => [key, applyBundleEnvironment(base, defaults)[key]]))
+    expect(viaFunction).toEqual(viaBanner)
+    expect(viaFunction).toEqual({
+      KEEP: 'x', MISSING: 'default', CLEARED: '', OVERRIDDEN: 'runtime', SUFFIX: 'explicit',
+    })
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

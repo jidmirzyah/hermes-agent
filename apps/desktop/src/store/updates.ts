@@ -9,7 +9,6 @@ import { connectionScoped, profileScoped } from '@/api/client'
 import type {
   DesktopUpdateApplyOptions,
   DesktopUpdateApplyResult,
-  DesktopUpdateBlocker,
   DesktopUpdateProgress,
   DesktopUpdateStage,
   DesktopUpdateStatus,
@@ -25,6 +24,11 @@ import { dismissNotification, notify } from '@/store/notifications'
 import { $connection } from '@/store/session'
 import type { BackendUpdateCheckResponse } from '@/types/hermes'
 
+/** Keyed per retired-channel revision: a new retirement (or a revision bump on
+ *  the same channel) re-shows the notice, a plain re-check never does. */
+const DISCONTINUED_DISMISS_KEY = 'hermes:discontinued-notice-dismissed-for'
+const DISCONTINUED_TOAST_ID = 'desktop-build-discontinued'
+
 export interface UpdateApplyState {
   applying: boolean
   stage: DesktopUpdateStage
@@ -34,8 +38,7 @@ export interface UpdateApplyState {
   /** When the stage is 'manual': the exact command the user should run
    *  (CLI install with no staged updater). */
   command: string | null
-  /** Structured update blockers used by the safe close-and-update confirmation. */
-  blockers?: readonly DesktopUpdateBlocker[] | null
+
   log: readonly { stage: DesktopUpdateStage; message: string; at: number }[]
 }
 
@@ -103,7 +106,10 @@ function isUpdateToastSnoozed(): boolean {
 // v5: requires raised WebSocket frame size for large one-shot file.attach.
 // v6: requires key-addressed plugins.manage rows (keyless rows render
 //     read-only in Settings → Plugins).
-const REQUIRED_BACKEND_CONTRACT = 6
+// v7: requires JSON-RPC server->client requests for every blocking prompt
+//     (approval/clarify/sudo/secret/vault/MCP setup); a v6 backend's
+//     `<kind>.request` notifications would never render a card.
+export const REQUIRED_BACKEND_CONTRACT = 7
 const SKEW_TOAST_ID = 'backend-contract-skew'
 // The contract check runs on every session.resume (applyRuntimeInfo), so
 // without a snooze the warning re-popped on every thread the user opened, even
@@ -221,7 +227,8 @@ export function maybeNotifyUpdateAvailable(status: DesktopUpdateStatus | null, t
 
   // The package update owner reports availability without a commit SHA.
   // Git checks must still identify their target commit.
-  const hasTargetIdentity = Boolean(status.targetSha) || status.mechanism === 'app-installer' || status.mechanism === 'microsoft-store'
+  const hasTargetIdentity =
+    Boolean(status.targetSha) || status.mechanism === 'app-installer' || status.mechanism === 'microsoft-store'
 
   if (!hasTargetIdentity) {
     return
@@ -261,6 +268,46 @@ export function maybeNotifyUpdateAvailable(status: DesktopUpdateStatus | null, t
           : translateNow('notifications.updateReadyMessageUnknown'),
     onDismiss: () => snoozeUpdateToast(),
     title: translateNow('notifications.updateReadyTitle')
+  })
+}
+
+/** Which retired-channel revision the discontinued notice was dismissed for. */
+function discontinuedDismissKey(retirement: NonNullable<DesktopUpdateStatus['retirement']>): string {
+  return `${retirement.destination}@${retirement.version}`
+}
+
+/** Persist the dismissal so plain re-checks never nag; a new retirement re-shows. */
+export function dismissDiscontinuedNotice(retirement: NonNullable<DesktopUpdateStatus['retirement']>): void {
+  persistString(DISCONTINUED_DISMISS_KEY, discontinuedDismissKey(retirement))
+  dismissNotification(DISCONTINUED_TOAST_ID)
+}
+
+/**
+ * The discontinued retirement tier surfaces as a warning toast on check — no
+ * download is ever offered. Suppressed once dismissed for this channel
+ * revision; a fresh retirement re-notifies.
+ */
+function maybeNotifyDiscontinued(retirement: NonNullable<DesktopUpdateStatus['retirement']>): void {
+  if (retirement.state !== 'discontinued') {
+    return
+  }
+
+  if (storedString(DISCONTINUED_DISMISS_KEY) === discontinuedDismissKey(retirement)) {
+    return
+  }
+
+  notify({
+    action: {
+      label: translateNow('notifications.seeWhatsNew'),
+      onClick: () => openUpdateOverlayFor('client')
+    },
+    durationMs: 0,
+    icon: 'warning',
+    id: DISCONTINUED_TOAST_ID,
+    kind: 'warning',
+    message: translateNow('updates.discontinuedBody'),
+    onDismiss: () => dismissDiscontinuedNotice(retirement),
+    title: translateNow('updates.discontinuedTitle')
   })
 }
 
@@ -366,7 +413,9 @@ export async function refreshDesktopVersion(): Promise<DesktopVersionInfo | null
     const connection = $connection.get()
     const next = await window.hermesDesktop?.getVersion?.({ ...connectionScoped(), ...profileScoped() })
 
-    if ($connection.get() !== connection) { return null }
+    if ($connection.get() !== connection) {
+      return null
+    }
 
     if (next) {
       $desktopVersion.set(next)
@@ -445,6 +494,11 @@ export async function checkUpdates({ force = false }: UpdateCheckOptions = {}): 
   try {
     const status = await bridge.check({ force })
     $updateStatus.set(status)
+
+    if (status.retirement) {
+      maybeNotifyDiscontinued(status.retirement)
+    }
+
     maybeNotifyUpdateAvailable(status, 'client')
     void refreshDesktopVersion()
 
@@ -469,6 +523,12 @@ export async function checkUpdates({ force = false }: UpdateCheckOptions = {}): 
 }
 
 export async function applyUpdates(opts: DesktopUpdateApplyOptions = {}): Promise<DesktopUpdateApplyResult> {
+  if ($updateStatus.get()?.retirement) {
+    openUpdateOverlayFor('client')
+
+    return { ok: false, error: 'retirement-blocked' }
+  }
+
   const bridge = window.hermesDesktop?.updates
 
   if (!bridge) {
@@ -541,7 +601,10 @@ export async function applyUpdates(opts: DesktopUpdateApplyOptions = {}): Promis
         setUpdateOverlayOpen(false)
         resetUpdateApplyState()
 
-        if (result.updateAvailable === false) { return result }
+        if (result.updateAvailable === false) {
+          return result
+        }
+
         notify({
           durationMs: 8000,
           id: UPDATE_TOAST_ID,
@@ -559,8 +622,7 @@ export async function applyUpdates(opts: DesktopUpdateApplyOptions = {}): Promis
           applying: false,
           stage: 'error',
           error: result?.error ?? 'apply-failed',
-          message: result?.message ?? translateNow('updates.errorBody'),
-          blockers: result?.blockers ?? null
+          message: result?.message ?? translateNow('updates.errorBody')
         })
       }
     }

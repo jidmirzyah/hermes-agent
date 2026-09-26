@@ -30,8 +30,7 @@ class _Result:
         return {"name": self.name, "class": self.klass}
 
 
-def _no_results(plugins_dir, **k):
-    return []
+
 
 
 def test_clock_gate_due_when_never_run(homed):
@@ -74,78 +73,44 @@ def test_run_writes_receipt_and_marker(homed):
     assert len(calls) == 1
 
 
-def test_needs_fixing_logged_not_applied(homed):
+@pytest.mark.parametrize('enabled', [False, True])
+def test_auto_apply_selects_only_updateable_git_and_persists_receipt(homed, enabled, caplog):
+    from pm import receipt
     applied = []
-
-    import pm.receipt as receipt_mod
-
-    monkey = pytest.MonkeyPatch()
-    monkey.setattr(receipt_mod, "begin", lambda kind: None)
-    monkey.setattr(receipt_mod, "finalize", lambda outcome, exit_code=0, **kwargs: None)
-    try:
-        results = cad.run_scheduled_check(
-            run_checks_fn=lambda d: [_Result("plug", needs_fixing="mismatch")],
-            plugins_dir=homed / "plugins",
-            apply_updates_fn=applied.append,
-            now=time.time(),
-        )
-        assert applied == []  # needs-fixing is never auto-applied
-    finally:
-        monkey.undo()
+    rows = [_Result('gitplug', update_available=True),
+            _Result('pipplug', klass='pip', update_available=True),
+            _Result('broken', needs_fixing='mismatch')]
+    cad.run_scheduled_check(run_checks_fn=lambda _: rows, plugins_dir=homed / 'plugins',
+                            apply_updates_fn=applied.append,
+                            config_get=lambda section, key: enabled if key == 'auto_apply' else 24)
+    assert applied == (['gitplug'] if enabled else [])
+    assert receipt.latest()['outcome'] == 'updates-available'
+    assert 'broken' in caplog.text and 'trust-update-url' in caplog.text
 
 
-def test_auto_apply_only_git_rows_and_only_when_opted_in(homed):
-    applied = []
+@pytest.mark.parametrize('failed', [False, True])
+def test_housekeeping_runs_real_cadence_and_backs_off(homed, monkeypatch, caplog, failed):
+    import gateway.run as gateway
+    from hermes_cli import plugins_updates, plugins_cmd
+    from pm import receipt
 
-    import pm.receipt as receipt_mod
-
-    monkey = pytest.MonkeyPatch()
-    monkey.setattr(receipt_mod, "begin", lambda kind: None)
-    monkey.setattr(receipt_mod, "finalize", lambda outcome, exit_code=0, **kwargs: None)
-    try:
-        results = [_Result("gitplug", klass="git", update_available=True),
-                   _Result("pipplug", klass="pip", update_available=True)]
-        # opted OUT: nothing applied
-        cad.run_scheduled_check(
-            run_checks_fn=lambda d: results,
-            plugins_dir=homed / "plugins",
-            apply_updates_fn=applied.append,
-            config_get=lambda s, k: (False if k == "auto_apply" else None),
-            now=time.time(),
-        )
-        assert applied == []  # auto_apply False → nothing
-
-        # opted IN: only the git row applies
-        cad._markers_dir().joinpath("last-run").unlink()
-        cad.run_scheduled_check(
-            run_checks_fn=lambda d: results,
-            plugins_dir=homed / "plugins",
-            apply_updates_fn=applied.append,
-            config_get=lambda s, k: (True if k == "auto_apply" else None),
-            now=time.time(),
-        )
-        assert applied == ["gitplug"]
-    finally:
-        monkey.undo()
-
-
-def test_check_failure_is_never_fatal_and_stamps_marker(homed):
-    import pm.receipt as receipt_mod
-
-    monkey = pytest.MonkeyPatch()
-    monkey.setattr(receipt_mod, "begin", lambda kind: None)
-    monkey.setattr(receipt_mod, "finalize", lambda outcome, exit_code=0, **kwargs: None)
-    try:
-        def boom(d):
-            raise RuntimeError("network down")
-
-        results = cad.run_scheduled_check(
-            run_checks_fn=boom,
-            plugins_dir=homed / "plugins",
-            now=time.time(),
-        )
-        assert results == []
-        # marker stamped → a failing check doesn't hammer the network
-        assert (homed / "plugin-update-checks" / "last-run").is_file()
-    finally:
-        monkey.undo()
+    calls, applied = [], []
+    def checks(directory):
+        calls.append(directory)
+        if failed:
+            raise OSError('offline')
+        return [_Result('plug', update_available=True)]
+    monkeypatch.setattr(plugins_updates, 'run_checks', checks)
+    monkeypatch.setattr(plugins_cmd, '_plugins_dir', lambda: homed / 'plugins')
+    monkeypatch.setattr(plugins_cmd, 'cmd_update', lambda name, **kwargs: applied.append((name, kwargs)))
+    monkeypatch.setattr(cad, 'auto_apply_enabled', lambda *_: True)
+    for _ in range(2):
+        gateway._housekeeping_chore('Plugin update check', gateway._housekeeping_plugin_update_check)
+    assert calls == [homed / 'plugins']
+    assert applied == ([] if failed else [('plug', {'interactive': False})])
+    saved = receipt.latest()
+    assert saved['outcome'] == ('failed' if failed else 'updates-available')
+    assert saved['exit_code'] == int(failed)
+    assert (homed / 'plugin-update-checks/last-run').is_file()
+    if failed:
+        assert saved['warnings'][0]['message'] in caplog.text

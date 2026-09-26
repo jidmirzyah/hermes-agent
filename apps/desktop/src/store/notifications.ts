@@ -1,7 +1,6 @@
 import { atom } from 'nanostores'
 
 import { translateNow } from '@/i18n'
-import { isOutOfSyncRpcParams } from '@/lib/gateway-rpc'
 import { isLocalBackendSlotWaitTimeout, requestPoolLimitsSettings } from '@/store/pool-limits'
 import { requestBackendRestart, requestRoute } from '@/store/recovery-requests'
 
@@ -101,10 +100,6 @@ const MAINTENANCE_ROUTE = '/command-center?section=maintenance'
 
 /** One-click recoveries reused by several rules. */
 export const RECOVERY_ACTIONS = {
-  openUpdates: (): NotificationAction => ({
-    label: translateNow('notifications.updateHermes'),
-    onClick: () => void import('@/store/updates').then(({ openUpdatesWindow }) => openUpdatesWindow())
-  }),
   restartHermes: (): NotificationAction => ({
     label: translateNow('notifications.actions.restartHermes'),
     onClick: requestBackendRestart
@@ -184,11 +179,6 @@ const ERROR_SUMMARIES: ErrorSummaryRule[] = [
     summarize: () => translateNow('notifications.errors.microphonePermission')
   },
   {
-    test: msg => isOutOfSyncRpcParams(msg),
-    summarize: () => translateNow('notifications.errors.rpcOutOfSync'),
-    action: () => RECOVERY_ACTIONS.openUpdates()
-  },
-  {
     test: msg => /Restart required:/i.test(msg),
     summarize: () => translateNow('notifications.errors.codeSkewRestartRequired'),
     action: () => RECOVERY_ACTIONS.restartHermes()
@@ -261,7 +251,9 @@ export function notify(input: NotificationInput): string {
 function logErrorToDesktopLog(error: unknown, fallback: string): void {
   try {
     const label: string = new URLSearchParams(window.location.search).get('win') ?? 'main'
-    const raw: string = error instanceof Error ? (error.stack ?? error.message) : typeof error === 'string' ? error : fallback
+
+    const raw: string =
+      error instanceof Error ? (error.stack ?? error.message) : typeof error === 'string' ? error : fallback
 
     window.hermesDesktop?.logLine?.(`[renderer error:${label}] ${fallback}: ${raw}`)
   } catch {
@@ -269,7 +261,7 @@ function logErrorToDesktopLog(error: unknown, fallback: string): void {
   }
 }
 
-export function notifyError(error: unknown, fallback: string): string {
+export function notifyError(error: unknown, fallback: string, options: { action?: NotificationAction } = {}): string {
   const readable = readableError(error, fallback)
   const poolSlotTimeout = isLocalBackendSlotWaitTimeout(error)
   logErrorToDesktopLog(error, fallback)
@@ -281,8 +273,6 @@ export function notifyError(error: unknown, fallback: string): string {
           onClick: requestPoolLimitsSettings
         }
       : (options.action ?? readable.action),
-    // A caller that can fire again for the same cause names its toast, so the repeat replaces it.
-    id: options.id,
     kind: 'error',
     title: fallback,
     message: poolSlotTimeout ? translateNow('desktop.poolSlotTimeoutBody') : readable.message,

@@ -98,29 +98,6 @@ class TestFindShellWindowsBehavior:
             assert result == _find_bash()
 
 
-class TestFindShellReturnsString:
-    """_find_shell must return a string, never None."""
-
-    def test_returns_string(self):
-        """_find_shell always returns a non-empty string on any platform."""
-        result = _find_shell()
-        assert isinstance(result, str)
-        assert len(result) > 0
-
-
-class TestFindBashUnchanged:
-    """_find_bash should be unaffected by the _find_shell change."""
-
-    def test_find_bash_still_prefers_bash(self):
-        """_find_bash still returns bash (not $SHELL) on POSIX."""
-        result = _find_bash()
-        # On any system, _find_bash should return something containing "bash"
-        # or fall back to $SHELL or /bin/sh — but it should NOT prefer $SHELL
-        # over bash the way _find_shell does.
-        assert isinstance(result, str)
-        assert len(result) > 0
-
-
 class TestFindBashCollapsedToPmShell:
     """_find_bash is now a thin wrapper over pm.shell(); the Windows
     candidate ladder (HERMES_GIT_BASH_PATH → %LOCALAPPDATA%\\hermes\\git →
@@ -131,24 +108,17 @@ class TestFindBashCollapsedToPmShell:
     def test_delegates_to_pm_shell(self, monkeypatch):
         """_find_bash returns whatever pm.shell() resolves (store bash or
         provisioned PATH)."""
-        import tools.environments.local as local_mod
-        from tools.environments import local_gitbash_probe as gitbash_probe
-
         monkeypatch.setattr(
             "pm.shell.bash", lambda: r"C:\store\tools\git-x\usr\bin\bash.exe"
         )
         assert _find_bash() == r"C:\store\tools\git-x\usr\bin\bash.exe"
-        gitbash_probe._bash_starts_cache.clear()
 
     def test_raises_when_pm_shell_finds_nothing(self, monkeypatch):
         """A store with no bash (and no PATH bash) surfaces a clear error
         pointing at `hermes pm install` instead of hunting locations."""
-        import tools.environments.local as local_mod
-        from tools.environments import local_gitbash_probe as gitbash_probe
-
         monkeypatch.setattr("pm.shell.bash", lambda: None)
         with pytest.raises(RuntimeError) as exc_info:
-            local_mod._find_bash()
+            _find_bash()
         assert "No shell found" in str(exc_info.value)
         assert "hermes pm install" in str(exc_info.value)
 

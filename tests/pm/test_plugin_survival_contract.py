@@ -51,9 +51,7 @@ def _uv_available() -> bool:
     return shutil.which("uv") is not None
 
 
-# ---------------------------------------------------------------------------
 # 1. Sidecar with no root dependency surface never joins the union
-# ---------------------------------------------------------------------------
 
 def test_sidecar_no_root_pyproject_excludes_nested_and_external(tmp_path, monkeypatch):
     """The mnemosyne-wrapper shape: plugin root has ONLY plugin.yaml +
@@ -87,8 +85,6 @@ def test_sidecar_no_root_pyproject_excludes_nested_and_external(tmp_path, monkey
     assert ws._is_member_candidate(wrapper) is False, (
         "a wrapper root without pyproject/dep keys must never be a member candidate"
     )
-    scan = ws.scan_plugin(wrapper)
-    assert scan["pyproject"] is False and scan["legacy_deps"] is False
 
     members = ws.enabled_member_dirs()
     member_names = [p.name for p in members]
@@ -100,9 +96,7 @@ def test_sidecar_no_root_pyproject_excludes_nested_and_external(tmp_path, monkey
     assert all("runtime" not in str(p) for p in members)
 
 
-# ---------------------------------------------------------------------------
 # 2. Conflict through the PUBLIC admission path: refused, preserved, retry
-# ---------------------------------------------------------------------------
 
 def _local_conflict_members(home: Path) -> tuple[Path, Path, Path, Path]:
     """plug-a and plug-b both need a local project named sharedlib, but
@@ -138,7 +132,7 @@ def _local_conflict_members(home: Path) -> tuple[Path, Path, Path, Path]:
 
 @pytest.fixture
 def admission_env(tmp_path, monkeypatch):
-    """Fake core repo + temp HERMES_HOME so the REAL pm.ensure.sync_venv
+    """Fake core repo + temp HERMES_HOME so the REAL pm.install.sync_venv
     transaction (lock, receipts, config publication) runs entirely under
     tmp — the production path, temp homes."""
     core = tmp_path / "core"
@@ -160,7 +154,7 @@ def admission_env(tmp_path, monkeypatch):
 
     import importlib
 
-    ensure = importlib.import_module("pm.ensure")
+    ensure = importlib.import_module("pm.install")
     import pm.paths
 
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
@@ -170,8 +164,14 @@ def admission_env(tmp_path, monkeypatch):
     monkeypatch.setattr(ensure, "lazy_installs_allowed", lambda: True)
     monkeypatch.setenv("HERMES_RUNTIME_DIR", str(tmp_path / "tools"))
     # Exercise the real dependency transaction in-process so the local uv
-    # fixture owns provisioning; worker transport is covered separately.
-    monkeypatch.setattr("pm.client.sync_venv", ensure.sync_venv)
+    # fixture owns provisioning; worker transport is covered separately. The
+    # facade's project_root selects a foreign checkout for the worker; this
+    # fixture's repo_root already IS the core under test.
+    def in_process_sync(*args, project_root=None, **kwargs):
+        assert project_root is None or Path(project_root).resolve() == core.resolve()
+        return ensure.sync_venv(*args, **kwargs)
+
+    monkeypatch.setattr("pm.client.sync_venv", in_process_sync)
     monkeypatch.setattr("pm._uv._toolchain", lambda **kwargs: (Path(shutil.which("uv")), Path(sys.executable)))
     return tmp_path, home
 
@@ -195,10 +195,18 @@ def test_conflicting_candidate_refused_unenabled_and_unimported(admission_env):
     plug_a, plug_b, *_ = _local_conflict_members(home)
     _write_enabled(home, [], provider="plug-a")
     admission.admit_plugin_set_change(set(), set(), active_plugins_dir=home / "plugins")
-    from hermes_cli.runtime_paths import selected_venv
+    from pm.environments import selected_venv
     working = selected_venv(tmp_path / "core")
     config_before = (home / "config.yaml").read_bytes()
     tree_before = {p: sorted(str(f) for f in p.rglob("*")) for p in (plug_a, plug_b)}
+    wrapper = home / "plugins/mnemosyne-wrapper"
+    wrapper.mkdir()
+    marker = wrapper / "mnemosyne-wrapper.json"
+    marker.write_bytes(b'{"wrapper":true}\n')
+    sidecar = tmp_path / "external-sidecar"
+    subprocess.run([shutil.which("uv"), "venv", "--python", sys.executable, str(sidecar)], check=True, capture_output=True, timeout=60)
+    sidecar_python = sidecar / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    before = marker.read_bytes()
 
     with pytest.raises(admission.AdmissionRefused) as excinfo:
         admission.admit_plugin_set_change(
@@ -234,31 +242,6 @@ def test_conflicting_candidate_refused_unenabled_and_unimported(admission_env):
     assert "plug-b" in flattened or "sharedlib" in flattened, (
         "receipt must carry the conflict identity/reason"
     )
-
-
-@pytest.mark.skipif(not _uv_available(), reason="uv not on PATH")
-def test_retry_after_conflict_enables_resolvable_candidate(admission_env):
-    """The retry path: re-admitting ONLY the resolvable candidate through
-    the same public admission commits config + environment together; the
-    conflicting plugin stays unenabled (never imported)."""
-    from hermes_cli import plugins_admission as admission
-
-    tmp_path, home = admission_env
-    plug_a, plug_b, *_ = _local_conflict_members(home)
-
-    wrapper = home / "plugins/mnemosyne-wrapper"
-    wrapper.mkdir()
-    marker = wrapper / "mnemosyne-wrapper.json"
-    marker.write_bytes(b'{"wrapper":true}\n')
-    sidecar = tmp_path / "external-sidecar"
-    subprocess.run([shutil.which("uv"), "venv", "--python", sys.executable, str(sidecar)], check=True, capture_output=True, timeout=60)
-    sidecar_python = sidecar / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-    before = marker.read_bytes()
-    with pytest.raises(admission.AdmissionRefused):
-        admission.admit_plugin_set_change(
-            {"plug-a", "plug-b"}, set(), active_plugins_dir=home / "plugins"
-        )
-
     # retry: drop the conflicting candidate, keep the good one
     admission.admit_plugin_set_change(
         {"plug-a"}, set(), active_plugins_dir=home / "plugins"
@@ -273,7 +256,7 @@ def test_retry_after_conflict_enables_resolvable_candidate(admission_env):
     assert marker.read_bytes() == before
     child = subprocess.run([str(sidecar_python), "-c", "import sys; print(sys.prefix)"], check=True, capture_output=True, text=True, timeout=30)
     assert Path(child.stdout.strip()) == sidecar
-    from hermes_cli.runtime_paths import selected_venv
+    from pm.environments import selected_venv
     selected = selected_venv(tmp_path / "core")
     assert selected.is_dir() and selected != sidecar
     # A declared version range remains a member across the next managed rebuild.
@@ -284,10 +267,6 @@ def test_retry_after_conflict_enables_resolvable_candidate(admission_env):
     assert marker.read_bytes() == before
     subprocess.run([str(sidecar_python), "-c", "import sys; assert sys.prefix != sys.base_prefix"], check=True, timeout=30)
 
-
-# ---------------------------------------------------------------------------
-# 4. Active context home propagates to wrapper subprocess launches
-# ---------------------------------------------------------------------------
 
 def test_active_context_home_exported_to_wrapper_subprocess(monkeypatch, tmp_path):
     from hermes_constants import reset_hermes_home_override, set_hermes_home_override

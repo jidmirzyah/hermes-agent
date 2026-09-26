@@ -1,24 +1,27 @@
 """A real bootstrap reader pins its generation before GC can select victims."""
 import json
 import os
-from pathlib import Path
 import subprocess
 import sys
 
 
 def test_bootstrap_lease_survives_selection_change(tmp_path, monkeypatch):
-    from hermes_cli.runtime_paths import install_state_dir, runtime_facts_path, site_packages
+    from pm.environments import install_state_dir, runtime_facts_path, site_packages
     from hermes_cli.runtime_state import collect_generations
 
     repo = tmp_path / "repo"
     repo.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
     state = install_state_dir(repo)
-    for name in ("first", "second"):
+    for name in ("first", "second", "unused"):
         venv = state / "environments" / name / "venv"
-        site_packages(venv).mkdir(parents=True)
+        venv.mkdir(parents=True)
+        # pyvenv.cfg first: the layout keys its site-packages path off the recorded version.
         (venv / "pyvenv.cfg").write_text("version = 3.11")
+        site_packages(venv).mkdir(parents=True)
         (venv.parent / ".lease-managed").touch()
+    legacy = state / "environments" / "old-unleased"
+    legacy.mkdir()
 
     def select(name):
         environment = state / "environments" / name / "venv"
@@ -29,7 +32,7 @@ def test_bootstrap_lease_survives_selection_change(tmp_path, monkeypatch):
     code = '''
 import sys
 from pathlib import Path
-from hermes_cli.runtime_paths import activate_dependencies
+from pm.environments import activate_dependencies
 activate_dependencies(Path(sys.argv[1]))
 print("ready", flush=True)
 sys.stdin.readline()
@@ -41,9 +44,12 @@ sys.stdin.readline()
         select("second")
         collect_generations(repo, min_age_seconds=0)
         assert first.is_dir()
+        assert not (state / "environments" / "unused").exists()
+        assert legacy.is_dir()
     finally:
         child.communicate("done\n", timeout=15)
     assert child.returncode == 0
     collect_generations(repo, min_age_seconds=0)
     assert not first.exists()
     assert (state / "environments" / "second").is_dir()
+    assert legacy.is_dir()

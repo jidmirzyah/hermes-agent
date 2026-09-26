@@ -10,8 +10,8 @@ from pathlib import Path
 
 def build_identity(repo: Path, builder: str, platform_tag: str, python_abi: str) -> dict[str, str]:
     files = (
-        "uv.lock", "pyproject.toml", "pm/lock.json",
-        "scripts/termux/runtime_libs.json", "scripts/termux/build_config.sh",
+        "uv.lock", "pyproject.toml", "pm/lock.json", "pm/termux_runtime_libs.json",
+        "scripts/termux/build_config.sh",
         "scripts/termux/termux_build.sh", "scripts/termux/build_wheels.py",
         "scripts/termux/retag_wheel.py", "scripts/termux/python_linkage.py",
         "scripts/termux/wheelhouse_cache.py", "scripts/termux/build_environment.py",
@@ -53,7 +53,7 @@ def write_manifest(payload: Path, identity: dict[str, str], **metadata: str) -> 
 
 def is_usable(payload: Path, identity: dict[str, str]) -> bool:
     try:
-        index = json.loads((payload / "index.json").read_text(encoding="utf-8"))
+        index = json.loads((payload / "index.json").read_text(encoding="utf-8-sig"))
         if index["schemaVersion"] != 2 or index["inputs"] != identity:
             return False
         if index["resolvedSha256"] != _sha256(payload / ".work/resolved.txt"):

@@ -68,10 +68,6 @@ _SCHEMA_OVERRIDES: Dict[str, Dict[str, Any]] = {
         *_timezone_options(), searchable=True, clearable=True,
     ),
     "memory.provider": _select("Memory provider plugin", *_memory_provider_options()),
-    "wake_word.provider": _select(
-        "Wake engine. Auto selects a platform-supported engine; Porcupine requires PORCUPINE_ACCESS_KEY.",
-        "auto", *_PROVIDER_PREFERENCE,
-    ),
     "model": {
         "type": "string",
         "description": "Default model (e.g. anthropic/claude-sonnet-4.6)",
@@ -113,6 +109,10 @@ _SCHEMA_OVERRIDES: Dict[str, Dict[str, Any]] = {
         ),
         "category": "security",
     },
+    "wake_word.provider": _select(
+        "Wake engine. Auto selects a platform-supported engine; Porcupine requires PORCUPINE_ACCESS_KEY.",
+        "auto", *_PROVIDER_PREFERENCE,
+    ),
     "tts.provider": _select(
         "Text-to-speech provider",
         "edge", "elevenlabs", "openai", "xai", "minimax", "mistral", "gemini", "neutts", "kittentts", "piper",

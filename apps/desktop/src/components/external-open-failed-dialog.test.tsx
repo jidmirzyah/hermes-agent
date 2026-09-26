@@ -45,45 +45,22 @@ afterEach(() => {
 })
 
 describe('ExternalOpenFailedDialog', () => {
-  it('subscribes to open-failure events on mount', () => {
-    const { onExternalOpenFailed } = installBridge()
+  it('subscribes, displays, copies and dismisses an external-open failure', async (): Promise<void> => {
+    const { onExternalOpenFailed, writeClipboard }: ReturnType<typeof installBridge> = installBridge()
     render(<ExternalOpenFailedDialog />)
     expect(onExternalOpenFailed).toHaveBeenCalledTimes(1)
-    expect(typeof onExternalOpenFailed.mock.calls[0][0]).toBe('function')
-  })
-
-  it('shows the URL when an open-failure event fires', () => {
-    const { onExternalOpenFailed } = installBridge()
-    render(<ExternalOpenFailedDialog />)
-
-    const listener = onExternalOpenFailed.mock.calls[0][0]
     expect(screen.queryByText('https://example.com/dead')).toBeNull()
+    const listener: (payload: { url: string; message?: string }) => void = onExternalOpenFailed.mock.calls[0][0]
     fail(listener, 'https://example.com/dead')
-    expect(screen.getByText('https://example.com/dead')).not.toBeNull()
-  })
-
-  it('copies the URL when the copy action is used', async () => {
-    const { onExternalOpenFailed, writeClipboard } = installBridge()
-    render(<ExternalOpenFailedDialog />)
-
-    const listener = onExternalOpenFailed.mock.calls[0][0]
-    fail(listener, 'https://example.com/dead')
-
+    expect(screen.getByText('https://example.com/dead')).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: /copy/i }))
-
-    await waitFor(() => expect(writeClipboard).toHaveBeenCalledWith('https://example.com/dead'))
-  })
-
-  it('closes when dismissed', async () => {
-    const { onExternalOpenFailed } = installBridge()
-    render(<ExternalOpenFailedDialog />)
-
-    const listener = onExternalOpenFailed.mock.calls[0][0]
-    fail(listener, 'https://example.com/dead')
-
+    await waitFor((): void => {
+      expect(writeClipboard).toHaveBeenCalledWith('https://example.com/dead')
+    })
     fireEvent.click(screen.getByRole('button', { name: 'Close' }))
-
-    await waitFor(() => expect(screen.queryByText('https://example.com/dead')).toBeNull())
+    await waitFor((): void => {
+      expect(screen.queryByText('https://example.com/dead')).toBeNull()
+    })
   })
 
   it('renders nothing in a HUD window', () => {

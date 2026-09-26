@@ -8,24 +8,28 @@ import sys
 import pytest
 
 from hermes_cli import _launchers
-from hermes_cli.runtime_paths import install_state_dir, site_packages
+from pm.environments import install_state_dir, site_packages
 
 
 @pytest.mark.platforms("windows")
 def test_minted_launcher_reads_current_selection_and_editable_members(tmp_path, monkeypatch):
-    from hermes_cli import runtime_paths, runtime_state
+    from pm import environments as runtime_paths
+    from hermes_cli import runtime_state
     import hermes_constants
 
     root = tmp_path / "repo"
     package = root / "hermes_cli"
     package.mkdir(parents=True)
     (package / "__init__.py").write_text("")
+    pm_package = root / "pm"
+    pm_package.mkdir()
+    (pm_package / "__init__.py").write_text("")
     # Real selection code, with a fixture entry point rather than a live CLI.
-    (package / "runtime_paths.py").write_bytes(Path(runtime_paths.__file__).read_bytes())
+    (pm_package / "environments.py").write_bytes(Path(runtime_paths.__file__).read_bytes())
     (package / "runtime_state.py").write_bytes(Path(runtime_state.__file__).read_bytes())
     (root / "hermes_constants.py").write_bytes(Path(hermes_constants.__file__).read_bytes())
     (root / "hermes_bootstrap.py").write_text(
-        "from pathlib import Path\nfrom hermes_cli.runtime_paths import activate_dependencies\n"
+        "from pathlib import Path\nfrom pm.environments import activate_dependencies\n"
         "activate_dependencies(Path(__file__).resolve().parent)\n"
     )
     (package / "main.py").write_text(

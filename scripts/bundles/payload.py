@@ -16,19 +16,55 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
-def snapshot(repo: Path, ref: str, destination: Path) -> None:
+# Snapshot dirs the sealed agent payload never reads. Tests, docs and CI
+# definitions never ship; the frontend/desktop sources and build scripts are
+# prebuilt by CI into staged products (AgentInputs.frontends) — a sealed
+# payload never re-enters the source-build graph (is_bundled_payload routes
+# updates to the channel updater), and linux_desktop_entry degrades to the
+# themed icon when apps/desktop/assets is absent. Excluded here means:
+# not packaged, not compiled, not baked. Frontend product staging
+# (scripts/bundles/stage.py) needs its full tree and passes no exclusions.
+INERT_SNAPSHOT_DIRS = (
+    "tests", "tests-js", "website", "evals", ".github", "nix", "docker",
+    "apps", "ui-tui", "web", "scripts",
+)
+
+
+def snapshot(repo: Path, ref: str, destination: Path, exclude: tuple[str, ...] = ()) -> None:
     """Archive a resolved git revision without carrying checkout metadata."""
     repo, destination = repo.resolve(), destination.resolve()
     if repo == destination or repo.is_relative_to(destination):
         raise ValueError("the snapshot destination must not contain the source checkout")
     with tempfile.TemporaryDirectory(prefix="hermes-archive-") as temp:
         archive = Path(temp) / "source.tar"
-        subprocess.run(["git", "archive", "--format=tar", "--output", str(archive), ref], cwd=repo, check=True)
+        pathspecs = [f":(exclude){name}" for name in exclude]
+        subprocess.run(
+            ["git", "archive", "--format=tar", "--output", str(archive), ref, "--", *pathspecs],
+            cwd=repo, check=True)
         if destination.exists():
             shutil.rmtree(destination)
         destination.mkdir(parents=True)
         with tarfile.open(archive) as source:
             source.extractall(destination, filter="data")
+
+
+def _payload_file(root: Path, relative: str) -> Path:
+    path = root / relative
+    if path.is_symlink() or not path.resolve().is_relative_to(root.resolve()):
+        raise ValueError(f"metadata path escapes payload or is symlinked: {path}")
+    return path
+
+
+def _share_metadata(path: Path) -> None:
+    # Atomic PM publication stays private; only packaged, non-secret records
+    # cross this boundary. Windows installers own their ACL policy.
+    if os.name != "nt":
+        path.chmod(0o644)
+
+
+def _discard_build_locks(root: Path) -> None:
+    for name in ("venv", "pm-runtime"):
+        _payload_file(root, f"{name}/.lock").unlink(missing_ok=True)
 
 
 def record_tools(root: Path, lock_path: Path, target: str, entries: dict[str, str]) -> None:
@@ -37,7 +73,7 @@ def record_tools(root: Path, lock_path: Path, target: str, entries: dict[str, st
     from pm.store import tree_digest
 
     store = root / "tools"
-    facts, lock = Facts(store / "facts.json"), Lockfile(lock_path)
+    facts, lock = Facts(_payload_file(root, "tools/facts.json")), Lockfile(lock_path)
     for name, entry_name in entries.items():
         entry = store / entry_name
         version, artifacts = lock.version(name), lock.artifacts(name, target)
@@ -45,6 +81,8 @@ def record_tools(root: Path, lock_path: Path, target: str, entries: dict[str, st
             raise ValueError(f"incomplete payload tool: {name}")
         facts.record(name, version, entry_name, get_package(name).env(entry, target), store,
                      target=target, artifacts=[a["sha256"] for a in artifacts], digest=tree_digest(entry))
+    if entries:
+        _share_metadata(facts.path)
 
 
 def rehash_tools(root: Path) -> int:
@@ -52,7 +90,10 @@ def rehash_tools(root: Path) -> int:
     from pm.lock import Facts
 
     store = root / "tools"
-    return Facts(store / "facts.json", strict=True).refresh_digests(store)
+    facts = Facts(_payload_file(root, "tools/facts.json"), strict=True)
+    count = facts.refresh_digests(store)
+    _share_metadata(facts.path)
+    return count
 
 
 def seal_pm_runtime(root: Path, python: Path) -> dict:
@@ -72,8 +113,9 @@ def seal_pm_runtime(root: Path, python: Path) -> dict:
         "python": Path(os.path.relpath(python, runtime)).as_posix(),
         "sitePackages": sites[0].relative_to(runtime).as_posix(),
     }
-    cfg = runtime / "pyvenv.cfg"
-    lines = cfg.read_text(encoding="utf-8").splitlines()
+    cfg = _payload_file(root, "pm-runtime/pyvenv.cfg")
+    marker_path = _payload_file(root, "pm-runtime/pm-runtime.json")
+    lines = cfg.read_text(encoding="utf-8-sig").splitlines()
     lines = [line for line in lines if line.partition("=")[0].strip() not in
              {"home", "executable", "base-executable", "base-prefix", "base-exec-prefix", "command"}]
     lines.insert(0, f"home = {os.path.relpath(python.parent, runtime)}")
@@ -86,13 +128,16 @@ def seal_pm_runtime(root: Path, python: Path) -> dict:
             if entry.is_file():
                 entry.unlink()
     _relativize_bin_links(root, runtime / "bin")
-    (runtime / "pm-runtime.json").write_text(json.dumps(marker, indent=2) + "\n", encoding="utf-8")
+    marker_path.write_text(json.dumps(marker, indent=2) + "\n", encoding="utf-8")
+    _share_metadata(marker_path)
+    _discard_build_locks(root)
     return marker
 
 
 def relativize_links(root: Path) -> int:
     """Only dependency-venv links move; framework links belong to codesign."""
     root = root.resolve()
+    _discard_build_locks(root)
     return sum(_relativize_bin_links(root, root / name / "bin") for name in ("venv", "pm-runtime"))
 
 

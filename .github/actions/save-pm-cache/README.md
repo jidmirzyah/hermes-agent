@@ -1,8 +1,8 @@
 # Bundle dependency caches
 
 `setup-pm` restores uv's real cache, not the installed virtual environment.
-Its fallback keys retain the native target, OS version, Python version, and
-pruning mode. A metadata or dependency change can reuse compatible wheels;
+Its fallback keys retain the native target, OS version, and Python version.
+A metadata or dependency change can reuse compatible wheels;
 uv still resolves and installs from the frozen project lock.
 
 Bundle jobs set `save-python-cache: false` and call `save-pm-cache` after their
@@ -17,15 +17,19 @@ different contents under the same key.
 Restore tries the current dependency set's rolling snapshots first, then the
 compatible v2 prefix. There is no fallback to older cache formats. This lets
 a retry add wheels to a snapshot saved by a partially failed build. The ordinary
-automatic cache path and its exact-hit smoke tests remain available.
+automatic cache path remains available.
 
-Smoke namespaces precede the native/dependency identity, outside production's
-restore prefix. PM Toolchain cleanup removes its run-scoped snapshots.
+Suffixed namespaces precede the native/dependency identity, outside production's
+restore prefix.
 
-Before saving, `python -m pm.build_env --prune-cache --cache PATH` removes
-dangling entries. It does not use `--ci`: that option discards downloaded wheels, while bundles copy the full
-cache for offline dependency installation. Pruning happens after payload staging
-and packaging, and it does not change the staged payload.
+Before saving, `python -m pm.build_env --exact-lock --cache PATH --lock-source REPO`
+deletes every entry the project's `uv.lock` cannot resolve. It keeps downloaded
+wheels the lock resolves (bundles copy the full cache for offline dependency
+installation) — `uv cache prune --ci` would discard them. Pruning happens after
+payload staging and packaging, and it does not change the staged payload.
+The same lock-exactness contract governs the bundle ship gate
+(`stage_uv_cache`) and CI's rolling snapshots, so no snapshot accumulates
+sediment for superseded pins.
 
 This is not a lockfile-aware or size-bounded cache. Old, still-referenced package
 versions can remain inside a snapshot and be copied forward. GitHub evicts whole

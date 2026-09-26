@@ -21,6 +21,39 @@ build or a target-native runtime.
 builders, they can access package registries. There is no universal installer,
 all-products dispatcher, or cross-platform Python environment.
 
+## Complete desktop preparation
+
+`../bundles/desktop.py` composes these providers for local and CI packaging:
+
+```sh
+python scripts/bundles/desktop.py --tag vX.Y.Z --variant bundled --prepare-only \
+  --work "$PWD/.build/desktop-job" --cache "$PWD/.cache/desktop-inputs"
+python scripts/bundles/desktop.py --prepared "$PWD/.build/desktop-job/prepared.json"
+```
+
+Start from a clean checkout at that tag (or use `--commit FULL_SHA`). A host
+Python and Git bootstrap preparation; PM selects the pinned tools. Native
+compiler/SDK prerequisites are still platform-specific. Omitting `--prepare-only`
+runs both phases. Defaults use the same `.build/desktop-job` and
+`.cache/desktop-inputs` roots. Do not pre-create the work directory: preparation
+claims it and publishes its job-local path selection only after success.
+
+Preparation covers the exact workspace union, icon Python environment, runtime
+and independent PM dependencies, Electron-native bindings, Electron archive and
+selected packaging utilities. Light omits the runtime and TUI/web union.
+Compilation and packaging consume those inputs, refusing missing/stale inputs
+rather than acquiring replacements. The result is tied to this source revision,
+target and absolute paths; it must not be restored as an authoritative CI cache.
+Stable bundled/Store variants can share it. Product compilation still reruns.
+
+The desktop cache action derives reusable paths from provider declarations and
+saves them after preparation, before compilation/signing. It excludes job-local
+environments and products. Native wheel reuse additionally depends on measured
+compiler/SDK inputs. Signing-result caches remain separate. Strict dependency
+consumption is not offline signing: timestamps, notarization and publication can
+still require network access. Native unsigned network-denied packaging and final
+signed launch acceptance are distinct verification gates.
+
 ## Prepared JavaScript workspace
 
 Run commands from the repository root. Replace the absolute example paths with
@@ -46,8 +79,22 @@ The prepared source needs these inputs:
 
 Request the complete workspace union once. A later, narrower `npm ci` can
 remove dependencies that another product needs. This provider modifies the
-prepared workspace. It does not build a frontend or publish a completion stamp.
+prepared workspace. It does not build a frontend.
 Nix supplies dependencies through `importNpmLock` instead of this command.
+
+`--reuse` opts into reusing a completed dependency install. Desktop bundles use
+this with CI's cached `node_modules` tree. The receipt lives inside that tree
+and matches the lockfile, local package manifests, project npm configuration,
+Node/npm versions, OS/architecture, and exact workspace union. It also checks
+npm's installed-tree lock and the presence of its recorded package directories.
+A missing or mismatched receipt runs a clean `npm ci`; failed installs cannot
+leave a reusable receipt. Omit `--reuse` to force a clean dependency install.
+Source launchers add `--no-install` when PM's lazy-install policy is disabled.
+That mode still reuses a matching completed receipt, but rejects stale or missing
+dependencies before mutating the tree. Explicit build/update operations may install.
+The receipt does not validate arbitrary edits inside installed packages and
+never skips product compilation. CI saves the prepared tree before packaging
+can mutate it, and before unrelated build/signing failures can discard it.
 
 ## Frontend products
 
@@ -68,8 +115,35 @@ node scripts/build/desktop.mjs --source /work/source \
 
 Each output is the product directory itself. The desktop output is a `dist`
 directory, not an application package. The exported functions are `buildTui`,
-`buildWeb`, and `buildDesktop`. They return output paths, not a new provenance
-manifest.
+`buildWeb`, and `buildDesktop`. They return output paths and publish the build-input
+receipt described below.
+
+Each compiler publishes `hermes-build.json` inside its output (inside `dist/`
+for TUI). `freshness.mjs` owns this receipt and all source input selection.
+TUI inputs are its source tree, the Ink source alias, shared sources, their
+manifests and TypeScript configuration, dependency locks, and its compiler and
+shared compiler helpers. Tests, workspace documentation, dependency-provider
+recipes, and other products' compiler recipes do not invalidate the TUI.
+It records product/host identity, content hashes of workspace/shared sources and
+build inputs, and the exact supplied icon directory, desktop install stamp, and
+native-dependency tree. Inputs are checked again before publication: a concurrent
+input change fails the build and preserves the previous output. Output validation
+checks renderer/main/preload/public bytes and the native file inventory; native
+bytes may change through signing after compilation. Native ABI verification remains
+with the native provider and desktop compiler.
+
+Source launchers query this owner without provisioning tools:
+
+```sh
+node scripts/build/freshness.mjs --source /work/source --product web --out /work/products/web
+node scripts/build/freshness.mjs --source /work/source --product tui --out /work/products/tui/dist
+```
+
+The result is a JSON boolean. Missing receipts, changed inputs (including supplied
+inputs outside source), missing prepared trees, or damaged outputs are stale.
+Receipts describe a source build, not a portable dependency cache; immutable
+distributions use their existing prebuilt launch path instead. They replace the
+old Python per-profile hashes and TUI mtime lists, not PM's dependency receipts.
 
 The compilers resolve modules from the supplied workspace. They do not run
 npm, uv, PM installation, or icon preparation. TypeScript/Vite scratch files
@@ -83,6 +157,10 @@ marker. Files, symlinks, and source directories are rejected. The exact npm
 destinations (`ui-tui/dist`, `hermes_cli/web_dist`, `apps/desktop/dist`, and
 `apps/desktop/build/native-deps`) remain rebuildable without a prior marker.
 Other in-tree products live beneath `.build/` or `apps/desktop/build/products/`.
+`frontend-common.mjs` classifies these destinations independently of which source
+children already exist, so a warm desktop rebuild uses the same rule as a fresh
+build. Explicit stamp, icon, native-tree and dependency inputs remain protected,
+even when they live beneath a generated destination.
 
 ### Icons and native inputs
 
@@ -113,7 +191,9 @@ node scripts/generate-icons.mjs --source /work/source --out /work/products/icons
 ```
 
 It uses the isolated `icon-build` dependency group and
-`SOURCE/.cache/icon-build`. Both icon commands accept `--check`. Without
+`SOURCE/.cache/icon-build`. Both icon commands accept `--check`. The convenience
+wrapper also accepts `--on-demand`, which preserves PM's lazy-install admission
+policy rather than treating an automatic stale build as explicit installation. Without
 explicit paths, they use the source checkout as the output root.
 
 The desktop native tree contains prepared packages, including `node-pty` with
@@ -142,6 +222,12 @@ npm run build --workspace apps/desktop
 | TUI build | `ui-tui/dist/entry.js` | Existing installed workspace dependencies |
 | Web build | `hermes_cli/web_dist/` | npm `prebuild` prepares icons |
 | Desktop build | `apps/desktop/dist/` | Icons, root-install assertion, install stamp, and native-dependency staging |
+
+Compositions prepare icons once and pass `npm run build -- --icons /prepared/root`
+to the desktop's source-development driver. It copies prepared packaging artwork
+and passes the same root to the compiler. A standalone `npm run build` still
+prepares its own icons. Source desktop launch runs the already-prepared Electron
+binary directly; `--skip-build` does not provision Node, npm, or Electron.
 
 TUI and web scripts support a no-argument development mode. Explicit product
 mode requires the arguments in the earlier table. The desktop product script
@@ -194,9 +280,10 @@ cache. `scripts.bundles.stage --cache PATH` (or `hermes pm bundle --cache PATH`)
 selects the persistent cache explicitly. Direct staging also accepts the
 provider's `UV_CACHE_DIR`; otherwise it uses the output parent's `.uv-cache`.
 The PM runtime and application dependency builds receive this same cache.
-CI's `setup-pm` restores it and `save-pm-cache` prunes/saves it after the build,
-including a failed build. Cache keys use only the v2 namespace, without legacy
-fallback. The packaged `uv-cache/` is a copy, not the writable build cache.
+General PM staging uses `setup-pm` and `save-pm-cache` to restore and save it
+after the build, including failures, under its v2 namespace. Desktop composition
+instead prepares the full dependency set before its single dependency snapshot
+save. The packaged `uv-cache/` is a copy, not the writable build cache.
 
 ### Windows ARM64 build prerequisites
 
@@ -211,7 +298,8 @@ The PowerShell entrypoint accepts `-StateRoot` for persistent build-tool state
 and `-EnvironmentFile` for its prepared environment. The Python adapter passes
 that environment only to build children. Rust's original toolchain homes stay
 explicit, so temporary HOME isolation cannot hide an initialized toolchain.
-CI exports the same compiler, SDK, Rust, and OpenSSL environment to later steps.
+General CI setup exports that compiler environment to later steps. Desktop
+preparation keeps it child-scoped and records native cache identity there.
 Warm OpenSSL reuse validates both static libraries and its development header.
 
 ## Runnable agent assembly

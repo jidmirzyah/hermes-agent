@@ -35,121 +35,130 @@ def release_version(repo: Path, tag: str) -> str:
 
 
 def npm_command(node: str) -> list[str]:
-    # npm.cmd needs cmd.exe; Node's CLI accepts argv directly, including spaces.
-    npm = shutil.which("npm")
-    if not npm:
-        raise FileNotFoundError("npm is required")
-    prefix = Path(npm).resolve().parent
-    candidates = [prefix / "node_modules/npm/bin/npm-cli.js", prefix.parent / "lib/node_modules/npm/bin/npm-cli.js"]
-    for candidate in candidates:
-        if candidate.is_file():
-            return [node, str(candidate)]
-    # POSIX npm is normally a symlink to its CLI file.
-    if os.name != "nt":
-        return [node, str(Path(npm).resolve())]
-    raise FileNotFoundError(f"npm CLI missing beside {npm}")
+    # Dependency preparation and packaging must resolve the same npm identity.
+    return [node, str(ROOT / "scripts/build/node-deps.mjs"), "--npm"]
 
 
 def build(repo: Path, tag: str | None, variant: str, builder_args: list[str],
           commit_build: str | None = None) -> None:
-    from pm.store import current_target
-    from scripts.releases.commit_build import require_commit, version_at
+    from scripts.bundles.desktop_prepare import BuildRequest, prepare
     from scripts.releases.bundle_env import decode
-    from scripts.termux.deb_version import channel_for_tag
+    request = BuildRequest.create(repo, tag=tag, commit=commit_build, variant=variant,
+                                  work=repo / ".build/desktop-job", cache=repo / ".cache/desktop-inputs",
+                                  bundle_env=decode(os.environ.get("HERMES_BUNDLE_ENV_JSON", "")))
+    build_prepared(prepare(request), builder_args)
 
-    # Reject before preparing a payload that cannot use the Store identity.
-    if variant == "store" and (commit_build or not tag or channel_for_tag(tag) != "stable"):
-        raise ValueError("Store packaging requires a stable release tag")
 
-    repo = repo.resolve()
-    bundle_env = decode(os.environ.get("HERMES_BUNDLE_ENV_JSON", ""))
-    if bundle_env and not commit_build:
-        raise ValueError("Bundle environment defaults require a commit build")
-    if commit_build:
-        commit = require_commit(commit_build)
-        if tag:
-            raise ValueError("Commit builds cannot also select a tag")
-        if capture(["git", "rev-parse", "HEAD"], repo) != commit:
-            raise ValueError("the build checkout must be at the commit being built")
-        version = version_at(repo, commit)
-    else:
-        version = release_version(repo, tag)
-        commit = capture(["git", "rev-parse", "--verify", f"refs/tags/{tag}^{{commit}}"], repo)
-        if capture(["git", "rev-parse", "HEAD"], repo) != commit:
-            raise ValueError("the build checkout must be at the release tag")
-    node = shutil.which("node")
-    if not node:
-        raise FileNotFoundError("Node is required")
-    npm = npm_command(node)
-    env = {**os.environ, "CI": "true", "PYTHONUTF8": "1", "GITHUB_SHA": commit,
-           "HERMES_DESKTOP_VARIANT": variant, "HERMES_PYTHON": sys.executable}
-    env["HERMES_BUNDLE_ENV_JSON"] = json.dumps(bundle_env, sort_keys=True)
-    if commit_build:
-        env["HERMES_PAYLOAD_VERSION"] = version
-        env["HERMES_BUILD_COMMIT"] = commit
-        env.pop("HERMES_PAYLOAD_TAG", None)
-        env.pop("GITHUB_REF_NAME", None)
-        env.pop("GITHUB_HEAD_REF", None)
-    else:
-        env.pop("HERMES_BUILD_COMMIT", None)
-        env["HERMES_PAYLOAD_TAG"] = tag
-    target = current_target()
-    node_arch = capture([node, "-p", "process.arch"], repo)
-    if node_arch != target.split("-")[1]:
-        raise ValueError(f"Node {node_arch} does not match build target {target}")
-    if target == "win32-arm64":
-        from scripts.build.windows_deps import prepare_windows_environment
+def build_prepared(path: Path, builder_args: list[str], variant: str | None = None) -> None:
+    from scripts.bundles.desktop_prepare import PreparedDesktop
+    from scripts.bundles.desktop_inputs import build_lock
+    prepared = PreparedDesktop.load(path)
+    with build_lock(prepared.request.source):
+        _build_prepared(prepared, builder_args, variant)
 
-        env = prepare_windows_environment(source=repo, state=repo / "apps/desktop/build/.build-deps", env=env)
-    workspaces = ["apps/desktop"] + ([] if variant == "light" else ["ui-tui", "web"])
-    run([node, "scripts/build/node-deps.mjs", "--source", str(repo),
-         *[arg for workspace in workspaces for arg in ("--workspace", workspace)]], cwd=repo, env=env)
-    payload = repo / "apps/desktop/build/agent-payload"
-    if variant == "light":
-        shutil.rmtree(payload, ignore_errors=True)
-    else:
-        products = repo / "apps/desktop/build/products"
-        run([node, "scripts/generate-icons.mjs", "--source", str(repo), "--out", str(products / "icons")], cwd=repo, env=env)
+
+def _build_prepared(prepared, builder_args: list[str], variant: str | None) -> None:
+    prepared.validate()
+    from scripts.bundles.desktop_inputs import build_environment, packaging_environment, select_variant, validate_builder_identity
+    from scripts.bundles.native import finish_native
+
+    request = prepared.request
+    validate_builder_identity(request, builder_args)
+    if request.channel_request is not None and not request.target.startswith(("darwin-", "win32-")):
+        raise ValueError("channel builds require a supported native macOS or Windows target")
+    variant = select_variant(prepared, variant)
+    repo, node = request.source, str(prepared.node)
+    env = build_environment(prepared, variant, os.environ)
+    desktop = repo / "apps/desktop"
+    targets = {"win32": ["--win", "msix"], "darwin": ["--mac", "dmg", "zip"], "linux": ["--linux", "AppImage"]}[sys.platform]
+    package_args = ["--prepared", str(prepared.packager), "--native-deps", str(prepared.native),
+                    *targets, f"-c.extraMetadata.version={request.version}"]
+    run([node, "scripts/run-electron-builder.mjs", "--validate-only", *package_args, *builder_args],
+        cwd=desktop, env=env)
+    run([node, "scripts/build/node-deps.mjs", "--source", str(repo), "--reuse", "--no-install",
+         "--native-toolchain", prepared.native_toolchain,
+         *[arg for name in request.workspaces() for arg in ("--workspace", name)]], cwd=repo, env=env)
+    products = repo / "apps/desktop/build/products"
+    icons = products / "icons"
+    run([str(prepared.icon_python), "-I", str(repo / "scripts/generate_icons.py"),
+         "--source", str(repo), "--out", str(icons)], cwd=repo, env=env)
+    if variant != "light":
         run([node, "scripts/build/tui.mjs", "--source", str(repo), "--out", str(products / "tui")], cwd=repo, env=env)
         run([node, "scripts/build/web.mjs", "--source", str(repo), "--icons", str(products / "icons"),
              "--out", str(products / "web")], cwd=repo, env=env)
-        run([sys.executable, "-m", "scripts.bundles.stage", "--out", str(payload), "--ref", commit,
-             "--tui", str(products / "tui"), "--web", str(products / "web")], cwd=repo, env=env)
-    desktop = repo / "apps/desktop"
+        if prepared.payload is None:
+            raise ValueError("payload dependencies were not prepared")
+        if finish_native(prepared.payload, {"tui": products / "tui", "web": products / "web"}):
+            raise RuntimeError("prepared payload assembly failed")
+    from scripts.bundles.desktop_prepare import require_source
+    require_source(repo, request.commit)
+    shutil.copytree(icons / "apps/desktop/assets", desktop / "assets", dirs_exist_ok=True)
+    run([node, "scripts/write-build-stamp.mjs"], cwd=desktop, env=env)
+    run([node, "scripts/build/desktop.mjs", "--source", str(repo), "--icons", str(icons),
+         "--stamp", str(desktop / "build/install-stamp.json"), "--native-deps", str(prepared.native),
+         "--out", str(desktop / "dist")], cwd=repo, env=env)
     # Windows file-version and MSIX build-number policy remains with its packager.
     version_args = []
     if sys.platform == "win32":
-        if commit_build:
+        if request.channel_request is not None:
+            metadata = {"file": request.channel_request["windowsVersion"], "build": None}
+        elif request.tag is None:
             # The plain version needs no canary build-number override.
             metadata = {"file": None, "build": None}
         else:
             script = "const w=require('./apps/desktop/scripts/windows-file-version.mjs');const m=require('./scripts/msix-shared.mjs');console.log(JSON.stringify({file:w.windowsFileVersion(process.argv[1]),build:process.argv[2]!=='store'&&process.argv[1].includes('-canary.')?m.canaryBuildMinutes(process.argv[1],process.cwd()):null}))"
-            metadata = json.loads(capture([node, "-e", script, tag, variant], repo))
+            metadata = json.loads(capture([node, "-e", script, request.tag, variant], repo))
         env.pop("BUILD_NUMBER", None)
         if metadata["build"] is not None and variant != "store":
             env["BUILD_NUMBER"] = str(metadata["build"])
         if metadata["file"]:
             version_args = [f'-c.extraMetadata.shortVersion={metadata["file"]}', f'-c.extraMetadata.shortVersionWindows={metadata["file"]}']
-    targets = {"win32": ["--win", "msix"], "darwin": ["--mac", "dmg", "zip"], "linux": ["--linux", "AppImage"]}[sys.platform]
-    run([*npm, "run", "build"], cwd=desktop, env=env)
-    run([*npm, "run", "builder", "--", *targets, f"-c.extraMetadata.version={version}", *version_args, *builder_args], cwd=desktop, env=env)
+    require_source(repo, request.commit)
+    run([node, "scripts/run-electron-builder.mjs", *package_args, *version_args, *builder_args], cwd=desktop,
+        env=packaging_environment(env, os.environ, request.target))
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tag", required=False,
-                        help="Release tag (vX.Y.Z / canary). Required unless --commit is given")
+                        help="Release tag (vX.Y.Z / canary), exclusive with --commit/--channel-request")
     parser.add_argument("--commit", dest="commit_build", default=None,
                         help="Commit-only build: exact full 40-char SHA the checkout is at; "
                              "version comes from the target pyproject, no tag is referenced")
-    parser.add_argument("--variant", choices=["bundled", "store", "light"], default="bundled")
+    parser.add_argument("--channel-request", type=Path, help="Immutable admitted channel request JSON")
+    parser.add_argument("--variant", choices=["bundled", "store", "light"])
     parser.add_argument("--repo", type=Path, default=ROOT)
+    parser.add_argument("--work", type=Path)
+    parser.add_argument("--cache", type=Path)
+    parser.add_argument("--prepare-only", action="store_true")
+    parser.add_argument("--prepared", type=Path)
     parser.add_argument("builder_args", nargs=argparse.REMAINDER)
     args = parser.parse_args()
-    if bool(args.tag) == bool(args.commit_build):
-        parser.error("exactly one of --tag or --commit is required")
-    build(args.repo, args.tag, args.variant, [v for v in args.builder_args if v != "--"],
-          commit_build=args.commit_build)
+    builder_args = [v for v in args.builder_args if v != "--"]
+    try:
+        if args.prepared:
+            if args.tag or args.commit_build or args.channel_request or args.prepare_only or args.work or args.cache:
+                parser.error("--prepared supplies the complete build request")
+            build_prepared(args.prepared, builder_args, args.variant)
+        else:
+            from scripts.bundles.desktop_prepare import BuildRequest, prepare
+            from scripts.releases.bundle_env import decode
+            request = BuildRequest.create(args.repo, tag=args.tag, commit=args.commit_build,
+                                          variant=args.variant or "bundled",
+                                          work=args.work or args.repo / ".build/desktop-job",
+                                          cache=args.cache or args.repo / ".cache/desktop-inputs",
+                                          bundle_env=decode(os.environ.get("HERMES_BUNDLE_ENV_JSON", "")),
+                                          channel_request=json.loads(args.channel_request.read_text(encoding="utf-8-sig"))
+                                          if args.channel_request else None)
+            if args.prepare_only and builder_args:
+                parser.error("builder arguments belong to the build phase")
+            result = prepare(request)
+            if args.prepare_only:
+                print(result)
+            else:
+                build_prepared(result, builder_args)
+    except (ValueError, OSError, RuntimeError, subprocess.CalledProcessError) as exc:
+        parser.exit(1, f"desktop build: {exc}\n")
 
 
 if __name__ == "__main__":

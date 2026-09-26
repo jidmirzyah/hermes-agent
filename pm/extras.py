@@ -178,7 +178,7 @@ def ensure_import(extra: str) -> None:
     sync_venv([extra])
     # Activation is a process-boot operation. Never mix a newly resolved
     # dependency tree with libraries already imported by this process.
-    from hermes_cli.runtime_paths import selected_venv, site_packages
+    from pm.environments import selected_venv, site_packages
     from pm.paths import repo_root, runtime_facts_path
     import sys
     from pathlib import Path

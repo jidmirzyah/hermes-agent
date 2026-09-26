@@ -418,7 +418,7 @@ When you start Hermes from the application grid or menu (the launcher sets `DESK
 
 ## How it works
 
-The packaged app ships the Electron shell and a native React chat surface. On first launch it can install the Hermes Agent runtime into `HERMES_HOME` (`~/.hermes`, or `%LOCALAPPDATA%\hermes` on Windows) — **the same layout a CLI install uses**, which is why the two are interchangeable. Backend resolution first honours `HERMES_DESKTOP_HERMES_ROOT`, then a completed managed install, then a probed `hermes` on `PATH` (unless `--ignore-existing` / `HERMES_DESKTOP_IGNORE_EXISTING=1` is set), and finally an explicit `HERMES_DESKTOP_HERMES` command override for packagers such as Nix. The React renderer talks to a headless backend the app launches for you — a `hermes serve` process that serves the `tui_gateway` JSON-RPC/WebSocket API — and reuses the agent runtime rather than embedding `hermes --tui`. The desktop app is **self-contained**: it runs its own `hermes serve` backend and never opens or requires the [web dashboard](./features/web-dashboard.md). (Runtimes older than the `serve` command fall back to a headless `dashboard --no-open` automatically, so an app update never outruns its backend.) Install, backend-resolution, and self-update logic live in the Electron main process.
+The packaged app ships the Electron shell and a native React chat surface. On first launch it can install the Hermes Agent runtime into `HERMES_HOME` (`~/.hermes`, or `%LOCALAPPDATA%\hermes` on Windows) — **the same layout a CLI install uses**, which is why the two are interchangeable. Bundled apps use their included backend. Without a bundled backend, resolution honours `HERMES_DESKTOP_HERMES_ROOT`, then the development checkout, then an explicit `HERMES_DESKTOP_HERMES` command override for packagers such as Nix, and finally a usable managed install. The command override takes precedence over the managed install so a Nix desktop cannot silently launch an older mutable runtime. The React renderer talks to a headless backend the app launches for you — a `hermes serve` process that serves the `tui_gateway` JSON-RPC/WebSocket API — and reuses the agent runtime rather than embedding `hermes --tui`. The desktop app is **self-contained**: it runs its own `hermes serve` backend and never opens or requires the [web dashboard](./features/web-dashboard.md). (Runtimes older than the `serve` command fall back to a headless `dashboard --no-open` automatically, so an app update never outruns its backend.) Install, backend-resolution, and self-update logic live in the Electron main process.
 
 ## Connecting to a remote backend
 
@@ -652,17 +652,18 @@ Boot logs land in `HERMES_HOME/logs/desktop.log` (it includes backend output and
 hermes logs gui -f
 ```
 
+For a canonical source installation, Desktop checks and runs the installation
+launcher. PM selects its interpreter and dependency generation. A missing
+bootstrap marker does not force installation when that launcher works.
+
 On Linux, Chromium's own errors go to `HERMES_HOME/logs/desktop-chromium.log`, and a crash of the shell itself leaves a minidump under the app's `Crashpad/` directory (inside Electron's user-data directory, next to `connection.json`). If the window vanishes with `SIGTRAP` in the journal, the `FATAL:` line in that log names the check that fired; attach it to the bug report. Nothing is uploaded.
 
-Common resets:
+If Python dependencies are damaged, run the installation's `hermes pm repair`.
+Then restart Desktop. Do not delete guessed `venv` paths or PM facts. For
+damaged application files, repair through the
+[installation owner](../reference/package-management.md#source-installs-and-packaged-builds).
 
 ```bash
-# Force a clean first-launch setup (macOS/Linux)
-rm "$HOME/.hermes/hermes-agent/.hermes-bootstrap-complete"
-
-# Rebuild a broken Python venv (macOS/Linux)
-rm -rf "$HOME/.hermes/hermes-agent/venv"
-
 # Reset a stuck macOS microphone prompt
 tccutil reset Microphone com.nousresearch.hermes
 ```

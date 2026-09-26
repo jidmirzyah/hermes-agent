@@ -32,7 +32,7 @@ assert.deepEqual(
   cases.map(row => row.label),
   ['stable', 'canary', 'commit-a', 'commit-b']
 )
-const root = fs.mkdtempSync('/tmp/hermes-sxs-macos-')
+const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-sxs-macos-'))
 const home = path.join(root, 'home')
 fs.mkdirSync(home)
 const env = {

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
+from collections import deque
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,24 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from tests.pm._range_server import RangeHandler, dl_server, url  # noqa: F401
+
+
+def test_rate_and_eta_report_only_an_honest_number():
+    """Rate is the slope across the window; anything unmeasurable is unknown.
+
+    A fabricated rate would render as a confident ETA that keeps being wrong,
+    so a single sample, a window too short to divide by, and a stalled
+    transfer must all report (None, None) rather than a guess.
+    """
+    from hermes_cli.web_routers.local_models import _rate_and_eta
+
+    mib = 1 << 20
+    assert _rate_and_eta(deque([(0.0, 0), (1.0, mib)]), mib, 3 * mib) == (float(mib), 2)
+    assert _rate_and_eta(deque([(0.0, 0)]), 0, 100) == (None, None)
+    assert _rate_and_eta(deque([(0.0, 0), (0.1, 50)]), 50, 100) == (None, None)
+    assert _rate_and_eta(deque([(0.0, 40), (1.0, 40)]), 40, 100) == (None, None)
+    # A rate with no denominator: ETA stays unknown, speed still useful.
+    assert _rate_and_eta(deque([(0.0, 0), (1.0, mib)]), mib, None) == (float(mib), None)
 
 
 @pytest.fixture
@@ -70,6 +89,9 @@ def test_browsed_download_can_pause_and_resume_pm_transfer(client, monkeypatch, 
     assert job["status"] == "paused", job
     assert job["can_resume"] and not job["can_pause"]
     assert job["error"] is None
+    # A parked transfer reports no live rate: the frozen speed would read as
+    # the current one on every surface that renders the job view.
+    assert "bytes_per_sec" not in job and "eta_seconds" not in job
     before = job["done_bytes"]
     assert before > 0
     assert client.post("/api/local-models/download/resume", json={"job_id": job_id}).json()["resumed"]

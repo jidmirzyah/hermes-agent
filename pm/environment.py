@@ -6,17 +6,70 @@ staged toolchain directly without recursing through the worker it is building.
 from __future__ import annotations
 
 import codecs
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 import io
 import os
 from pathlib import Path
+import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from typing import TextIO
 
 from pm.package import InstallError
+
+# Deliberately narrow: a fetch timeout or index outage must not be misread as a
+# conflict — and regardless of classification, nothing here ever disables a
+# plugin; the caller decides. Lives here (stdlib-only imports) because the
+# bootstrap runner streams uv output from a pre-3.11 system python where
+# pm.workspace's tomllib import cannot load.
+_RESOLVER_MARKERS = (
+    "no solution found",
+    "conflicting requirements",
+    "conflicting urls",
+    "because only the following versions",
+    "and your pyproject depends on",
+)
+
+
+class ResolutionConflict(InstallError):
+    """uv's resolver proved the union has no valid solution."""
+
+
+def classify_uv_failure(stage: str, returncode: int, output: str) -> InstallError:
+    """Turn a failed `uv <stage>` into the right classified error.
+
+    Resolver-conflict output → ResolutionConflict; anything else (fetch,
+    build, tooling) → plain InstallError with the tail of the output.
+    """
+    cause = f"uv {stage} exited {returncode}: {output.strip()[-600:]}"
+    lowered = output.lower()
+    if any(marker in lowered for marker in _RESOLVER_MARKERS):
+        return ResolutionConflict("venv", cause)
+    return InstallError("venv", cause)
+
+
+def _project_name(source: Path) -> str:
+    """``[project].name`` of *source*'s pyproject, on any Python that can run the bootstrap.
+
+    tomllib is 3.11+; the bootstrap runner stages PM's runtime from a system python that may
+    be older, so the one field this module reads is parsed with the stdlib parser when it
+    exists and a table-scoped regex otherwise.
+    """
+    text = (source / "pyproject.toml").read_text(encoding="utf-8-sig")
+    try:
+        import tomllib
+    except ModuleNotFoundError:
+        import re
+        table = re.search(r"(?ms)^\[project\]\s*$(.*?)(?=^\[)", text + "\n[")
+        match = table and re.search(r'(?m)^name\s*=\s*"([^"]+)"', table.group(1))
+        if not match:
+            raise InstallError("venv", f"{source / 'pyproject.toml'} has no [project].name")
+        return match.group(1)
+    return tomllib.loads(text)["project"]["name"]
 
 
 def prune_site_pth(venv_dir: Path) -> None:
@@ -46,6 +99,24 @@ def prune_site_pth(venv_dir: Path) -> None:
                     pass
 
 
+def _read_pipe(fd: int) -> bytes:
+    size = 65536
+    if sys.platform == "win32":
+        import _winapi
+        import msvcrt
+
+        # Bootstrap can run on Python 3.11, before Windows os.set_blocking
+        # exists. Peek keeps the sole reader bounded without changing pipe mode.
+        try:
+            available, _ = _winapi.PeekNamedPipe(msvcrt.get_osfhandle(fd), 0)
+        except BrokenPipeError:
+            return b""
+        if not available:
+            raise BlockingIOError
+        size = min(size, available)
+    return os.read(fd, size)
+
+
 def _run_streaming(command: list[str], *, cwd: Path, env: dict[str, str],
                    timeout: int, output: TextIO) -> subprocess.CompletedProcess:
     """Keep CI progress live, a bounded diagnostic tail, and a wall-clock timeout."""
@@ -55,11 +126,12 @@ def _run_streaming(command: list[str], *, cwd: Path, env: dict[str, str],
     pipe = proc.stdout
     assert isinstance(pipe, io.TextIOWrapper)  # Popen was given stdout=PIPE and text=True.
     tail = ""
+    conflict = ""
     try:
         # A descendant can keep stdout open after proc exits. Nonblocking reads
         # bound that drain without leaving a thread stuck in readline()/close().
-        # PM's Python >=3.14 supports nonblocking pipes on Windows as well as POSIX.
-        os.set_blocking(pipe.fileno(), False)
+        if sys.platform != "win32":
+            os.set_blocking(pipe.fileno(), False)
         decoder = io.IncrementalNewlineDecoder(
             codecs.getincrementaldecoder(pipe.encoding)(errors="replace"), translate=True,
         )
@@ -68,12 +140,17 @@ def _run_streaming(command: list[str], *, cwd: Path, env: dict[str, str],
             if remaining <= 0:
                 raise subprocess.TimeoutExpired(command, timeout, stderr=tail)
             try:
-                data = os.read(pipe.fileno(), 65536)
+                data = _read_pipe(pipe.fileno())
             except BlockingIOError:
                 time.sleep(min(.05, remaining))
                 continue
             text = decoder.decode(data, final=not data)
             if text:
+                # Preserve an observed resolver marker even after verbose output
+                # evicts it. Scan across read boundaries, never retain the full log.
+                if not conflict:
+                    lowered = (tail + text).lower()
+                    conflict = next((marker for marker in _RESOLVER_MARKERS if marker in lowered), "")
                 tail = (tail + text)[-2000:]
                 output.write(text)
                 output.flush()
@@ -90,6 +167,8 @@ def _run_streaming(command: list[str], *, cwd: Path, env: dict[str, str],
         raise
     finally:
         pipe.close()
+    if conflict and conflict not in tail.lower():
+        tail = conflict + "\n" + tail[-(2000 - len(conflict) - 1):]
     return subprocess.CompletedProcess(command, code, "", tail)
 
 
@@ -116,11 +195,34 @@ def managed_environment(destination: Path, *, python: Path | None = None,
     if tools is None:
         raise InstallError("venv", "PM's pinned toolchain is unavailable")
     uv, pinned_python = tools
+    python = pinned_python if python is None else python.absolute()
+    build_env = _base_environment(env)
+    if sys.platform == "darwin" and python.resolve() == pinned_python.resolve():
+        # PBS's AR still names its deleted build directory. Its CC is already
+        # clang; only the archiver needs a default, and only for our interpreter.
+        build_env.setdefault("AR", "/usr/bin/ar")
     return PythonEnvironment(
-        uv=uv, python=pinned_python if python is None else python.absolute(),
+        uv=uv, python=python,
         destination=destination.absolute(), cache=uv_cache_dir() if cache is None else cache.absolute(),
-        env=_base_environment(env), offline=offline, output=output,
+        env=build_env, offline=offline, output=output,
     )
+
+
+@contextmanager
+def _fresh_build(environment: PythonEnvironment, *, sealed: bool) -> Iterator[None]:
+    """Own only the output claimed by this build, including failed validation."""
+    out = environment.destination
+    # A concurrent creator wins intact: never enter cleanup before mkdir succeeds.
+    out.mkdir(parents=True)
+    try:
+        environment.create()
+        yield
+        environment.check()
+        if sealed:
+            prune_site_pth(out)
+    except BaseException:
+        shutil.rmtree(out, ignore_errors=True)
+        raise
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -136,7 +238,9 @@ class PythonEnvironment:
 
     @property
     def executable(self) -> Path:
-        return self.destination / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+        from pm.environments import venv_python
+
+        return venv_python(self.destination)
 
     def _run(self, args: list[str], *, cwd: Path, timeout: int) -> subprocess.CompletedProcess:
         # Explicit index credentials survive, but cannot redirect the project,
@@ -152,6 +256,8 @@ class PythonEnvironment:
             if self.offline:
                 command.append("--offline")
             if self.output is not None:
+                # uv hides build-backend output until failure without verbose mode.
+                command.append("--verbose")
                 return _run_streaming(command, cwd=cwd, env=env, timeout=timeout, output=self.output)
             return subprocess.run(command, cwd=str(cwd), env=env, capture_output=True,
                                   text=True, encoding="utf-8", errors="replace", timeout=timeout)
@@ -168,8 +274,6 @@ class PythonEnvironment:
             raise InstallError("venv", f"uv venv failed: {result.stderr[-600:]}")
 
     def lock(self, source: Path, *, upgrade: bool = False, timeout: int = 1800) -> None:
-        from pm.workspace import classify_uv_failure
-
         command = ["lock", "--python", str(self.python)]
         if upgrade:
             command.append("--upgrade")
@@ -178,8 +282,6 @@ class PythonEnvironment:
             raise classify_uv_failure("lock", result.returncode, result.stderr or result.stdout)
 
     def check_lock(self, source: Path) -> None:
-        from pm.workspace import classify_uv_failure
-
         result = self._run(["lock", "--check", "--python", str(self.python)],
                            cwd=source, timeout=1800)
         if result.returncode:
@@ -194,8 +296,6 @@ class PythonEnvironment:
         ``frozen=False`` is reserved for the caller-owned generated workspace,
         never the original project's lock. Seed/replay policy belongs to PM.
         """
-        from pm.workspace import classify_uv_failure
-
         if only_groups and (not groups or extras or all_extras):
             raise ValueError("group-only builds require groups and cannot select extras")
         if not frozen:
@@ -211,10 +311,7 @@ class PythonEnvironment:
             # --all-packages has no single selected project in uv, so
             # --no-install-project alone does not exclude the root. Name it
             # explicitly without dropping member dependencies or installations.
-            import tomllib
-
-            project = tomllib.loads((source / "pyproject.toml").read_text(encoding="utf-8-sig"))
-            command += ["--no-install-project", "--no-install-package", project["project"]["name"]]
+            command += ["--no-install-project", "--no-install-package", _project_name(source)]
         for extra in sorted(set(extras)):
             command += ["--extra", extra]
         for group in sorted(set(groups)):
@@ -225,8 +322,6 @@ class PythonEnvironment:
 
     def export_requirements(self, source: Path, out: Path, *, extras: Sequence[str] = (),
                             timeout: int = 1800) -> None:
-        from pm.workspace import classify_uv_failure
-
         command = ["export", "--frozen", "--python", str(self.python), "--no-default-groups",
                    "--no-emit-project", "--no-hashes", "--no-annotate", "--no-header",
                    "--format", "requirements-txt", "--output-file", str(out)]
@@ -247,8 +342,6 @@ class PythonEnvironment:
 
     def _install_requirements_file(self, requirements: Path, *, wheelhouse: Path | None = None,
                                    timeout: int = 1800) -> None:
-        from pm.workspace import classify_uv_failure
-
         command = ["pip", "install", "--no-config", "--python", str(self.executable),
                    "--requirements", str(requirements)]
         if wheelhouse is not None:

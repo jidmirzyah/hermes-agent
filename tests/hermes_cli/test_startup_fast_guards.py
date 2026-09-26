@@ -42,7 +42,7 @@ _FORBIDDEN_MODULES = (
 )
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_cli_starts_from_a_deleted_cwd(tmp_path):
     """A child spawned into a directory that was removed since (a cron delivery from a reaped
     kanban workspace) must still reach argv parsing: a relative ``sys.path`` entry made
@@ -69,6 +69,32 @@ def test_cli_starts_from_a_deleted_cwd(tmp_path):
     assert result.returncode == 0, result.stderr
     assert "Hermes Agent v" in result.stdout
     assert "FileNotFoundError" not in result.stderr
+
+
+@pytest.mark.platforms("linux")
+@pytest.mark.parametrize("remove_cwd", [False, True], ids=["live", "deleted"])
+def test_bootstrap_preserves_live_cwd_and_recovers_deleted_cwd(tmp_path, remove_cwd):
+    cwd = tmp_path / "workspace"
+    cwd.mkdir()
+    probe = (
+        "import os, sys\n"
+        "os.chdir(sys.argv[1])\n"
+        "if sys.argv[2] == 'deleted':\n"
+        "    os.rmdir(sys.argv[1])\n"
+        "import hermes_bootstrap\n"
+        "print(os.getcwd())\n"
+    )
+    env = {**os.environ, "HERMES_HOME": str(tmp_path / ".hermes"),
+           "PYTHONPATH": str(REPO_ROOT)}
+    env.pop("HERMES_DEV", None)
+    result = subprocess.run(
+        [sys.executable, "-c", probe, str(cwd), "deleted" if remove_cwd else "live"],
+        stdin=subprocess.DEVNULL, capture_output=True, text=True,
+        timeout=60, cwd=REPO_ROOT, env=env,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == str(REPO_ROOT if remove_cwd else cwd)
+    assert "Traceback" not in result.stderr
 
 
 def test_startup_fast_import_weight():
@@ -135,3 +161,52 @@ def test_termux_chat_shortcut_leaves_subcommands_to_dispatch(monkeypatch, argv):
     monkeypatch.delenv("HERMES_TERMUX_DISABLE_FAST_CLI", raising=False)
     monkeypatch.setattr(sys, "argv", ["hermes", *argv])
     assert main._try_termux_fast_cli_launch() is False
+def test_literal_tilde_hermes_home_expands_before_any_reader(tmp_path):
+    """A literal ``~`` in HERMES_HOME (fish, or any quoted value) is expanded at process entry.
+
+    Before the fix ``Path("~/.x")`` was relative, so the real CLI resolved it against cwd and
+    scaffolded a full home under ``<cwd>/~/.x``. The negative assertion on cwd is the
+    reporter's own acceptance criterion.
+    """
+    fake_home = tmp_path / "home"
+    cwd = tmp_path / "project"
+    fake_home.mkdir()
+    cwd.mkdir()
+    env = {**os.environ, "HOME": str(fake_home), "USERPROFILE": str(fake_home), "HERMES_HOME": "~/.x"}
+    env.pop("HERMES_DEV", None)
+    env["PYTHONPATH"] = str(REPO_ROOT)
+    result = subprocess.run(
+        [sys.executable, "-m", "hermes_cli.main", "config", "path"],
+        capture_output=True, text=True, timeout=120, cwd=cwd, env=env,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == str(fake_home / ".x" / "config.yaml")
+    assert not (cwd / "~").exists(), sorted(p.name for p in cwd.iterdir())
+
+    # Raw-reader observable: the ~30 ``os.environ["HERMES_HOME"]`` readers in hermes_cli/ never
+    # call the resolver, so the entry-point hunk in main.py (not hermes_constants) must have
+    # rewritten the env var by the time the module import finishes.
+    probe = subprocess.run(
+        [sys.executable, "-c", "import hermes_cli.main, os; print(os.environ['HERMES_HOME'])"],
+        capture_output=True, text=True, timeout=120, cwd=cwd, env=env,
+    )
+    assert probe.returncode == 0, probe.stderr
+    assert probe.stdout.strip() == str(fake_home / ".x")
+
+
+def test_normalize_hermes_home_env_rewrites_tilde_and_leaves_absolute_alone(tmp_path, monkeypatch):
+    from hermes_cli import _startup_fast
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("HERMES_HOME", "~/.x")
+    _startup_fast.normalize_hermes_home_env()
+    assert os.environ["HERMES_HOME"] == str(tmp_path / ".x")
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "abs"))
+    _startup_fast.normalize_hermes_home_env()
+    assert os.environ["HERMES_HOME"] == str(tmp_path / "abs")
+
+    monkeypatch.delenv("HERMES_HOME")
+    _startup_fast.normalize_hermes_home_env()
+    assert "HERMES_HOME" not in os.environ

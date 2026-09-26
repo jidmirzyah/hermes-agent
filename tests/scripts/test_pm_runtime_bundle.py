@@ -22,7 +22,7 @@ def _exercise_relocated_pm_runtime(tmp_path, monkeypatch):
     source = Path(__file__).resolve().parents[2]
     shutil.copytree(source / "pm", repo / "pm", ignore=shutil.ignore_patterns("__pycache__", ".hermes-tmp.*"))
     (repo / "hermes_cli").mkdir()
-    for name in ("__init__.py", "runtime_paths.py", "runtime_state.py"):
+    for name in ("__init__.py", "runtime_state.py"):
         shutil.copy2(source / "hermes_cli" / name, repo / "hermes_cli" / name)
     shutil.copy2(source / "hermes_constants.py", repo / "hermes_constants.py")
     # Copy the base executable, not a venv's launcher. The test host provides
@@ -33,6 +33,9 @@ def _exercise_relocated_pm_runtime(tmp_path, monkeypatch):
         shutil.copytree(Path(sys.base_prefix), python.parent, dirs_exist_ok=True)
     else:
         shutil.copy2(Path(sys._base_executable).resolve(), python)
+        # Relocatable PBS does not retain the host's stdlib prefix. Supply the
+        # fixture's promised host library tree, including libpython on macOS.
+        (python.parent.parent / "lib").symlink_to(Path(sys.base_prefix) / "lib", target_is_directory=True)
     stage = getattr(native, "stage_pm_runtime", None)
     assert callable(stage), "native payload has no isolated PM runtime stage"
     cache = tmp_path / "build-cache"
@@ -108,49 +111,3 @@ def test_pm_builder_ignores_ambient_uv_configuration(tmp_path, monkeypatch, pois
     monkeypatch.setattr("pm._uv._toolchain", lambda **kwargs: (Path(uv), Path(sys.executable)))
     executable = stage_manager_runtime(python=Path(sys.executable), destination=tmp_path / "runtime")
     assert executable.is_file()
-
-
-def test_native_stage_builds_pm_before_application_environment(tmp_path, monkeypatch):
-    from scripts.bundles import native, payload
-    from types import SimpleNamespace
-
-    class StopAfterPM(Exception):
-        pass
-
-    class Facts:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def retain(self, names):
-            pass
-
-        def entries_in_use(self):
-            return set()
-
-        def get(self, name):
-            return {"entry": "python"}
-
-    calls = []
-    lock = tmp_path / "hermes-agent/pm/lock.json"
-    lock.parent.mkdir(parents=True)
-    shutil.copy2(Path(__file__).resolve().parents[2] / "pm/lock.json", lock)
-    monkeypatch.setattr(payload, "snapshot", lambda *args: None)
-    monkeypatch.setattr(native, "_bundle_package_names", lambda: [])
-    monkeypatch.setattr(native, "_install_names", lambda names: 0)
-    monkeypatch.setattr(native, "Facts", Facts)
-    monkeypatch.setattr(native, "_facts", Facts)
-    monkeypatch.setattr(native, "_store", lambda: SimpleNamespace(entry=lambda name: tmp_path / "tools" / name))
-    monkeypatch.setattr(native, "get_package", lambda name: SimpleNamespace(binary=lambda path, target: path / "python"))
-
-    cache_dir = tmp_path / "cache"
-    monkeypatch.setenv("UV_CACHE_DIR", str(cache_dir))
-
-    def staged(root, python, repo, *, cache):
-        assert cache == cache_dir
-        calls.append((root, python, repo))
-        raise StopAfterPM
-
-    monkeypatch.setattr(native, "stage_pm_runtime", staged)
-    with pytest.raises(StopAfterPM):
-        native._stage_native(SimpleNamespace(out=str(tmp_path), ref="HEAD"))
-    assert calls == [(tmp_path, tmp_path / "tools/python/python", tmp_path / "hermes-agent")]

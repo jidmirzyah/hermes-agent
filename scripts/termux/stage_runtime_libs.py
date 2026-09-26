@@ -4,7 +4,7 @@
 The sealed termux deb is self-contained by contract: the device's termux
 tree may have NONE of the payload interpreters' runtime libs installed
 (first real-device install: `import ctypes` dlopened libffi.so and died).
-The pin table (runtime_libs.json) is derived from the suppliers' own
+The pin table (pm/termux_runtime_libs.json) is derived from the suppliers' own
 dependency metadata -- the termux-main python .deb's Depends line, uv's zstd,
 nodejs's libc++/c-ares/libicu -- not from whichever lib happens to error
 first.
@@ -41,6 +41,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from pm.downloader import Download  # noqa: E402
 from pm.artifact_mirror import pinned_source  # noqa: E402
 from pm.package import DebPackage  # noqa: E402
+from pm.termux_libs import load_table  # noqa: E402
 
 PREFIX_REL = DebPackage.prefix_rel
 MANIFEST_NAME = "manifest.json"
@@ -58,7 +59,7 @@ class _LibDeb(DebPackage):
         self.deb_package = name
 
     def fetch_url(self, version: str, target: str) -> str:  # pragma: no cover
-        raise NotImplementedError("pinned URLs live in runtime_libs.json")
+        raise NotImplementedError("pinned URLs live in pm/termux_runtime_libs.json")
 
     def verify(self, entry: Path, target: str) -> str:  # pragma: no cover
         return ""
@@ -85,7 +86,7 @@ def _cache_valid(out: Path, manifest_path: Path, table: dict) -> bool:
     if not out.is_dir() or not manifest_path.is_file():
         return False
     try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
         files = manifest["files"]
     except (ValueError, KeyError, OSError):
         return False
@@ -218,7 +219,7 @@ def main() -> int:
         print("usage: stage_runtime_libs.py <payload-dir>", file=sys.stderr)
         return 2
     payload = Path(sys.argv[1]).resolve()
-    table = json.loads((HERE / "runtime_libs.json").read_text(encoding="utf-8"))
+    table = load_table()
     try:
         stage(payload, table["libs"], table.get("licenses"))
     except Exception as exc:  # noqa: BLE001 -- CLI boundary reports and exits

@@ -6,7 +6,7 @@ description: "将 MCP 服务器连接到 Hermes Agent、过滤其工具并在实
 
 # 在 Hermes 中使用 MCP
 
-本页的 Python 依赖命令使用 [PM 准备的源码环境](/reference/package-management#developer-workflow)。
+本页的 Python 依赖命令使用 [PM 准备的源码环境](../reference/package-management.md#developer-workflow)。
 依赖变更后，请重新激活该 checkout 并重启 Hermes。
 
 本指南介绍如何在日常工作流中实际使用 Hermes Agent 的 MCP 功能。

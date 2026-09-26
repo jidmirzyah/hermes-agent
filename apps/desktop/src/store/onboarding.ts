@@ -19,7 +19,7 @@ import { ackFreeTierNotice, freeTierReadyPending, refreshFreeTierStatus, setFree
 import { setMainModelAssignment } from '@/store/model-assignment'
 import { notify, notifyError } from '@/store/notifications'
 import { guidedOnboardingActive } from '@/store/onboarding-gate'
-import type { ModelOptionProvider, OAuthProvider, OAuthStartResponse } from '@/types/hermes'
+import type { OAuthProvider, OAuthStartResponse } from '@/types/hermes'
 
 type PkceStart = Extract<OAuthStartResponse, { flow: 'pkce' }>
 type DeviceStart = Extract<OAuthStartResponse, { flow: 'device_code' }>

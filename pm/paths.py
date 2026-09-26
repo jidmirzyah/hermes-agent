@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 
@@ -9,12 +10,20 @@ def repo_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
+def install_root() -> Path:
+    """The tree this process runs from. ``HERMES_INSTALL_ROOT`` when a steward
+    wrapper sets it (Nix points it at the sealed tree whose install stamp lives
+    outside the package dir), else the executing checkout."""
+    env = os.environ.get("HERMES_INSTALL_ROOT")
+    return Path(env) if env else repo_root()
+
+
 def lockfile_path() -> Path:
     return Path(__file__).resolve().parent / "lock.json"
 
 
 def store_root() -> Path:
-    from hermes_cli.runtime_paths import store_root as resolve
+    from pm.environments import store_root as resolve
 
     return resolve(repo_root())
 
@@ -47,6 +56,6 @@ def writable_store_root() -> Path:
 
 
 def runtime_facts_path() -> Path:
-    from hermes_cli.runtime_paths import runtime_facts_path as resolve
+    from pm.environments import runtime_facts_path as resolve
 
     return resolve(repo_root())

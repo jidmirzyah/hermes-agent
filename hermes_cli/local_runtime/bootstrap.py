@@ -292,46 +292,48 @@ def ensure_local_runtime(config: dict, force: bool = False) -> "object | None":
     # port — the loser waits here, then re-checks state and adopts the winner's server instead.
     from hermes_cli.local_runtime.endpoint import _state_endpoint
 
-    state = _state_endpoint()
-    if state is not None:
-        if not _presets_stale():
-            logger.info("managed llama-server already running (another process)")
-            return None
-        logger.info("running server's presets predate the staged models; "
-                    "replacing it so every model launches with a policy")
-        _stop_state_server(state)
+    with _cross_process_boot_lock():
+        state = _state_endpoint()
+        if state is not None:
+            if not _presets_stale():
+                logger.info("managed llama-server already running (another process)")
+                return None
+            logger.info("running server's presets predate the staged models; "
+                        "replacing it so every model launches with a policy")
+            _stop_state_server(state)
 
-    try:
-        from hermes_cli.local_runtime.binaries import installed_engine
-        from hermes_cli.local_runtime.supervisor import LlamaServerSupervisor
-
-        engine = installed_engine(section.get("backend", "auto"))
-        if engine is None:
-            logger.info("local runtime enabled but no PM engine installed; use the Local Models pane")
-            return None
-
-        mdir = models_dir()
-        mdir.mkdir(parents=True, exist_ok=True)
-        preset_path = _generate_presets(mdir, runtimes_root() / "presets.ini")
-
-        sup = LlamaServerSupervisor(engine.binary, mdir, preset_path=preset_path,
-                                    models_max=int(section.get("models_max", 4)),
-                                    port=int(section.get("port", 0)) or None)
         try:
-            sup.start()
-        except Exception:
-            # start() can fail after the router process exists (health timeout): leaving it
-            # running unsupervised strands its VRAM behind a port nothing will clean up.
-            with suppress(Exception):
-                sup.stop()
-            raise
-        _SUPERVISOR = sup
-        logger.info("managed llama-server up at %s (backend=%s tag=%s)", sup.base_url, engine.backend, engine.tag)
-        _start_idle_sweeper(sup)
-        return sup
-    except Exception as exc:  # noqa: BLE001 — never break session start
-        logger.warning("managed local runtime unavailable: %s", exc)
-        return None
+            from hermes_cli.local_runtime.binaries import installed_engine
+            from hermes_cli.local_runtime.supervisor import LlamaServerSupervisor
+
+            engine = installed_engine(section.get("backend", "auto"))
+            if engine is None:
+                logger.info("local runtime enabled but no PM engine installed; use the Local Models pane")
+                return None
+
+            mdir = models_dir()
+            mdir.mkdir(parents=True, exist_ok=True)
+            preset_path = _generate_presets(mdir, runtimes_root() / "presets.ini")
+
+            sup = LlamaServerSupervisor(engine.binary, mdir, preset_path=preset_path,
+                                        models_max=_admitted_models_max(
+                                            mdir, int(section.get("models_max", 4))),
+                                        port=int(section.get("port", 0)) or None)
+            try:
+                sup.start()
+            except Exception:
+                # start() can fail after the router process exists (health timeout): leaving it
+                # running unsupervised strands its VRAM behind a port nothing will clean up.
+                with suppress(Exception):
+                    sup.stop()
+                raise
+            _SUPERVISOR = sup
+            logger.info("managed llama-server up at %s (backend=%s tag=%s)", sup.base_url, engine.backend, engine.tag)
+            _start_idle_sweeper(sup)
+            return sup
+        except Exception as exc:  # noqa: BLE001 — never break session start
+            logger.warning("managed local runtime unavailable: %s", exc)
+            return None
 
 
 def shutdown_local_runtime() -> None:

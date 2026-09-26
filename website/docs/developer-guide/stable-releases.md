@@ -100,7 +100,12 @@ commit summary runs even when a build or assembly job fails; it lists only
 receipt-backed existing downloads and marks missing binaries as not built.
 Missing binaries link to the workflow run under **View build run**, not to
 nonexistent downloads. Disabled platforms have no download or failure link.
-Page publication still requires working R2 access.
+Page publication still requires working R2 access. The commit links to its source
+on GitHub; tag and channel pages link to the corresponding GitHub release tag.
+Commit pages also list explicit non-secret `--bundle-env` defaults and
+`--bundle-unset` clears passed to the desktop bundles, not the CI environment.
+Values are shown as JSON strings (including `""` for an empty value); clears are
+labeled **Unset**. The section is omitted when no overrides were supplied.
 
 Tagged builds also publish a per-tag diagnostic page at
 `releases/tag/<tag>/index.html` after build or feed failures, including when no
@@ -109,6 +114,73 @@ or pass the release-success gate.
 
 Store submission retains its fixed official stable identity. Nonstable
 packages must not be submitted under that identity.
+
+## Dynamic channels in R2
+
+Channel names are R2 objects, not a repository registry. A preview channel owns
+one native application identity across exact-commit builds. The immutable build
+request records its source commit, bundle defaults, channel sequence and package
+versions separately. The existing native build and smoke jobs must all pass
+before the channel head advances.
+
+Preview a custom build, then explicitly dispatch it. Repository identity does
+not select behavior: the same direct dispatch runs from any GitHub remote, but
+`--channel` performs no R2 access locally — it resolves the exact pushed commit
+and dispatches the default-branch workflow, whose privileged allocation step
+creates the channel and mints the immutable build request in CI. The local
+command needs only a `gh` token with write, maintain or admin permission on the
+selected repository; no R2 credentials are required.
+
+```sh
+python scripts/release.py --channel pm-preview --build-commit my-branch --remote origin
+python scripts/release.py --channel pm-preview --build-commit my-branch --remote origin --publish
+python scripts/release.py --channels --remote origin
+```
+
+Disposable R2 scoping is opt-in, for test runs only. Dispatch the desktop
+workflow with `disposable_channel` and `build_commit` to allocate a namespace
+under `ci-disposable/<repository-id>/<run-id>/`, then use the exact scoped build
+command from its summary. For local administration of that allocation, carry
+its `R2_DISPOSABLE_RUN` and `GITHUB_REPOSITORY_ID` in the command environment,
+with the configured public URL still at the unscoped root. These are test-run
+inputs, not persistent application settings; the repository ID is checked
+against the selected remote before credentials are read, so a scoped namespace
+still belongs to exactly one repository.
+
+The first publishing invocation creates the channel (during CI allocation), and
+later invocations retain its identity. Requests and artifacts live under
+`releases/channel-builds/BUILD_ID/`; the mutable pointer is
+`releases/channels/NAME.json`. A failed build leaves its previous head intact.
+Conditional writes reject stale publication and permanently retired channels.
+Retrying re-dispatches `--channel NAME --build-commit SHA --publish`, which
+allocates a fresh sequence slot in CI; there is no separate resume command.
+
+Retirement pins the current official stable build as the first receiver:
+
+```text
+python scripts/release.py --retire-channel pm-preview --to stable --minimum-version VERSION --remote origin
+```
+
+Add `--publish` only after reviewing the dry run and the exact native acceptance
+evidence. This does not rebuild stable under the preview identity or silently
+uninstall clients. Protocol-aware clients offer a consented cross-application
+handoff; the destination must confirm readiness before preview removal. Keep
+the retirement object and pinned artifacts available for offline clients.
+Existing one-off builds have no retirement reader and require replacement.
+
+The destination manifest must declare receiver support read from its packaged
+stamp. The existing protected release workflow owns acceptance; there is no
+separate public certification document or dependency on expiring Actions artifacts.
+Native signature and identity checks, recipient consent, preserved-state preflight,
+and destination readiness remain mandatory. An offline preview reaches its pinned
+first receiver even after stable advances; that app then updates through stable.
+
+Before shipping R2-only source readers, seed the existing `main` source-branch
+record and published stable/canary records through the explicit protected
+bootstrap operation. Review actual accepted manifests; do not invent a native
+manifest for `main`. Production seeding, CDN cache/CAS verification and native
+signed-package qualification are release operations, not implied by a passing
+local helper suite. Never store the bootstrap output as a repo channel list.
 
 ## Signed-package baseline
 
@@ -152,6 +224,16 @@ Electron-builder configuration/hooks and native Windows/macOS adapters remain
 in JavaScript or PowerShell. These adapters consume release facts rather than
 reimplementing the release gate. Gate jobs use only Python's standard library;
 they do not install the application or the JS workspace to report a verdict.
+
+`scripts.bundles.release_artifacts` owns App Installer XML and feed publication.
+Its serializer takes explicit package identity, publisher, version, subscription
+URI and artifact URI. Stable promotion uses the accepted candidate metadata;
+canary publication verifies the native bundle manifest against the adapter's
+expected identity before uploading the bundle, then the descriptor. Native SDK
+bundling/signing stays in `stage-msixbundle.mjs`. Store and commit builds stop
+before that feed handoff; `stable-store` submits the verified candidate without
+rebuilding it. Native acceptance uses the same Python serializer, including its
+12-hour on-launch check policy.
 
 Signing and publication credentials stay in their protected job environments.
 The source CI call does not inherit deployment secrets. Configure the existing

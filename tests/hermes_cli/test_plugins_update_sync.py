@@ -43,8 +43,8 @@ def test_disabled_update_does_not_change_dependencies_or_enablement(installed, m
     config = (home / "config.yaml").read_bytes()
     facts = paths.runtime_facts_path().read_bytes()
     state["sha"] = _version(repo, "2.0.0")
-    monkeypatch.setattr("pm.client.sync_venv",
-                        lambda **kwargs: pytest.fail("disabled plugin changed the dependency selection"))
+    monkeypatch.setattr("pm.packages.Venv.apply",
+                        lambda *args, **kwargs: pytest.fail("disabled plugin changed the dependency selection"))
     result = pc.dashboard_update_user_plugin("transactional")
     assert result["ok"], result
     assert subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=target, text=True).strip() == state["sha"]
@@ -67,13 +67,18 @@ def test_enablement_before_lock_acquisition_cannot_skip_validation(installed, mo
     enabled = {}
 
     @contextmanager
-    def enable_before_acquiring_lock(project):
+    def enable_before_acquiring_lock(project, **kwargs):
+        # The plugin becomes active after the update read its state but before PM's
+        # publication holds the install lock; the enablement itself is a completed PM
+        # transaction (its own lock cycle), so it runs outside this re-entered seam.
         if not enabled:
             enabled["begun"] = True
+            monkeypatch.setattr(runtime_state, "runtime_lock", lock)
             pc._set_plugin_enabled("transactional", enable=True)
+            monkeypatch.setattr(runtime_state, "runtime_lock", enable_before_acquiring_lock)
             enabled["config"] = (home / "config.yaml").read_bytes()
             enabled["facts"] = paths.runtime_facts_path().read_bytes()
-        with lock(project):
+        with lock(project, **kwargs):
             yield
 
     monkeypatch.setattr(runtime_state, "runtime_lock", enable_before_acquiring_lock)

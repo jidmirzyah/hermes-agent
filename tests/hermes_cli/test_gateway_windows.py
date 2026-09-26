@@ -43,7 +43,7 @@ def test_exec_schtasks_decodes_ansi_output_under_utf8_mode(monkeypatch):
     assert gateway_windows._is_access_denied(err) and gateway_windows._should_fall_back(1, err)
 
 
-@pytest.mark.windows_only
+@pytest.mark.platforms("windows")
 def test_exec_schtasks_round_trips_non_ascii_task_argument_live(monkeypatch):
     """Real schtasks.exe on a real task whose argument carries a non-ASCII (ANSI-representable)
     character, queried from a UTF-8-mode interpreter: the template/live comparison in

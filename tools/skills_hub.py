@@ -239,7 +239,6 @@ def _read_json_if_fresh(path: Path, ttl: float) -> Optional[Any]:
     try:
         if time.time() - path.stat().st_mtime > ttl:
             return None
-        # MERGE-CHECK: our utf-8-sig read fix kept (BOM-tolerant; ours read cache files this way)
         return json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, json.JSONDecodeError):
         return None

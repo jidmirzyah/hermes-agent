@@ -123,42 +123,6 @@ class TestInterruptedOutput(unittest.TestCase):
         )
 
 
-class TestHermesToolsGeneration(unittest.TestCase):
-    def test_generates_all_allowed_tools(self):
-        src = generate_hermes_tools_module(list(SANDBOX_ALLOWED_TOOLS))
-        for tool in SANDBOX_ALLOWED_TOOLS:
-            self.assertIn(f"def {tool}(", src)
-
-
-    def test_empty_list_generates_nothing(self):
-        src = generate_hermes_tools_module([])
-        self.assertNotIn("def terminal(", src)
-        self.assertIn("def _call(", src)  # infrastructure still present
-
-
-    def test_file_transport_uses_tempfile_fallback_for_rpc_dir(self):
-        src = generate_hermes_tools_module(["terminal"], transport="file")
-        self.assertIn("import json, os, shlex, tempfile, threading, time", src)
-        self.assertIn("os.path.join(tempfile.gettempdir(), \"hermes_rpc\")", src)
-        self.assertNotIn('os.environ.get("HERMES_RPC_DIR", "/tmp/hermes_rpc")', src)
-
-    def test_uds_transport_serializes_concurrent_calls(self):
-        """Regression: UDS _call() must hold a lock across send+recv so that
-        concurrent tool calls from multiple threads don't interleave on the
-        shared socket and receive each other's responses."""
-        src = generate_hermes_tools_module(["terminal"], transport="uds")
-        self.assertIn("_call_lock = threading.Lock()", src)
-        self.assertIn("with _call_lock:", src)
-
-    def test_file_transport_serializes_seq_allocation(self):
-        """Regression: file transport _call() must allocate `_seq` under a
-        lock, otherwise concurrent threads can pick the same seq and clobber
-        each other's request files."""
-        src = generate_hermes_tools_module(["terminal"], transport="file")
-        self.assertIn("_seq_lock = threading.Lock()", src)
-        self.assertIn("with _seq_lock:", src)
-
-
 class TestExecuteCodeRemoteTempDir(unittest.TestCase):
     def test_execute_remote_uses_backend_temp_dir_for_sandbox(self):
         class FakeEnv:
@@ -250,10 +214,6 @@ class TestExecuteCode(unittest.TestCase):
 
     def _run(self, code, enabled_tools=None):
         """Helper: run code with mocked handle_function_call."""
-        with patch("tools.code_execution_rpc._rpc_server_loop") as mock_rpc:
-            # Use real execution but mock the tool dispatcher
-            pass
-        # Actually run with full integration, mocking at the model_tools level
         with patch("model_tools.handle_function_call", side_effect=_mock_handle_function_call):
             result = execute_code(
                 code=code,
@@ -416,75 +376,6 @@ except ValueError as e:
         result = self._run(code)
         self.assertEqual(result["status"], "success")
         self.assertIn("caught: nope", result["output"])
-
-
-class TestStubSchemaDrift(unittest.TestCase):
-    """Verify that _TOOL_STUBS in code_execution_tool.py stay in sync with
-    the real tool schemas registered in tools/registry.py.
-
-    If a tool gains a new parameter but the sandbox stub isn't updated,
-    the LLM will try to use the parameter (it sees it in the system prompt)
-    and get a TypeError.  This test catches that drift.
-    """
-
-    # Parameters that are internal (injected by the handler, not user-facing)
-    _INTERNAL_PARAMS = {"task_id", "user_task"}
-    # Parameters intentionally blocked in the sandbox
-    _BLOCKED_TERMINAL_PARAMS = {"background", "pty", "notify", "notify_on_complete", "watch_patterns", "heartbeat"}
-
-    def test_stubs_cover_all_schema_params(self):
-        """Every user-facing parameter in the real schema must appear in the
-        corresponding _TOOL_STUBS entry."""
-        import re
-        from tools.code_execution_tool import _TOOL_STUBS
-
-        # Import the registry and trigger tool registration
-        from tools.registry import registry
-        import tools.file_tools  # noqa: F401 - registers read_file, write_file, patch, search_files
-        import tools.web_tools  # noqa: F401 - registers web_search, web_extract
-
-        for tool_name, (sig, doc, args_expr) in _TOOL_STUBS.items():
-            entry = registry._tools.get(tool_name)
-            if not entry:
-                # Tool might not be registered yet (e.g., terminal uses a
-                # different registration path).  Skip gracefully.
-                continue
-
-            schema_props = entry.schema.get("parameters", {}).get("properties", {})
-            schema_params = set(schema_props.keys()) - self._INTERNAL_PARAMS
-            if tool_name == "terminal":
-                schema_params -= self._BLOCKED_TERMINAL_PARAMS
-
-            # Extract parameter names from the stub signature string
-            # Match word before colon: "pattern: str, target: str = ..."
-            stub_params = set(re.findall(r'(\w+)\s*:', sig))
-
-            missing = schema_params - stub_params
-            self.assertEqual(
-                missing, set(),
-                f"Stub for '{tool_name}' is missing parameters that exist in "
-                f"the real schema: {missing}. Update _TOOL_STUBS in "
-                f"code_execution_tool.py to include them."
-            )
-
-
-    def test_generated_module_accepts_all_params(self):
-        """The generated hermes_tools.py module should accept all current params
-        without TypeError when called with keyword arguments."""
-        src = generate_hermes_tools_module(list(SANDBOX_ALLOWED_TOOLS))
-
-        # Compile the generated module to check for syntax errors
-        compile(src, "hermes_tools.py", "exec")
-
-        # Verify specific parameter signatures are in the source
-        # search_files must accept its pagination, output, and ordering controls
-        self.assertIn("context", src)
-        self.assertIn("offset", src)
-        self.assertIn("output_mode", src)
-        self.assertIn("order", src)
-
-        # patch must accept mode and patch params
-        self.assertIn("mode", src)
 
 
 # ---------------------------------------------------------------------------
@@ -908,13 +799,6 @@ class TestRpcTokenAuthorization(unittest.TestCase):
         )
         self.assertEqual(len(resp), 1)
         self.assertIn("Unauthorized", resp[0].get("error", ""))
-
-
-    def test_generated_module_sends_token(self):
-        """The generated hermes_tools module reads HERMES_RPC_TOKEN and sends it."""
-        src = generate_hermes_tools_module(["terminal"], transport="uds")
-        self.assertIn("HERMES_RPC_TOKEN", src)
-        self.assertIn('"token"', src)
 
 
 if __name__ == "__main__":

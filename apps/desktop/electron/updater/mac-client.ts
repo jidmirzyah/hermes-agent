@@ -3,34 +3,63 @@ import electronUpdater from 'electron-updater'
 
 import feedContract from '../../update-feed.cjs'
 
+import type { ChannelTarget } from './channel'
+import { verifyChannelDownload } from './channel-native'
+import { channelPublicBase } from './channel-protocol'
 import { MacStrategy, type MacStrategyDeps, prepareMacInstall } from './mac'
 
 export interface MacClientDeps extends Omit<MacStrategyDeps, 'updater' | 'prepareInstall'> {
   light: boolean
   feedBaseUrl: string
+  /** Exact per-build metadata, not a moving channel directory. */
+  feed?: { url: string; channel: string }
   log: (message: string) => void
 }
 
+export function createChannelMacStrategy(deps: MacClientDeps, target: ChannelTarget): MacStrategy {
+  if (target.package.platform !== 'darwin') {
+    throw new Error('Expected macOS channel target')
+  }
+
+  return createMacStrategy({
+    ...deps,
+    channel: target.channel.name,
+    feedBaseUrl: target.manifest.request.publicBase,
+    feed: { url: target.feedUrl, channel: target.package.feed.channel },
+    expectedVersion: target.package.version,
+    verifyDownload: (files: string[]): Promise<void> => verifyChannelDownload(files, target.package.artifact)
+  })
+}
+
 export function createMacStrategy(deps: MacClientDeps): MacStrategy {
-  const feed = feedContract.darwinFeed(deps.channel, deps.light)
+  const legacy = feedContract.darwinFeed(deps.channel, deps.light)
+  const channel = deps.feed?.channel ?? legacy.channel
   const updater = new electronUpdater.MacUpdater()
   updater.autoDownload = false
   updater.autoInstallOnAppQuit = false
   updater.autoRunAppAfterInstall = true
-  updater.channel = feed.channel
-  updater.allowPrerelease = feed.allowPrerelease
+  updater.channel = channel
+  updater.allowPrerelease = deps.feed ? Boolean(deps.expectedVersion?.includes('-')) : legacy.allowPrerelease
   // Setting channel enables downgrades in electron-updater. This app never does.
   updater.allowDowngrade = false
   updater.on('error', error => deps.log(`macOS updater: ${error.message}`))
 
-  if (deps.feedBaseUrl) {
-    const base = new URL(deps.feedBaseUrl)
+  if (deps.feed) {
+    const base = channelPublicBase(deps.feedBaseUrl)
+    const url = new URL(channelPublicBase(deps.feed.url))
 
-    if (base.protocol !== 'https:' && !(base.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(base.hostname))) {
-      throw new Error('The update feed must use HTTPS or a loopback HTTP address.')
+    if (!deps.feed.url.startsWith(`${base}/`) || url.origin !== new URL(base).origin) {
+      throw new Error('Native feed authority mismatch')
     }
 
-    updater.setFeedURL({ provider: 'generic', url: `${base.href.replace(/\/+$/, '')}/${feed.directory}/`, channel: feed.channel })
+    if (!/^[a-z][a-z0-9-]*$/.test(channel) || !url.pathname.endsWith(`/${channel}-mac.yml`)) {
+      throw new Error('Invalid macOS feed descriptor')
+    }
+
+    updater.setFeedURL({ provider: 'generic', url: new URL('./', url).href, channel })
+  } else if (deps.feedBaseUrl) {
+    const base = channelPublicBase(deps.feedBaseUrl)
+    updater.setFeedURL({ provider: 'generic', url: `${base}/${legacy.directory}/`, channel })
   }
 
   return new MacStrategy({ ...deps, updater, prepareInstall: () => prepareMacInstall(nativeUpdater) })

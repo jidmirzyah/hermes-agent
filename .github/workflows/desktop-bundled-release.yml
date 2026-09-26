@@ -7,20 +7,21 @@ name: Desktop Bundled Release
 #   files + receipts to R2 (releases/tag/<tag>/) → gated publish jobs write
 #   feeds → builds table. Stable candidates stop before feed publication.
 #
-# Per-OS topology (MSIX work is gated on the WINDOWS build only — mac/linux
-# legs never block the win32 feed or Store submission):
+# Per-OS topology (canary feeds follow their own platform builds; stable
+# publication and Store submission require the accepted cross-platform candidate):
 #
 #   build-win32 (win32-x64 + win32-arm64)   → stage packages + receipts to R2
 #   build-darwin (darwin-arm64 + darwin-x64) → sign + notarize + stage
 #     dmg/zip/blockmap + per-arch feed inputs to the R2 tag archive
 #   build-linux                              → DISABLED for now (dummy skips)
-#   publish-win32-updater                   → App Installer feed
-#     (needs build-win32): releases/win32/<stable|canary>/*.appinstaller +
-#       *.msixbundle (stage-msixbundle.mjs --variant bundled)
-#   publish-win32-store                     → Windows Store submission
-#     (needs build-win32, PARALLEL with the updater feed): bundle the two
-#     Store-*.msix into one universal Store .msixbundle and submit via the
-#     MSStore CLI. Only stable is eligible, gated on MS_STORE_PRODUCT_ID.
+#   assemble-win32-bundle                   → native universal bundles
+#     (needs build-win32): all downloadable builds stage without touching feeds.
+#   smoke-darwin / smoke-win32 / smoke-win32-universal → native install + chat
+#   publish-win32-updater                   → tested canary bytes + feed
+#     (needs BOTH Windows smoke matrices); stable promotion stays separately gated.
+#   stable-store                           → verified Store submission
+#     (needs stable-publish): materialize the immutable accepted Store bundle
+#     and submit via the MSStore CLI without rebuilding.
 #   publish-darwin-updater                  → macOS electron-updater feed
 #     (needs BOTH darwin legs): scripts.releases.r2 finalize merges the per-arch
 #     ymls into releases/darwin/<channel>/<channel>-mac.yml — the feed
@@ -29,7 +30,7 @@ name: Desktop Bundled Release
 #
 # Feed layout (matches apps/desktop/electron/app-updater.ts's arms):
 #   releases/win32/<stable|canary>/<ch>.appinstaller   App Installer feed
-#     releases/win32/<stable|canary>/*.msixbundle      (publish-win32-updater)
+#     canary bundles live beside the feed; stable points into releases/tag/<tag>/
 #   releases/darwin/<stable|canary>/<channel>-mac.yml  electron-updater feed
 #     (dmg/zip live once in releases/tag/<tag>/; the merged feed points at
 #     them with absolute object keys)
@@ -40,6 +41,9 @@ name: Desktop Bundled Release
 # carry release files. Non-publishing tag builds leave output on the runner.
 # Commit builds stage under releases/commit/<sha>/ and write a run summary.
 # They never publish a release, updater feed, Store submission, or APT channel.
+# Admitted channel requests reuse those native build/smoke legs with read-only
+# dependency caches. Their receipts use releases/channel-builds/<id>/; only the
+# trusted publish-channel controller may CAS the channel after all smoke passes.
 #
 # Payload staging is `hermes pm bundle` on the native runner. There is
 # no cross-target staging. The darwin legs sign (CSC_LINK) and notarize
@@ -59,13 +63,13 @@ name: Desktop Bundled Release
 # non-secret vars. scripts/releases/r2.py derives the S3 endpoint from
 # the account id. Upload/list operations need only Python; feed operations use ruamel.yaml.
 #
-# Windows Store submission (publish-win32-store): MSStore CLI via
+# Windows Store submission (stable-store): MSStore CLI via
 # microsoft/microsoft-store-apppublisher. Credentials live in the
 # release-signing environment:
 #     secrets: MS_STORE_TENANT_ID, MS_STORE_SELLER_ID, MS_STORE_CLIENT_ID,
 #              MS_STORE_CLIENT_SECRET
 #     vars:    MS_STORE_PRODUCT_ID (the Partner Center product ID)
-#   msstore reconfigure → (delete pending) → msstore publish
+#   msstore reconfigure → msstore publish
 #   <Store-*.msixbundle> -id <productId>
 # The Store bundle is UNSIGNED on purpose — Partner Center re-signs on
 # ingestion (see sign-msix.mjs).
@@ -93,6 +97,23 @@ on:
     inputs:
       tag:
         description: 'Release tag to bundle (vX.Y.Z or vX.Y.0-canary.YYYYMMDDHHMMSS). Must exist on the repo.'
+        required: false
+        type: string
+        default: ''
+      disposable_channel:
+        description: 'Allocate a disposable preview from build_commit; prints a separate build dispatch. No native build in this run.'
+        type: string
+        default: ''
+      disposable_receivers:
+        description: 'Also allocate A/B and official-identity S/T test receivers in the fresh namespace; no releases.'
+        type: boolean
+        default: false
+      disposable_run:
+        description: 'Disposable allocation controller run id; the allocate step derives and overwrites it.'
+        type: string
+        default: ''
+      channel:
+        description: 'Preview channel name; this run allocates the channel and builds build_commit. Trusted default-branch dispatch only.'
         required: false
         type: string
         default: ''
@@ -129,13 +150,26 @@ permissions:
   id-token: write
 
 concurrency:
-  group: desktop-bundled-release-${{ inputs.tag || inputs.build_commit || 'canary' }}-${{ inputs.release-phase || 'canary' }}
+  # One dispatch: a disposable run's identity is its channel name, so a
+  # re-dispatch of the same channel serializes instead of racing the namespace.
+  group: desktop-bundled-release-${{ inputs.channel || inputs.disposable_channel || inputs.tag || inputs.build_commit || 'canary' }}-${{ inputs.release-phase || 'canary' }}
   cancel-in-progress: false
+
+env:
+  # One dispatch: a disposable-mode run leases its namespace by run id alone
+  # (no attempt suffix) so "re-run failed jobs" re-enters the same namespace.
+  R2_DISPOSABLE_RUN: ${{ inputs.disposable_run || (inputs.disposable_channel != '' && github.run_id) || '' }}
 
 jobs:
   validate:
-    name: Validate the build source
+    name: Pre-build setup
+    # One dispatch: in disposable mode the allocation steps run first (the
+    # channel pin comes from them), then admission validates the build source.
+    # A failed allocation fails this job and skips everything downstream.
     runs-on: ubuntu-24.04
+    # Public root is an environment variable, not a repository variable. No
+    # secret is injected into admission; downstream jobs consume its outputs.
+    environment: release-signing
     timeout-minutes: 5
     permissions:
       contents: read
@@ -149,25 +183,75 @@ jobs:
       channel: ${{ steps.admission.outputs.channel }}
       sha: ${{ steps.admission.outputs.sha }}
       payload-version: ${{ steps.admission.outputs.payload-version }}
+      receiver-candidate: ${{ steps.admission.outputs.receiver-candidate }}
+      public-root: ${{ steps.admission.outputs.public-root }}
+      public-base: ${{ steps.admission.outputs.public-base }}
+      channel-build: ${{ ((inputs.disposable_channel != '' || inputs.channel != '') && steps.allocate.outputs.channel_build) || '' }}
+      channel-request-sha256: ${{ ((inputs.disposable_channel != '' || inputs.channel != '') && steps.allocate.outputs.channel_request_sha256) || '' }}
+      disposable-run: ${{ (inputs.disposable_channel != '' && github.run_id) || inputs.disposable_run || '' }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ inputs.build_commit != '' && github.sha || inputs.tag }}
-          # Full history: the admission gate below runs merge-base against
-          # origin/main, which needs the shared ancestry, not a depth-1 tip.
+          ref: ${{ (inputs.build_commit != '' || inputs.channel != '') && github.sha || inputs.tag }}
+          # Full checkout, always. Commit admission (require_pushed) needs the
+          # full graph AND every pushed branch ref fetched into
+          # refs/remotes/origin/* — a depth-1 checkout fetches only github.sha,
+          # so it can't see the branch that actually carries build_commit.
+          # Tag admission runs merge-base against origin/main and needs tags.
           fetch-depth: 0
           fetch-tags: true
-          filter: tree:0
-          sparse-checkout: |
-            pyproject.toml
-            scripts/releases
-          sparse-checkout-cone-mode: false
+
+      - name: Archive every pinned input
+        # Runner Python is intentional: the toolchain's upstream may be gone.
+        # Same checkout contract the standalone archive job had: the tag ref
+        # for tag builds, the dispatch head for commit builds.
+        if: inputs.disposable_run == '' && inputs.disposable_channel == '' && (inputs.release-phase == '' || inputs.release-phase == 'candidate')
+        env:
+          CLOUDFLARE_R2_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_R2_ACCOUNT_ID }}
+          CLOUDFLARE_R2_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
+          CLOUDFLARE_R2_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
+          CLOUDFLARE_R2_BUCKET: ${{ vars.CLOUDFLARE_R2_BUCKET }}
+        run: python3 -m scripts.ci.archive_inputs
+
+      - name: Set up native identity reader
+        if: inputs.disposable_channel != '' && inputs.disposable_receivers
+        uses: ./.github/actions/setup-pm
+        with:
+          toolchain: node
+          cache-python: false
+          archive-inputs: false
+      - name: Allocate the channel and build its immutable request
+        id: allocate
+        if: inputs.disposable_channel != '' || inputs.channel != ''
+        env:
+          DISPOSABLE_CHANNEL: ${{ inputs.disposable_channel }}
+          CHANNEL: ${{ inputs.channel }}
+          DISPOSABLE_RECEIVERS: ${{ inputs.disposable_receivers }}
+          BUILD_COMMIT: ${{ inputs.build_commit }}
+          TAG: ${{ inputs.tag }}
+          RELEASE_PHASE: ${{ inputs.release-phase }}
+          TERMUX_ONLY: ${{ inputs.termux_only }}
+          TERMUX_UPGRADE_FROM_TAG: ${{ inputs.termux_upgrade_from_tag }}
+          UPLOAD_RELEASE: ${{ inputs.upload_release }}
+          BUNDLE_ENV_JSON: ${{ inputs.bundle_env }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+          CLOUDFLARE_R2_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_R2_ACCOUNT_ID }}
+          CLOUDFLARE_R2_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
+          CLOUDFLARE_R2_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
+          CLOUDFLARE_R2_BUCKET: ${{ vars.CLOUDFLARE_R2_BUCKET }}
+          CLOUDFLARE_R2_PUBLIC_URL: ${{ vars.CLOUDFLARE_R2_PUBLIC_URL }}
+        run: python -m scripts.releases.channel_disposable
 
       - name: Validate tag shape, pyproject lockstep, and ancestry on origin/main
         id: admission
         env:
           TAG: ${{ inputs.tag }}
           BUILD_COMMIT: ${{ inputs.build_commit }}
+          CHANNEL_BUILD: ${{ steps.allocate.outputs.channel_build || '' }}
+          CHANNEL_REQUEST_SHA256: ${{ steps.allocate.outputs.channel_request_sha256 || '' }}
+          CLOUDFLARE_R2_PUBLIC_URL: ${{ vars.CLOUDFLARE_R2_PUBLIC_URL }}
+          TERMUX_ONLY: ${{ inputs.termux_only }}
           BUNDLE_ENV_JSON: ${{ inputs.bundle_env }}
           RELEASE_PHASE: ${{ inputs.release-phase }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
@@ -175,6 +259,17 @@ jobs:
           TERMUX_UPGRADE_FROM_TAG: ${{ inputs.termux_upgrade_from_tag }}
           GH_TOKEN: ${{ github.token }}
         run: |
+          if [ -n "${R2_DISPOSABLE_RUN:-}" ] && [ -z "${CHANNEL_BUILD:-}" ]; then
+            echo '::error::disposable_run requires a pinned channel build'; exit 1
+          fi
+          printf 'public-root=%s\npublic-base=%s\n' "$CLOUDFLARE_R2_PUBLIC_URL" "$CLOUDFLARE_R2_PUBLIC_URL" >> "$GITHUB_OUTPUT"
+          if [ -n "${CHANNEL_BUILD:-}" ]; then
+            if [ "$GITHUB_EVENT_NAME" != workflow_dispatch ] || [ -z "$DEFAULT_BRANCH" ] || [ "$GITHUB_REF" != "refs/heads/$DEFAULT_BRANCH" ] || [ "$GITHUB_WORKFLOW_REF" != "$GITHUB_REPOSITORY/.github/workflows/desktop-bundled-release.yml@refs/heads/$DEFAULT_BRANCH" ]; then
+              echo '::error::channel builds require the default-branch dispatch workflow'; exit 1
+            fi
+            python -m scripts.releases.channel_publish admit
+            exit 0
+          fi
           if [ -n "$BUILD_COMMIT" ]; then
             # Reject mixed inputs before loading code from the checkout.
             if [ -n "$TAG" ] || [ -n "$RELEASE_PHASE" ] || [ -n "$TERMUX_UPGRADE_FROM_TAG" ] || [ "$UPLOAD_RELEASE" != false ]; then
@@ -246,23 +341,20 @@ jobs:
 
   # ── Windows builders (REAL) ───────────────────────────────────────────────
   # Windows assembly and publication depend on these native Windows legs.
-  archive-inputs:
-    name: Archive every pinned input
-    if: inputs.release-phase == '' || inputs.release-phase == 'candidate'
-    needs: [validate]
-    uses: ./.github/workflows/archive-inputs.yml
-    with:
-      sha: ${{ needs.validate.outputs.sha }}
-    secrets: inherit
-
-  build-win32:
+  # Pinned-input archiving runs as a validate step with the job's own gate
+  # shape, so a skipped archive must not skip the selected build legs.
+  #
+  # Cache permissions are literal job-token scopes, not checkout/save-step policy.
+  # Share execution via anchors, and keep the original IDs as downstream gates.
+  build-win32-release:
     name: bundled ${{ matrix.target.label }}
-    if: inputs.termux_only != true && (inputs.release-phase == '' || inputs.release-phase == 'candidate')
-    needs: [validate, archive-inputs]
+    if: inputs.termux_only != true && (inputs.release-phase == '' || inputs.release-phase == 'candidate') && inputs.build_commit == '' && inputs.channel == ''
+    needs: [validate]
     runs-on: ${{ matrix.target.runner }}
     environment: release-signing
+    cache-mode: write
     timeout-minutes: 900
-    strategy:
+    strategy: &win32-strategy
       fail-fast: false
       matrix:
         target:
@@ -270,20 +362,17 @@ jobs:
             runner: windows-2025
           - label: win32-arm64
             runner: windows-11-arm
-    env:
+    env: &win32-env
+      CHANNEL_BUILD: ${{ needs.validate.outputs.channel-build }}
       HERMES_DESKTOP_VARIANT: bundled
       HERMES_PAYLOAD_TAG: ${{ inputs.tag }}
-      HERMES_BUILD_COMMIT: ${{ needs.validate.outputs.sha && inputs.build_commit != '' && needs.validate.outputs.sha || '' }}
+      HERMES_BUILD_COMMIT: ${{ inputs.build_commit != '' && needs.validate.outputs.channel-build == '' && needs.validate.outputs.sha || '' }}
       HERMES_PAYLOAD_VERSION: ${{ needs.validate.outputs.payload-version }}
+      # Signature outputs are separate from the prepared dependency snapshot.
       ELECTRON_BUILDER_CACHE: ${{ github.workspace }}/.cache/electron-builder
-      ELECTRON_CACHE: ${{ github.workspace }}/.cache/electron
-      electron_config_cache: ${{ github.workspace }}/.cache/electron
-      CLOUDFLARE_R2_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_R2_ACCOUNT_ID }}
-      CLOUDFLARE_R2_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
-      CLOUDFLARE_R2_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
       CLOUDFLARE_R2_BUCKET: ${{ vars.CLOUDFLARE_R2_BUCKET }}
-      CLOUDFLARE_R2_PUBLIC_URL: ${{ vars.CLOUDFLARE_R2_PUBLIC_URL }}
-    steps:
+      CLOUDFLARE_R2_PUBLIC_URL: ${{ needs.validate.outputs.public-root }}
+    steps: &win32-steps
       - name: Exclude build write paths from Defender scanning
         shell: powershell
         run: |
@@ -312,125 +401,101 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: ${{ needs.validate.outputs.sha }}
-          fetch-tags: true
+          fetch-depth: ${{ (inputs.build_commit != '' || needs.validate.outputs.channel-build != '') && 1 || 0 }}
+          fetch-tags: ${{ inputs.build_commit == '' && needs.validate.outputs.channel-build == '' }}
 
-      - name: Set up the locked build toolchain
-        id: pm
-        uses: ./.github/actions/setup-pm
+      - name: Check out trusted channel controller
+        if: needs.validate.outputs.channel-build != ''
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          toolchain: all
-          archive-inputs: true
-          # The payload tools cache does not include uv's built wheels.
-          cache-python: true
-          save-python-cache: false
+          ref: ${{ github.sha }}
+          path: .build/channel-controller
+          persist-credentials: false
 
-      - name: Resolve toolchain cache key
-        id: toolchain
+      - name: Retrieve pinned channel request
+        if: needs.validate.outputs.channel-build != ''
+        shell: bash
+        working-directory: .build/channel-controller
+        env:
+          CHANNEL_BUILD: ${{ needs.validate.outputs.channel-build }}
+          CHANNEL_REQUEST_SHA256: ${{ needs.validate.outputs.channel-request-sha256 }}
+        run: python -m scripts.releases.channel_publish request --out "$RUNNER_TEMP/channel-request.json"
+
+      - name: Resolve the builder toolchain versions
+        id: electron-tools
         shell: bash
         run: |
           node -e '
             const l = require("./package-lock.json")
-            const el = l.packages["apps/desktop/node_modules/electron"].version
             const eb = l.packages["node_modules/electron-builder"].version
-            if (!el || !eb) process.exit(1)
-            console.log(`electron=${el}`)
-            console.log(`builder=${eb}`)
+            if (!eb) process.exit(1)
+            console.log("eb=" + eb)
           ' >> "$GITHUB_OUTPUT"
 
-      - name: Cache verified payload signatures
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Restore the electron-builder toolchain cache
+        id: electron-tools-restore
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          # winCodeSign kit, ATS dlib, dotnet runtime and rcedit land in
+          # ELECTRON_BUILDER_CACHE; the builder version selects the content.
+          path: ${{ github.workspace }}/.cache/electron-builder
+          key: eb3-${{ runner.os }}-${{ runner.arch }}-builder-${{ steps.electron-tools.outputs.eb }}
+          restore-keys: |
+            eb3-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Restore desktop dependency inputs
+        id: build-cache
+        uses: ./.github/actions/desktop-build-cache
+        with:
+          phase: restore
+          source: ${{ github.workspace }}
+          work: ${{ runner.temp }}/desktop-job
+          cache: ${{ github.workspace }}/.cache/desktop-inputs
+          producer: desktop
+
+      - name: Prepare the complete desktop build
+        id: prepare
+        shell: bash
+        env:
+          HERMES_BUNDLE_ENV_JSON: ${{ inputs.bundle_env }}
+        run: |
+          args=(--tag "$HERMES_PAYLOAD_TAG")
+          if [ -n "$HERMES_BUILD_COMMIT" ]; then args=(--commit "$HERMES_BUILD_COMMIT"); fi
+          if [ -n "${CHANNEL_BUILD:-}" ]; then args=(--channel-request "$RUNNER_TEMP/channel-request.json"); fi
+          python scripts/bundles/desktop.py "${args[@]}" --variant bundled --prepare-only \
+            --work "$RUNNER_TEMP/desktop-job" --cache "$GITHUB_WORKSPACE/.cache/desktop-inputs"
+          python -m scripts.ci.desktop_commands "$RUNNER_TEMP/desktop-job/prepared.json"
+
+      - name: Save dependency inputs before building
+        if: ${{ !cancelled() && steps.prepare.outcome == 'success' && inputs.build_commit == '' && inputs.channel == '' }}
+        uses: ./.github/actions/desktop-build-cache
+        with:
+          phase: save
+          source: ${{ github.workspace }}
+          work: ${{ runner.temp }}/desktop-job
+          cache: ${{ github.workspace }}/.cache/desktop-inputs
+          producer: desktop
+          key: ${{ steps.build-cache.outputs.cache-key }}
+
+      # Commit builds run these steps with a read-only cache token; the
+      # exact-hit-skip semantics of actions/cache keep a read token harmless.
+      - name: Save the electron-builder toolchain
+        if: ${{ !cancelled() && steps.prepare.outcome == 'success' && inputs.build_commit == '' && inputs.channel == '' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ github.workspace }}/.cache/electron-builder
+          key: eb3-${{ runner.os }}-${{ runner.arch }}-builder-${{ steps.electron-tools.outputs.eb }}
+
+      - name: Restore verified payload signatures
+        id: payload-signatures
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ github.workspace }}/.cache/electron-builder-payload-signatures
-          # Each run saves additions. Content and signing policy select entries.
+          # Release runs save additions. Content and signing policy select entries.
           key: payload-signatures-v1-${{ runner.os }}-${{ matrix.target.label }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             payload-signatures-v1-${{ runner.os }}-${{ matrix.target.label }}-
             payload-signatures-v1-${{ runner.os }}-
-
-      - name: Set up native ARM64 build dependencies
-        if: matrix.target.label == 'win32-arm64'
-        uses: ./.github/actions/setup-windows-build-deps
-
-      - name: Cache pm store
-        # Tag-dispatched runs (every canary) scope actions/cache under the
-        # dispatch ref, which GitHub mangles to refs/heads/refs/tags/<tag> —
-        # a different scope per tag, so an exact key can never be restored
-        # by a later canary. The content key below is stable across tags
-        # when pm/lock.json + uv.lock are unchanged; the restore-keys prefix
-        # (which ignores the tag entirely) rescues the previous canary's
-        # store when the locks DID move.
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: apps/desktop/build/agent-payload/tools
-          key: pm-store-v2-${{ matrix.target.label }}-${{ hashFiles('pm/lock.json', 'uv.lock') }}
-          restore-keys: |
-            pm-store-v2-${{ matrix.target.label }}-
-
-      - name: Retrieve pinned payload inputs from R2
-        shell: bash
-        run: python -m scripts.ci.archive_inputs --target '${{ matrix.target.label }}' --store apps/desktop/build/agent-payload/tools
-
-      - name: Resolve electron's default download cache path
-        shell: bash
-        run: |
-          # @electron/get does NOT honor ELECTRON_CACHE/electron_config_cache:
-          # the electron-builder build's electron zip download uses the
-          # default env-paths cache root. It must be in the actions/cache
-          # path list or every build re-downloads electron (~115MB).
-          case "$RUNNER_OS" in
-            Windows) echo "ELECTRON_DEFAULT_CACHE=$LOCALAPPDATA/electron/Cache" >> "$GITHUB_ENV" ;;
-            macOS)   echo "ELECTRON_DEFAULT_CACHE=$HOME/Library/Caches/electron" >> "$GITHUB_ENV" ;;
-            *)       echo "ELECTRON_DEFAULT_CACHE=$HOME/.cache/electron" >> "$GITHUB_ENV" ;;
-          esac
-
-      - name: Cache electron + electron-builder toolchain
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ${{ github.workspace }}/.cache/electron-builder
-            ${{ github.workspace }}/.cache/electron
-            ${{ env.ELECTRON_DEFAULT_CACHE }}
-          # eb2: bumped from eb- (2026-08-28) — the old eb- caches never
-          # contained the electron zip (it lives in @electron/get's default
-          # cache root, which wasn't in the path list), so every build
-          # re-downloaded electron. The new key forces a fresh save that
-          # includes the default cache root.
-          key: eb2-${{ runner.os }}-${{ runner.arch }}-electron-${{ steps.toolchain.outputs.electron }}-builder-${{ steps.toolchain.outputs.builder }}
-          # An electron/builder bump misses the exact key, but the previous
-          # dist is still mostly reusable (electron's postinstall skips the
-          # download when dist/ exists) — restore it and let npm ci top up.
-          restore-keys: |
-            eb2-${{ runner.os }}-${{ runner.arch }}-
-
-      - name: Cache node_modules
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            node_modules
-            apps/*/node_modules
-            ui-tui/node_modules
-            ui-tui/packages/*/node_modules
-            web/node_modules
-            tests-js/node_modules
-          key: node-modules-${{ matrix.target.label }}-node${{ steps.pm.outputs.node-version }}-npm${{ steps.pm.outputs.npm-version }}-${{ hashFiles('package-lock.json') }}
-          # npm ci rm -rf's node_modules before installing, so a restore is
-          # never shipped stale — but a restore-key hit still makes the
-          # reinstall incremental (postinstall outputs like node-pty's
-          # prebuilds/ and esbuild's platform binary survive in place).
-          # The build-bundled install-stamp gate (lock sha + node + npm +
-          # target) is the real guard against stale trees shipping.
-          restore-keys: |
-            node-modules-${{ matrix.target.label }}-node${{ steps.pm.outputs.node-version }}-npm${{ steps.pm.outputs.npm-version }}-
-
-      - name: Cache node-pty prebuilds (postinstall output, emulated-gyp tax on arm64)
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            node_modules/node-pty/prebuilds
-            node_modules/node-pty/build
-          key: node-pty-prebuilds-${{ matrix.target.label }}-${{ hashFiles('package-lock.json') }}
-          restore-keys: |
-            node-pty-prebuilds-${{ matrix.target.label }}-
 
       - name: Azure login (OIDC)
         if: vars.AZURE_CLIENT_ID != ''
@@ -454,20 +519,8 @@ jobs:
           ( while sleep 240; do mint || true; done ) &
           echo "AZURE_FEDERATED_TOKEN_FILE=$file" >> "$GITHUB_ENV"
 
-      - name: Pin CMake < 4 for sdist builds
-        # python-olm (matrix extra) builds libolm from sdist on non-Linux
-        # targets, and its libolm/CMakeLists.txt requires CMake < 3.5
-        # compat (removed in CMake 4, which the darwin + win32 runners
-        # ship). Pin a CMake 3.x first on PATH for those legs so the sdist
-        # build configures. Linux uses the manylinux wheel — no build, no
-        # cmake needed. The pip cmake package ships a binary wheel for
-        # every non-Linux target (macos universal2, win_amd64, win_arm64).
-        shell: bash
-        run: |
-          python -m scripts.ci.python_packages cmake==3.31.6
-
       - name: Build and package
-        shell: bash
+        shell: powershell
         timeout-minutes: 900
         env:
           HERMES_BUNDLE_ENV_JSON: ${{ inputs.bundle_env }}
@@ -480,29 +533,25 @@ jobs:
           AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
           AZURE_TOKEN_CREDENTIALS: prod
         run: |
-          if [ -n "$HERMES_BUILD_COMMIT" ]; then
-            python scripts/bundles/desktop.py --commit="$HERMES_BUILD_COMMIT" --variant=bundled
-          else
-            python scripts/bundles/desktop.py --tag="$HERMES_PAYLOAD_TAG" --variant=bundled
-            # The official Store identity is stable-only. Canary must never
-            # replace it, even in a Store flight ring.
-            if [[ "$HERMES_PAYLOAD_TAG" != *-canary.* ]]; then
-              python scripts/bundles/desktop.py --tag="$HERMES_PAYLOAD_TAG" --variant=store
-            fi
-          fi
-
-      - name: Save warmed Python dependencies even after a packaging failure
-        if: ${{ !cancelled() && steps.pm.outcome == 'success' }}
-        uses: ./.github/actions/save-pm-cache
-        with:
-          python: ${{ steps.pm.outputs.python-path }}
-          path: ${{ steps.pm.outputs.uv-cache-path }}
-          key: ${{ steps.pm.outputs.python-cache-key }}
+          python scripts/bundles/desktop.py --prepared "$env:RUNNER_TEMP/desktop-job/prepared.json" --variant bundled
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not $env:CHANNEL_BUILD -and -not $env:HERMES_BUILD_COMMIT -and $env:HERMES_PAYLOAD_TAG -notlike "*-canary.*") {
+              python scripts/bundles/desktop.py --prepared "$env:RUNNER_TEMP/desktop-job/prepared.json" --variant store
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
 
       - name: Verify native signature cache contracts
         shell: bash
         working-directory: apps/desktop
         run: node ../../node_modules/vitest/vitest.mjs run --project electron scripts/payload-sign-cache.test.mjs scripts/batch-sign-binaries.test.mjs
+
+      # Commit jobs share these steps but have read-only cache tokens.
+      - name: Save verified payload signatures
+        if: inputs.build_commit == ''
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ github.workspace }}/.cache/electron-builder-payload-signatures
+          key: ${{ steps.payload-signatures.outputs.cache-primary-key }}
 
       - name: Audit bundle architecture
         shell: bash
@@ -511,18 +560,44 @@ jobs:
           node apps/desktop/scripts/audit-bundle-arch.mjs \
             --arch="${MATRIX_LABEL##*-}" --root=apps/desktop/release
 
+      - name: Record and stage channel windows packages
+        if: needs.validate.outputs.channel-build != ''
+        shell: bash
+        working-directory: .build/channel-controller
+        env:
+          TARGET: ${{ matrix.target.label }}
+          RELEASE_COMMIT: ${{ needs.validate.outputs.sha }}
+          CLOUDFLARE_R2_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_R2_ACCOUNT_ID }}
+          CLOUDFLARE_R2_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
+          CLOUDFLARE_R2_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
+        run: |
+          root="$GITHUB_WORKSPACE/apps/desktop/release"
+          python -m scripts.bundles.release_artifacts record --platform windows --arch "${TARGET##*-}" \
+            --root "$root" --commit "$RELEASE_COMMIT" --channel-request "$RUNNER_TEMP/channel-request.json" \
+            --out "$root/metadata-windows-${TARGET##*-}.json"
+          python -m scripts.releases.handoff stage --channel-request "$RUNNER_TEMP/channel-request.json" \
+            --name "$TARGET" --root "$root" --include '*.msix' --include 'metadata-*.json'
+
       - name: Stage Windows packages to R2
-        if: inputs.upload_release == true || inputs.release-phase == 'candidate' || inputs.build_commit != ''
+        # A channel dispatch carries build_commit as provenance, not as the
+        # receipt mode: its packages are staged by the pinned channel request
+        # step above, and HERMES_PAYLOAD_TAG/HERMES_BUILD_COMMIT are both
+        # empty here. Without this gate the step falls through to the tag
+        # branch and handoff refuses an empty tag.
+        if: needs.validate.outputs.channel-build == '' && (inputs.upload_release == true || inputs.release-phase == 'candidate' || inputs.build_commit != '')
         shell: bash
         env:
+          CLOUDFLARE_R2_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_R2_ACCOUNT_ID }}
+          CLOUDFLARE_R2_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
+          CLOUDFLARE_R2_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
           TARGET: ${{ matrix.target.label }}
           RELEASE_PHASE: ${{ inputs.release-phase }}
           RELEASE_COMMIT: ${{ needs.validate.outputs.sha }}
         # The tag archive is the handoff, never an update feed. The receipt
-        # appears only after both normal and Store packages are uploaded.
+        # appears after the selected packages (including Store on stable) upload.
         run: |
           args=(--include '*.msix')
-          if [ "$RELEASE_PHASE" = candidate ]; then
+          if [ "$RELEASE_PHASE" = candidate ] || { [ "$HERMES_DESKTOP_VARIANT" = bundled ] && [[ "$HERMES_PAYLOAD_TAG" == *-canary.* ]]; }; then
             python -m scripts.bundles.release_artifacts record --platform windows --arch "${TARGET##*-}" \
               --root apps/desktop/release --tag "$HERMES_PAYLOAD_TAG" --commit "$RELEASE_COMMIT" \
               --out "apps/desktop/release/metadata-windows-${TARGET##*-}.json"
@@ -538,6 +613,47 @@ jobs:
               --name "$TARGET" --root apps/desktop/release "${args[@]}"
           fi
 
+  build-win32-commit:
+    name: bundled ${{ matrix.target.label }} (commit)
+    if: >-
+      !cancelled() && needs.validate.result == 'success'
+      && inputs.termux_only != true && (inputs.release-phase == '' || inputs.release-phase == 'candidate')
+      && (inputs.build_commit != '' || inputs.channel != '')
+    needs: [validate]
+    runs-on: ${{ matrix.target.runner }}
+    environment: release-signing
+    cache-mode: read
+    timeout-minutes: 900
+    strategy: *win32-strategy
+    env: *win32-env
+    steps: *win32-steps
+
+  build-win32:
+    name: bundled win32 result
+    # always() crosses the deliberately skipped trust branch; failed admission
+    # still skips this result, just as it skipped the original native builder.
+    if: >-
+      always() && inputs.termux_only != true && (inputs.release-phase == '' || inputs.release-phase == 'candidate')
+      && needs.validate.result == 'success'
+    # The trust-branch legs are read through needs.*.result below, so they must
+    # stay in the list — the result job gates on their outcomes, not its own.
+    needs: [validate, build-win32-release, build-win32-commit]
+    runs-on: ubuntu-24.04
+    permissions: {}
+    timeout-minutes: 5
+    env:
+      SELECTED_BUILD_SUCCEEDED: >-
+        ${{ (inputs.build_commit == '' && inputs.channel == '' && needs.build-win32-release.result == 'success' && needs.build-win32-commit.result == 'skipped')
+          || ((inputs.build_commit != '' || inputs.channel != '') && needs.build-win32-commit.result == 'success' && needs.build-win32-release.result == 'skipped') }}
+    steps: &native-build-result-steps
+      - name: Require exactly the selected native build to succeed
+        shell: bash
+        run: |
+          if [ "$SELECTED_BUILD_SUCCEEDED" != "true" ]; then
+            echo "::error::selected native build did not succeed, or the other trust branch was not skipped"
+            exit 1
+          fi
+
   # ── macOS builders (REAL) ──────────────────────────────────────────────────
   # Native per-arch darwin builds via scripts/bundles/desktop.py (the
   # one driver: same `--mac dmg zip` pass a local mac build runs). Each leg
@@ -549,14 +665,15 @@ jobs:
   # merge-multiple download) and publish-darwin-updater merges them into
   # releases/darwin/<channel>/<channel>-mac.yml — artifacts first, feed
   # pointer last, whole channel green before anything publishes.
-  build-darwin:
+  build-darwin-release:
     name: bundled ${{ matrix.target.label }}
-    if: inputs.termux_only != true && (inputs.release-phase == '' || inputs.release-phase == 'candidate')
-    needs: [validate, archive-inputs]
+    if: inputs.termux_only != true && (inputs.release-phase == '' || inputs.release-phase == 'candidate') && inputs.build_commit == '' && inputs.channel == ''
+    needs: [validate]
     runs-on: ${{ matrix.target.runner }}
     environment: release-signing
+    cache-mode: write
     timeout-minutes: 360
-    strategy:
+    strategy: &darwin-strategy
       fail-fast: false
       matrix:
         target:
@@ -564,20 +681,15 @@ jobs:
             runner: macos-15
           - label: darwin-x64
             runner: macos-15-intel
-    env:
+    env: &darwin-env
+      CHANNEL_BUILD: ${{ needs.validate.outputs.channel-build }}
       HERMES_DESKTOP_VARIANT: bundled
       HERMES_PAYLOAD_TAG: ${{ inputs.tag }}
-      HERMES_BUILD_COMMIT: ${{ needs.validate.outputs.sha && inputs.build_commit != '' && needs.validate.outputs.sha || '' }}
+      HERMES_BUILD_COMMIT: ${{ inputs.build_commit != '' && needs.validate.outputs.channel-build == '' && needs.validate.outputs.sha || '' }}
       HERMES_PAYLOAD_VERSION: ${{ needs.validate.outputs.payload-version }}
-      ELECTRON_BUILDER_CACHE: ${{ github.workspace }}/.cache/electron-builder
-      ELECTRON_CACHE: ${{ github.workspace }}/.cache/electron
-      electron_config_cache: ${{ github.workspace }}/.cache/electron
-      CLOUDFLARE_R2_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_R2_ACCOUNT_ID }}
-      CLOUDFLARE_R2_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
-      CLOUDFLARE_R2_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
       CLOUDFLARE_R2_BUCKET: ${{ vars.CLOUDFLARE_R2_BUCKET }}
-      CLOUDFLARE_R2_PUBLIC_URL: ${{ vars.CLOUDFLARE_R2_PUBLIC_URL }}
-    steps:
+      CLOUDFLARE_R2_PUBLIC_URL: ${{ needs.validate.outputs.public-root }}
+    steps: &darwin-steps
       - name: Disable Spotlight indexing for DMG staging
         # Spotlight indexes the freshly-mounted dmg staging image past
         # hdiutil's detach retries (per-VM, not a cross-job race).
@@ -591,112 +703,97 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: ${{ needs.validate.outputs.sha }}
-          fetch-tags: true
-          fetch-depth: 0
+          # Channel/commit builds derive versions from the request/env, not
+          # git tags; tag builds need tags for the canary MSIX number.
+          fetch-depth: ${{ (inputs.build_commit != '' || needs.validate.outputs.channel-build != '') && 1 || 0 }}
+          fetch-tags: ${{ inputs.build_commit == '' && needs.validate.outputs.channel-build == '' }}
 
-      - name: Set up the locked build toolchain
-        id: pm
-        uses: ./.github/actions/setup-pm
+      - name: Check out trusted channel controller
+        if: needs.validate.outputs.channel-build != ''
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          toolchain: all
-          archive-inputs: true
-          # The payload tools cache does not include uv's built wheels.
-          cache-python: true
-          save-python-cache: false
+          ref: ${{ github.sha }}
+          path: .build/channel-controller
+          persist-credentials: false
 
-      - name: Resolve toolchain cache key
-        id: toolchain
+      - name: Retrieve pinned channel request
+        if: needs.validate.outputs.channel-build != ''
+        shell: bash
+        working-directory: .build/channel-controller
+        env:
+          CHANNEL_BUILD: ${{ needs.validate.outputs.channel-build }}
+          CHANNEL_REQUEST_SHA256: ${{ needs.validate.outputs.channel-request-sha256 }}
+        run: python -m scripts.releases.channel_publish request --out "$RUNNER_TEMP/channel-request.json"
+
+      - name: Resolve the builder toolchain versions
+        id: electron-tools
         shell: bash
         run: |
           node -e '
             const l = require("./package-lock.json")
-            const el = l.packages["apps/desktop/node_modules/electron"].version
             const eb = l.packages["node_modules/electron-builder"].version
-            if (!el || !eb) process.exit(1)
-            console.log(`electron=${el}`)
-            console.log(`builder=${eb}`)
+            if (!eb) process.exit(1)
+            console.log("eb=" + eb)
           ' >> "$GITHUB_OUTPUT"
 
-      - name: Cache pm store
-        # Tag-dispatched runs (every canary) scope actions/cache under the
-        # dispatch ref, which GitHub mangles to refs/heads/refs/tags/<tag> —
-        # a different scope per tag, so an exact key can never be restored
-        # by a later canary. The content key below is stable across tags
-        # when pm/lock.json + uv.lock are unchanged; the restore-keys prefix
-        # (which ignores the tag entirely) rescues the previous canary's
-        # store when the locks DID move.
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Restore the electron-builder toolchain cache
+        id: electron-tools-restore
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: apps/desktop/build/agent-payload/tools
-          key: pm-store-v2-${{ matrix.target.label }}-${{ hashFiles('pm/lock.json', 'uv.lock') }}
+          # winCodeSign kit, ATS dlib, dotnet runtime and rcedit land in
+          # ELECTRON_BUILDER_CACHE; the builder version selects the content.
+          path: ${{ github.workspace }}/.cache/electron-builder
+          key: eb3-${{ runner.os }}-${{ runner.arch }}-builder-${{ steps.electron-tools.outputs.eb }}
           restore-keys: |
-            pm-store-v2-${{ matrix.target.label }}-
+            eb3-${{ runner.os }}-${{ runner.arch }}-
 
-      - name: Retrieve pinned payload inputs from R2
-        shell: bash
-        run: python -m scripts.ci.archive_inputs --target '${{ matrix.target.label }}' --store apps/desktop/build/agent-payload/tools
+      - name: Restore desktop dependency inputs
+        id: build-cache
+        uses: ./.github/actions/desktop-build-cache
+        with:
+          phase: restore
+          source: ${{ github.workspace }}
+          work: ${{ runner.temp }}/desktop-job
+          cache: ${{ github.workspace }}/.cache/desktop-inputs
+          producer: desktop
 
-      - name: Resolve electron's default download cache path
+      - name: Prepare the complete desktop build
+        id: prepare
         shell: bash
+        env:
+          HERMES_BUNDLE_ENV_JSON: ${{ inputs.bundle_env }}
         run: |
-          # @electron/get does NOT honor ELECTRON_CACHE/electron_config_cache:
-          # the electron-builder build's electron zip download uses the
-          # default env-paths cache root. It must be in the actions/cache
-          # path list or every build re-downloads electron (~115MB).
-          case "$RUNNER_OS" in
-            Windows) echo "ELECTRON_DEFAULT_CACHE=$LOCALAPPDATA/electron/Cache" >> "$GITHUB_ENV" ;;
-            macOS)   echo "ELECTRON_DEFAULT_CACHE=$HOME/Library/Caches/electron" >> "$GITHUB_ENV" ;;
-            *)       echo "ELECTRON_DEFAULT_CACHE=$HOME/.cache/electron" >> "$GITHUB_ENV" ;;
-          esac
+          args=(--tag "$HERMES_PAYLOAD_TAG")
+          if [ -n "$HERMES_BUILD_COMMIT" ]; then args=(--commit "$HERMES_BUILD_COMMIT"); fi
+          if [ -n "${CHANNEL_BUILD:-}" ]; then args=(--channel-request "$RUNNER_TEMP/channel-request.json"); fi
+          python3 scripts/bundles/desktop.py "${args[@]}" --variant bundled --prepare-only \
+            --work "$RUNNER_TEMP/desktop-job" --cache "$GITHUB_WORKSPACE/.cache/desktop-inputs"
+          python3 -m scripts.ci.desktop_commands "$RUNNER_TEMP/desktop-job/prepared.json"
 
-      - name: Cache electron + electron-builder toolchain
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Save dependency inputs before building
+        if: ${{ !cancelled() && steps.prepare.outcome == 'success' && inputs.build_commit == '' && inputs.channel == '' }}
+        uses: ./.github/actions/desktop-build-cache
         with:
-          path: |
-            ${{ github.workspace }}/.cache/electron-builder
-            ${{ github.workspace }}/.cache/electron
-            ${{ env.ELECTRON_DEFAULT_CACHE }}
-          key: eb2-${{ runner.os }}-${{ runner.arch }}-electron-${{ steps.toolchain.outputs.electron }}-builder-${{ steps.toolchain.outputs.builder }}
-          # An electron/builder bump misses the exact key, but the previous
-          # dist is still mostly reusable (electron's postinstall skips the
-          # download when dist/ exists) — restore it and let npm ci top up.
-          restore-keys: |
-            eb2-${{ runner.os }}-${{ runner.arch }}-
+          phase: save
+          source: ${{ github.workspace }}
+          work: ${{ runner.temp }}/desktop-job
+          cache: ${{ github.workspace }}/.cache/desktop-inputs
+          producer: desktop
+          key: ${{ steps.build-cache.outputs.cache-key }}
 
-      - name: Cache node_modules
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      # Commit builds run these steps with a read-only cache token; the
+      # exact-hit-skip semantics of actions/cache keep a read token harmless.
+      - name: Save the electron-builder toolchain
+        if: ${{ !cancelled() && steps.prepare.outcome == 'success' && inputs.build_commit == '' && inputs.channel == '' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: |
-            node_modules
-            apps/*/node_modules
-            ui-tui/node_modules
-            ui-tui/packages/*/node_modules
-            web/node_modules
-            tests-js/node_modules
-          key: node-modules-${{ matrix.target.label }}-node${{ steps.pm.outputs.node-version }}-npm${{ steps.pm.outputs.npm-version }}-${{ hashFiles('package-lock.json') }}
-          # npm ci rm -rf's node_modules before installing, so a restore is
-          # never shipped stale — but a restore-key hit still makes the
-          # reinstall incremental (postinstall outputs like node-pty's
-          # prebuilds/ and esbuild's platform binary survive in place).
-          # The build-bundled install-stamp gate (lock sha + node + npm +
-          # target) is the real guard against stale trees shipping.
-          restore-keys: |
-            node-modules-${{ matrix.target.label }}-node${{ steps.pm.outputs.node-version }}-npm${{ steps.pm.outputs.npm-version }}-
-
-      - name: Cache node-pty prebuilds (postinstall output)
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            node_modules/node-pty/prebuilds
-            node_modules/node-pty/build
-          key: node-pty-prebuilds-${{ matrix.target.label }}-${{ hashFiles('package-lock.json') }}
-          restore-keys: |
-            node-pty-prebuilds-${{ matrix.target.label }}-
+          path: ${{ github.workspace }}/.cache/electron-builder
+          key: eb3-${{ runner.os }}-${{ runner.arch }}-builder-${{ steps.electron-tools.outputs.eb }}
 
       # Commit artifacts are downloadable too. Require signing for them,
       # candidates, and published tags before building any payload.
       - name: Require signing credentials when publishing
-        if: inputs.upload_release == true || inputs.release-phase == 'candidate' || inputs.build_commit != ''
+        if: inputs.upload_release == true || inputs.release-phase == 'candidate' || inputs.build_commit != '' || inputs.channel != ''
         shell: bash
         env:
           CSC_LINK: ${{ secrets.CSC_LINK }}
@@ -722,7 +819,7 @@ jobs:
         # notarytool takes a FILE PATH for --key; raw .p8 content in argv
         # dies with `Invalid option: ***`. The build step must NOT re-declare
         # APPLE_API_KEY in its env: step env shadows GITHUB_ENV.
-        if: inputs.upload_release == true || inputs.release-phase == 'candidate' || inputs.build_commit != ''
+        if: inputs.upload_release == true || inputs.release-phase == 'candidate' || inputs.build_commit != '' || inputs.channel != ''
         shell: bash
         env:
           APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
@@ -730,22 +827,11 @@ jobs:
           printf '%s\n' "$APPLE_API_KEY_P8" > "$RUNNER_TEMP/apple-api-key.p8"
           echo "APPLE_API_KEY=$RUNNER_TEMP/apple-api-key.p8" >> "$GITHUB_ENV"
 
-      - name: Pin CMake < 4 for sdist builds
-        # python-olm (matrix extra) builds libolm from sdist on non-Linux
-        # targets, and its libolm/CMakeLists.txt requires CMake < 3.5
-        # compat (removed in CMake 4, which the darwin runners ship). Pin a
-        # CMake 3.x first on PATH so the sdist build configures.
-        shell: bash
-        run: |
-          python -m scripts.ci.python_packages cmake==3.31.6
-
       - name: Build and package
         shell: bash
         timeout-minutes: 330
         env:
           HERMES_BUNDLE_ENV_JSON: ${{ inputs.bundle_env }}
-          GITHUB_SHA: ${{ needs.validate.outputs.sha }}
-          GITHUB_REF_NAME: ${{ inputs.tag }}
           PYTHONUTF8: '1'
           # electron-osx-sign*/electron-notarize* keep the sign+notarize
           # phase visible: without them NOTHING logs between "signing
@@ -761,19 +847,7 @@ jobs:
           # every Mach-O) — raise the fd limit and let DEBUG show progress.
           ulimit -n 16384 2>/dev/null || true
           echo "file descriptor limit: soft=$(ulimit -Sn) hard=$(ulimit -Hn)"
-          if [ -n "$HERMES_BUILD_COMMIT" ]; then
-            python scripts/bundles/desktop.py --commit="$HERMES_BUILD_COMMIT" --variant=bundled
-          else
-            python scripts/bundles/desktop.py --tag="$HERMES_PAYLOAD_TAG" --variant=bundled
-          fi
-
-      - name: Save warmed Python dependencies even after a packaging failure
-        if: ${{ !cancelled() && steps.pm.outcome == 'success' }}
-        uses: ./.github/actions/save-pm-cache
-        with:
-          python: ${{ steps.pm.outputs.python-path }}
-          path: ${{ steps.pm.outputs.uv-cache-path }}
-          key: ${{ steps.pm.outputs.python-cache-key }}
+          python scripts/bundles/desktop.py --prepared "$RUNNER_TEMP/desktop-job/prepared.json" --variant bundled
 
       - name: Audit bundle architecture
         shell: bash
@@ -786,7 +860,7 @@ jobs:
         # The backstop against a silent unsigned publish: assess the packed
         # app against the real Gatekeeper policy (requires a Developer ID
         # signature AND a stapled notarization ticket to pass offline).
-        if: inputs.upload_release == true || inputs.release-phase == 'candidate' || inputs.build_commit != ''
+        if: inputs.upload_release == true || inputs.release-phase == 'candidate' || inputs.build_commit != '' || inputs.channel != ''
         shell: bash
         run: |
           shopt -s nullglob
@@ -820,17 +894,40 @@ jobs:
           test -s "$f"
           mv "$f" "apps/desktop/release/${arch}-${channel}-mac.yml"
 
+      - name: Record and stage channel macos packages
+        if: needs.validate.outputs.channel-build != ''
+        shell: bash
+        working-directory: .build/channel-controller
+        env:
+          TARGET: ${{ matrix.target.label }}
+          RELEASE_COMMIT: ${{ needs.validate.outputs.sha }}
+          CLOUDFLARE_R2_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_R2_ACCOUNT_ID }}
+          CLOUDFLARE_R2_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
+          CLOUDFLARE_R2_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
+        run: |
+          root="$GITHUB_WORKSPACE/apps/desktop/release"
+          python -m scripts.bundles.release_artifacts record --platform macos --arch "${TARGET##*-}" \
+            --root "$root" --commit "$RELEASE_COMMIT" --channel-request "$RUNNER_TEMP/channel-request.json" \
+            --out "$root/metadata-macos-${TARGET##*-}.json"
+          python -m scripts.releases.handoff stage --channel-request "$RUNNER_TEMP/channel-request.json" \
+            --name "$TARGET" --root "$root" --include '*.dmg' --include '*.zip' --include '*.blockmap' --include 'metadata-*.json'
+
       - name: Stage macOS packages and feed inputs to R2
-        if: inputs.upload_release == true || inputs.release-phase == 'candidate' || inputs.build_commit != ''
+        # Channel dispatches stage through the pinned request step above; see
+        # the Windows leg for the empty-tag fallthrough this gate prevents.
+        if: needs.validate.outputs.channel-build == '' && (inputs.upload_release == true || inputs.release-phase == 'candidate' || inputs.build_commit != '')
         shell: bash
         env:
+          CLOUDFLARE_R2_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_R2_ACCOUNT_ID }}
+          CLOUDFLARE_R2_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
+          CLOUDFLARE_R2_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
           TARGET: ${{ matrix.target.label }}
           RELEASE_PHASE: ${{ inputs.release-phase }}
           RELEASE_COMMIT: ${{ needs.validate.outputs.sha }}
         # Per-arch feed inputs stay in the tag archive until both legs pass.
         run: |
           args=(--include '*.dmg' --include '*.zip' --include '*.blockmap' --include '*-mac.yml')
-          if [ "$RELEASE_PHASE" = candidate ]; then
+          if [ "$RELEASE_PHASE" = candidate ] || { [ "$HERMES_DESKTOP_VARIANT" = bundled ] && [[ "$HERMES_PAYLOAD_TAG" == *-canary.* ]]; }; then
             python -m scripts.bundles.release_artifacts record --platform macos --arch "${TARGET##*-}" \
               --root apps/desktop/release --tag "$HERMES_PAYLOAD_TAG" --commit "$RELEASE_COMMIT" \
               --out "apps/desktop/release/metadata-macos-${TARGET##*-}.json"
@@ -847,6 +944,38 @@ jobs:
               --name "$TARGET" --root apps/desktop/release "${args[@]}"
           fi
 
+  build-darwin-commit:
+    name: bundled ${{ matrix.target.label }} (commit)
+    if: >-
+      !cancelled() && needs.validate.result == 'success'
+      && inputs.termux_only != true && (inputs.release-phase == '' || inputs.release-phase == 'candidate')
+      && (inputs.build_commit != '' || inputs.channel != '')
+    needs: [validate]
+    runs-on: ${{ matrix.target.runner }}
+    environment: release-signing
+    cache-mode: read
+    timeout-minutes: 360
+    strategy: *darwin-strategy
+    env: *darwin-env
+    steps: *darwin-steps
+
+  build-darwin:
+    name: bundled darwin result
+    # always() crosses the deliberately skipped trust branch; failed admission
+    # still skips this result, just as it skipped the original native builder.
+    if: >-
+      always() && inputs.termux_only != true && (inputs.release-phase == '' || inputs.release-phase == 'candidate')
+      && needs.validate.result == 'success'
+    needs: [validate, build-darwin-release, build-darwin-commit]
+    runs-on: ubuntu-24.04
+    permissions: {}
+    timeout-minutes: 5
+    env:
+      SELECTED_BUILD_SUCCEEDED: >-
+        ${{ (inputs.build_commit == '' && inputs.channel == '' && needs.build-darwin-release.result == 'success' && needs.build-darwin-commit.result == 'skipped')
+          || ((inputs.build_commit != '' || inputs.channel != '') && needs.build-darwin-commit.result == 'success' && needs.build-darwin-release.result == 'skipped') }}
+    steps: *native-build-result-steps
+
   # ── Linux builders (DISABLED for now) ─────────────────────────────────────
   build-linux:
     name: bundled linux (disabled for now)
@@ -857,31 +986,126 @@ jobs:
       fail-fast: false
       matrix:
         target:
-          - { label: linux-x64 }    # runner: ubuntu-24.04
-          - { label: linux-arm64 }  # runner: ubuntu-24.04-arm
+          - { label: linux-x64 } # runner: ubuntu-24.04
+          - { label: linux-arm64 } # runner: ubuntu-24.04-arm
     steps:
       - name: Disabled
         shell: bash
         run: echo "::notice::linux bundled builds are disabled for now — re-enable in desktop-bundled-release.yml"
 
-  # ── Windows updater channels (REAL — gated on build-win32 only) ──────────
-  publish-win32-updater:
-    name: Assemble Windows bundle and optionally publish canary feed
+  smoke-darwin:
+    name: Smoke macOS ${{ matrix.arch }} ${{ matrix.format }}
+    needs: [validate, build-darwin]
+    if: >-
+      !cancelled() && needs.validate.result == 'success' && needs.validate.outputs.sha != ''
+      && needs.build-darwin.result == 'success' && inputs.termux_only != true
+      && (inputs.release-phase == '' || inputs.release-phase == 'candidate')
+      && (inputs.upload_release == true || inputs.release-phase == 'candidate' || inputs.build_commit != '' || inputs.channel != '')
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [arm64, x64]
+        format: [dmg, zip]
+    uses: ./.github/workflows/desktop-bundle-smoke.yml
+    with:
+      platform: darwin
+      arch: ${{ matrix.arch }}
+      format: ${{ matrix.format }}
+      sha: ${{ needs.validate.outputs.sha }}
+      tag: ${{ inputs.tag }}
+      commit-build: ${{ inputs.build_commit != '' && needs.validate.outputs.channel-build == '' }}
+      channel-build: ${{ needs.validate.outputs.channel-build }}
+      channel-request-sha256: ${{ needs.validate.outputs.channel-request-sha256 }}
+      controller-sha: ${{ github.sha }}
+      public-base: ${{ needs.validate.outputs.public-base }}
+      public-root: ${{ needs.validate.outputs.public-root }}
+      disposable-run: ${{ needs.validate.outputs.disposable-run }}
+
+  smoke-win32:
+    name: Smoke Windows ${{ matrix.arch }} MSIX
     needs: [validate, build-win32]
-    if: inputs.upload_release == true || inputs.release-phase == 'candidate' || inputs.build_commit != ''
+    if: >-
+      !cancelled() && needs.validate.result == 'success' && needs.validate.outputs.sha != ''
+      && needs.build-win32.result == 'success' && inputs.termux_only != true
+      && (inputs.release-phase == '' || inputs.release-phase == 'candidate')
+      && (inputs.upload_release == true || inputs.release-phase == 'candidate' || inputs.build_commit != '' || inputs.channel != '')
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, arm64]
+    uses: ./.github/workflows/desktop-bundle-smoke.yml
+    with:
+      platform: win32
+      arch: ${{ matrix.arch }}
+      format: msix
+      sha: ${{ needs.validate.outputs.sha }}
+      tag: ${{ inputs.tag }}
+      commit-build: ${{ inputs.build_commit != '' && needs.validate.outputs.channel-build == '' }}
+      channel-build: ${{ needs.validate.outputs.channel-build }}
+      channel-request-sha256: ${{ needs.validate.outputs.channel-request-sha256 }}
+      controller-sha: ${{ github.sha }}
+      public-base: ${{ needs.validate.outputs.public-base }}
+      public-root: ${{ needs.validate.outputs.public-root }}
+      disposable-run: ${{ needs.validate.outputs.disposable-run }}
+
+  smoke-win32-universal:
+    name: Smoke Windows ${{ matrix.arch }} MSIXBUNDLE
+    needs: [validate, assemble-win32-bundle]
+    if: >-
+      !cancelled() && needs.validate.result == 'success' && needs.validate.outputs.sha != ''
+      && needs.assemble-win32-bundle.result == 'success' && inputs.termux_only != true
+      && (inputs.release-phase == '' || inputs.release-phase == 'candidate')
+      && (inputs.upload_release == true || inputs.release-phase == 'candidate' || inputs.build_commit != '' || inputs.channel != '')
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, arm64]
+    uses: ./.github/workflows/desktop-bundle-smoke.yml
+    with:
+      platform: win32
+      arch: ${{ matrix.arch }}
+      format: msixbundle
+      sha: ${{ needs.validate.outputs.sha }}
+      tag: ${{ inputs.tag }}
+      commit-build: ${{ inputs.build_commit != '' && needs.validate.outputs.channel-build == '' }}
+      channel-build: ${{ needs.validate.outputs.channel-build }}
+      channel-request-sha256: ${{ needs.validate.outputs.channel-request-sha256 }}
+      controller-sha: ${{ github.sha }}
+      public-base: ${{ needs.validate.outputs.public-base }}
+      public-root: ${{ needs.validate.outputs.public-root }}
+      disposable-run: ${{ needs.validate.outputs.disposable-run }}
+
+  # Assembly never writes a feed, including for canaries.
+  assemble-win32-bundle:
+    name: Assemble and stage the Windows universal bundle
+    needs: [validate, build-win32]
+    if: >-
+      !cancelled() && needs.validate.result == 'success' && needs.validate.outputs.sha != ''
+      && needs.build-win32.result == 'success' && inputs.termux_only != true
+      && (inputs.release-phase == '' || inputs.release-phase == 'candidate')
+      && (inputs.upload_release == true || inputs.release-phase == 'candidate' || inputs.build_commit != '' || inputs.channel != '')
     runs-on: windows-2025
     environment: release-signing
+    cache-mode: read
     timeout-minutes: 45
     env:
+      CHANNEL_BUILD: ${{ needs.validate.outputs.channel-build }}
+      CHANNEL_REQUEST_SHA256: ${{ needs.validate.outputs.channel-request-sha256 }}
       HERMES_PAYLOAD_TAG: ${{ inputs.tag }}
-      HERMES_BUILD_COMMIT: ${{ needs.validate.outputs.sha && inputs.build_commit != '' && needs.validate.outputs.sha || '' }}
+      HERMES_BUILD_COMMIT: ${{ inputs.build_commit != '' && needs.validate.outputs.channel-build == '' && needs.validate.outputs.sha || '' }}
       HERMES_PAYLOAD_VERSION: ${{ needs.validate.outputs.payload-version }}
       ELECTRON_BUILDER_CACHE: ${{ github.workspace }}/.cache/electron-builder
       CLOUDFLARE_R2_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_R2_ACCOUNT_ID }}
       CLOUDFLARE_R2_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
       CLOUDFLARE_R2_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
       CLOUDFLARE_R2_BUCKET: ${{ vars.CLOUDFLARE_R2_BUCKET }}
-      CLOUDFLARE_R2_PUBLIC_URL: ${{ vars.CLOUDFLARE_R2_PUBLIC_URL }}
+      CLOUDFLARE_R2_PUBLIC_URL: ${{ needs.validate.outputs.public-root }}
       AZURE_SIGN_ENDPOINT: ${{ vars.AZURE_SIGN_ENDPOINT }}
       AZURE_SIGN_ACCOUNT: ${{ vars.AZURE_SIGN_ACCOUNT }}
       AZURE_SIGN_PROFILE: ${{ vars.AZURE_SIGN_PROFILE }}
@@ -891,18 +1115,30 @@ jobs:
       # job runs it with no checkout at all today — ERR_MODULE_NOT_FOUND.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          # Privileged job: pin to the SHA validate admitted, not the tag.
-          ref: ${{ needs.validate.outputs.sha }}
+          # Channel assembly/publishing code stays at the trusted controller.
+          ref: ${{ needs.validate.outputs.channel-build != '' && github.sha || needs.validate.outputs.sha }}
           # stage-msixbundle derives the canary MSIX build number as
-          # minutes-since-the-last-stable from git tags — must see them.
-          fetch-tags: true
+          # minutes-since-the-last-stable from git tags — tag builds must
+          # see them; channel/commit builds derive from the request/env.
+          fetch-depth: ${{ (inputs.build_commit != '' || needs.validate.outputs.channel-build != '') && 1 || 0 }}
+          fetch-tags: ${{ inputs.build_commit == '' && needs.validate.outputs.channel-build == '' }}
+
+      - name: Retrieve pinned channel request
+        if: needs.validate.outputs.channel-build != ''
+        shell: bash
+        env:
+          CHANNEL_BUILD: ${{ needs.validate.outputs.channel-build }}
+          CHANNEL_REQUEST_SHA256: ${{ needs.validate.outputs.channel-request-sha256 }}
+        run: python -m scripts.releases.channel_publish request --out "$RUNNER_TEMP/channel-request.json"
 
       - name: Set up the locked build toolchain
         uses: ./.github/actions/setup-pm
         with:
           toolchain: all
-          archive-inputs: true
+          archive-inputs: ${{ inputs.disposable_run == '' && inputs.disposable_channel == '' }}
           cache-python: false
+          save-tools-cache: false
+          save-node-cache: false
 
       - name: Install the locked Windows bundle tooling
         uses: ./.github/actions/retry
@@ -919,39 +1155,33 @@ jobs:
             const el = l.packages["apps/desktop/node_modules/electron"].version
             const eb = l.packages["node_modules/electron-builder"].version
             if (!el || !eb) process.exit(1)
-            console.log(`electron=${el}`)
-            console.log(`builder=${eb}`)
+            console.log("electron=" + el)
+            console.log("builder=" + eb)
           ' >> "$GITHUB_OUTPUT"
 
       # Cache reuse is optional. Bundle scripts provision the pinned SDK
       # and signing dependencies through electron-builder on a cache miss.
-      # Keep the path list identical to the build legs for warm reuse.
-      - name: Resolve electron's default download cache path
-        shell: bash
-        run: |
-          case "$RUNNER_OS" in
-            Windows) echo "ELECTRON_DEFAULT_CACHE=$LOCALAPPDATA/electron/Cache" >> "$GITHUB_ENV" ;;
-            macOS)   echo "ELECTRON_DEFAULT_CACHE=$HOME/Library/Caches/electron" >> "$GITHUB_ENV" ;;
-            *)       echo "ELECTRON_DEFAULT_CACHE=$HOME/.cache/electron" >> "$GITHUB_ENV" ;;
-          esac
-
-      - name: Cache electron + electron-builder toolchain
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      # This smaller consumer has its own cache, separate from desktop inputs.
+      - name: Restore electron + electron-builder toolchain
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: |
-            ${{ github.workspace }}/.cache/electron-builder
-            ${{ github.workspace }}/.cache/electron
-            ${{ env.ELECTRON_DEFAULT_CACHE }}
-          key: eb2-${{ runner.os }}-${{ runner.arch }}-electron-${{ steps.toolchain.outputs.electron }}-builder-${{ steps.toolchain.outputs.builder }}
+          # ensureWindowsBundleTools resolves the winCodeSign kit, ATS dlib
+          # and dotnet runtime through electron-builder's toolset cache.
+          path: ${{ github.workspace }}/.cache/electron-builder
+          # Saved by the build-win32-release legs during preparation.
+          key: eb3-${{ runner.os }}-${{ runner.arch }}-builder-${{ steps.toolchain.outputs.builder }}
           restore-keys: |
-            eb2-${{ runner.os }}-${{ runner.arch }}-
+            eb3-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Retrieve Windows packages from R2
         shell: bash
         env:
           RELEASE_COMMIT: ${{ needs.validate.outputs.sha }}
         run: |
-          if [ -n "$HERMES_BUILD_COMMIT" ]; then
+          if [ -n "${CHANNEL_BUILD:-}" ]; then
+            python -m scripts.releases.handoff fetch --channel-request "$RUNNER_TEMP/channel-request.json" \
+              --name win32-x64 --name win32-arm64 --root apps/desktop/release --include '*.msix'
+          elif [ -n "$HERMES_BUILD_COMMIT" ]; then
             python -m scripts.releases.handoff fetch --commit-build "$HERMES_BUILD_COMMIT" \
               --commit "$RELEASE_COMMIT" \
               --name win32-x64 --name win32-arm64 --root apps/desktop/release --include '*.msix'
@@ -980,7 +1210,7 @@ jobs:
           ( while sleep 240; do mint || true; done ) &
           echo "AZURE_FEDERATED_TOKEN_FILE=$file" >> "$GITHUB_ENV"
 
-      - name: Bundle + stage the MSIX feeds
+      - name: Assemble the signed MSIX bundle without publishing
         shell: bash
         env:
           RELEASE_PHASE: ${{ inputs.release-phase }}
@@ -988,9 +1218,12 @@ jobs:
           AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
           AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
         run: |
-          # Candidate mode builds the bundles without writing a feed.
-          # Canary mode publishes the App Installer bundle and pointer.
-          # Commit mode assembles only the sideload product, without a feed.
+          # All modes stop at signed bytes. The separate handoff stages them
+          # for smoke; publication must not assemble or sign a second time.
+          if [ -n "${CHANNEL_BUILD:-}" ]; then
+            node scripts/stage-msixbundle.mjs --channel-request "$RUNNER_TEMP/channel-request.json" --variant bundled
+            exit 0
+          fi
           if [ -n "$HERMES_BUILD_COMMIT" ]; then
             node scripts/stage-msixbundle.mjs --commit "$HERMES_BUILD_COMMIT" --version "$HERMES_PAYLOAD_VERSION" --variant bundled --no-upload
             exit 0
@@ -1003,12 +1236,14 @@ jobs:
           fi
 
       - name: Stage universal bundles to R2
-        if: inputs.release-phase == 'candidate' || inputs.build_commit != ''
         shell: bash
         env:
           RELEASE_COMMIT: ${{ needs.validate.outputs.sha }}
         run: |
-          if [ -n "$HERMES_BUILD_COMMIT" ]; then
+          if [ -n "${CHANNEL_BUILD:-}" ]; then
+            python -m scripts.releases.handoff stage --channel-request "$RUNNER_TEMP/channel-request.json" \
+              --name windows-universal --root apps/desktop/release --include '*.msixbundle'
+          elif [ -n "$HERMES_BUILD_COMMIT" ]; then
             python -m scripts.releases.handoff stage --commit-build "$HERMES_BUILD_COMMIT" \
               --commit "$RELEASE_COMMIT" \
               --name windows-universal --root apps/desktop/release --include '*.msixbundle'
@@ -1017,147 +1252,119 @@ jobs:
               --name windows-universal --root apps/desktop/release --include '*.msixbundle'
           fi
 
-  # ── Windows Store submission (REAL — PARALLEL with publish-win32-updater) ─
-  # Bundles the two Store-*.msix into one universal Store .msixbundle and
-  # submits it to the Windows Store via the MSStore CLI.
-  #
-  # Only stable releases can claim the official Partner Center identity.
-  # Canary and commit builds are sideload-only, even when a flight exists.
-  publish-win32-store:
-    name: Publish the stable Windows Store submission
-    needs: [validate, build-win32]
-    if: |
-      inputs.build_commit == ''
-      && inputs.upload_release == true
-      && vars.MS_STORE_PRODUCT_ID != ''
-      && contains(inputs.tag, '-canary.') == false
-    runs-on: windows-2025
+  publish-channel:
+    name: Publish the complete native-smoked channel build
+    needs:
+      [validate, build-darwin, build-win32, assemble-win32-bundle, smoke-darwin, smoke-win32, smoke-win32-universal]
+    if: >-
+      !cancelled() && needs.validate.outputs.channel-build != '' && needs.validate.result == 'success'
+      && needs.build-darwin.result == 'success' && needs.build-win32.result == 'success'
+      && needs.assemble-win32-bundle.result == 'success' && needs.smoke-darwin.result == 'success'
+      && needs.smoke-win32.result == 'success' && needs.smoke-win32-universal.result == 'success'
+    runs-on: ubuntu-24.04
     environment: release-signing
-    timeout-minutes: 60
+    cache-mode: read
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      CHANNEL_BUILD: ${{ needs.validate.outputs.channel-build }}
+      CHANNEL_REQUEST_SHA256: ${{ needs.validate.outputs.channel-request-sha256 }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_NEEDS: ${{ toJSON(needs) }}
+      CLOUDFLARE_R2_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_R2_ACCOUNT_ID }}
+      CLOUDFLARE_R2_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
+      CLOUDFLARE_R2_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
+      CLOUDFLARE_R2_BUCKET: ${{ vars.CLOUDFLARE_R2_BUCKET }}
+      CLOUDFLARE_R2_PUBLIC_URL: ${{ needs.validate.outputs.public-root }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          # require_pushed proves commit-build ancestry from local history;
+          # a shallow clone fails after main advances past the built SHA.
+          fetch-depth: 0
+      - name: Publish tested disposable receiver without promoting T
+        if: needs.validate.outputs.receiver-candidate == 'true'
+        run: python -m scripts.releases.channel_publish receiver-publish --root "$RUNNER_TEMP/channel-publish"
+      - name: Publish immutable feeds and manifest, then CAS channel head
+        if: needs.validate.outputs.receiver-candidate != 'true'
+        shell: bash
+        run: |
+          python -m scripts.releases.channel_publish publish --root "$RUNNER_TEMP/channel-publish"
+          python scripts/render-builds-table.py --channel-build "$CHANNEL_BUILD" \
+            --channel-request-sha256 "$CHANNEL_REQUEST_SHA256" --repo "$GITHUB_REPOSITORY" \
+            --r2-base-url "$(python -c 'from scripts.releases.r2_scope import channel_public_base; print(channel_public_base())')" \
+            --summary-out "$GITHUB_STEP_SUMMARY"
+
+  publish-win32-updater:
+    name: Publish the tested Windows canary bundle
+    needs: [validate, assemble-win32-bundle, smoke-win32, smoke-win32-universal]
+    if: >-
+      !cancelled() && inputs.build_commit == '' && inputs.channel == '' && inputs.upload_release == true
+      && inputs.release-phase == '' && inputs.termux_only != true
+      && needs.validate.result == 'success' && needs.validate.outputs.sha != ''
+      && needs.assemble-win32-bundle.result == 'success'
+      && needs.smoke-win32.result == 'success' && needs.smoke-win32-universal.result == 'success'
+    runs-on: ubuntu-24.04
+    environment: release-signing
+    timeout-minutes: 15
+    concurrency:
+      group: win32-updater-feed-canary
+      cancel-in-progress: false
     env:
       HERMES_PAYLOAD_TAG: ${{ inputs.tag }}
-      ELECTRON_BUILDER_CACHE: ${{ github.workspace }}/.cache/electron-builder
+      HERMES_DESKTOP_VARIANT: bundled
+      RELEASE_COMMIT: ${{ needs.validate.outputs.sha }}
       CLOUDFLARE_R2_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_R2_ACCOUNT_ID }}
       CLOUDFLARE_R2_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
       CLOUDFLARE_R2_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
       CLOUDFLARE_R2_BUCKET: ${{ vars.CLOUDFLARE_R2_BUCKET }}
       CLOUDFLARE_R2_PUBLIC_URL: ${{ vars.CLOUDFLARE_R2_PUBLIC_URL }}
-      MS_STORE_TENANT_ID: ${{ secrets.MS_STORE_TENANT_ID }}
-      MS_STORE_SELLER_ID: ${{ secrets.MS_STORE_SELLER_ID }}
-      MS_STORE_CLIENT_ID: ${{ secrets.MS_STORE_CLIENT_ID }}
-      MS_STORE_CLIENT_SECRET: ${{ secrets.MS_STORE_CLIENT_SECRET }}
-      MS_STORE_PRODUCT_ID: ${{ vars.MS_STORE_PRODUCT_ID }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          # Privileged job: pin to the SHA validate admitted, not the tag.
           ref: ${{ needs.validate.outputs.sha }}
-          fetch-tags: true
-
-      - name: Set up the locked build toolchain
-        uses: ./.github/actions/setup-pm
+      - uses: ./.github/actions/setup-pm
         with:
           toolchain: all
-          archive-inputs: true
           cache-python: false
-
-      - name: Install the locked Windows bundle tooling
-        uses: ./.github/actions/retry
-        with:
-          # No Electron/native postinstalls: only the builder's SDK downloader.
-          command: npm ci --workspace apps/desktop --include-workspace-root --include=dev --ignore-scripts --no-audit --no-fund
-
-      - name: Resolve toolchain cache key
-        id: toolchain
+          cache-node: false
+      - name: Retrieve the tested universal bundle
         shell: bash
-        run: |
-          node -e '
-            const l = require("./package-lock.json")
-            const el = l.packages["apps/desktop/node_modules/electron"].version
-            const eb = l.packages["node_modules/electron-builder"].version
-            if (!el || !eb) process.exit(1)
-            console.log(`electron=${el}`)
-            console.log(`builder=${eb}`)
-          ' >> "$GITHUB_OUTPUT"
-
-      # Reuse the build cache when available. The bundle script also works
-      # cold by provisioning the same SDK through the pinned builder.
-      - name: Resolve electron's default download cache path
-        shell: bash
-        run: |
-          case "$RUNNER_OS" in
-            Windows) echo "ELECTRON_DEFAULT_CACHE=$LOCALAPPDATA/electron/Cache" >> "$GITHUB_ENV" ;;
-            macOS)   echo "ELECTRON_DEFAULT_CACHE=$HOME/Library/Caches/electron" >> "$GITHUB_ENV" ;;
-            *)       echo "ELECTRON_DEFAULT_CACHE=$HOME/.cache/electron" >> "$GITHUB_ENV" ;;
-          esac
-
-      - name: Cache electron + electron-builder toolchain
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ${{ github.workspace }}/.cache/electron-builder
-            ${{ github.workspace }}/.cache/electron
-            ${{ env.ELECTRON_DEFAULT_CACHE }}
-          key: eb2-${{ runner.os }}-${{ runner.arch }}-electron-${{ steps.toolchain.outputs.electron }}-builder-${{ steps.toolchain.outputs.builder }}
-          restore-keys: |
-            eb2-${{ runner.os }}-${{ runner.arch }}-
-
-      - name: Retrieve Store packages from R2
-        shell: bash
-        env:
-          RELEASE_COMMIT: ${{ needs.validate.outputs.sha }}
         run: |
           python -m scripts.releases.handoff fetch --tag "$HERMES_PAYLOAD_TAG" --commit "$RELEASE_COMMIT" \
-            --name win32-x64 --name win32-arm64 --root apps/desktop/release --include 'Store-*.msix'
-
-      - name: Bundle the Store submission MSIX
-        id: storebundle
+            --name windows-universal --root staged --include 'HermesBundled-*-win.msixbundle'
+      - name: Publish identical tested bytes without rebuilding
         shell: bash
         run: |
-          # The SDK downloader logs to stdout; the path has its own output.
-          result="$RUNNER_TEMP/store-bundle-path"
-          node scripts/bundle-store-msixbundle.mjs --tag "$HERMES_PAYLOAD_TAG" --output-file "$result"
-          bundle="$(< "$result")"
-          test -f "$bundle"
-          echo "bundle=$bundle" >> "$GITHUB_OUTPUT"
-          echo "Store bundle: $bundle"
-
-      - name: Archive the Store bundle to the tag dir
-        shell: bash
-        run: |
-          # The per-arch Store-*.msix are already in the immutable archive
-          # (uploaded by the build legs); keep the assembled universal bundle
-          # there too as the record of exactly what was submitted.
-          python -m scripts.releases.r2 put \
-            --tag "$HERMES_PAYLOAD_TAG" \
-            --key "$(basename "${{ steps.storebundle.outputs.bundle }}")" \
-            --file "${{ steps.storebundle.outputs.bundle }}"
-
-      - name: Setup MSStore CLI
-        uses: microsoft/microsoft-store-apppublisher@cc9910a8d59f2eb55cbb83df0a3800cf3b5300e0 # v1.4
-
-      - name: Configure Store credentials
-        shell: bash
-        run: |
-          msstore reconfigure \
-            --tenantId "$MS_STORE_TENANT_ID" \
-            --sellerId "$MS_STORE_SELLER_ID" \
-            --clientId "$MS_STORE_CLIENT_ID" \
-            --clientSecret "$MS_STORE_CLIENT_SECRET"
-
-      - name: Publish the Store submission
-        shell: bash
-        run: |
-          # The universal Store .msixbundle is accepted directly by msstore
-          # publish (PackageFilesExtensionInclude: .msix/.msixbundle/.msixupload).
-          # Partner Center signs on ingestion — no signing here.
-          #
-          # Partner Center allows one pending submission. Clear that draft
-          # before publishing. Only the publish result gates this step.
-          bundle="${{ steps.storebundle.outputs.bundle }}"
-          msstore submission delete "$MS_STORE_PRODUCT_ID" --no-confirm \
-            || echo "no pending submission to clear"
-          msstore publish "$bundle" -id "$MS_STORE_PRODUCT_ID"
+          node --input-type=module -e '
+            import identity from "./apps/desktop/product-identity.cjs";
+            import { OUT_OF_STORE_PUBLISHER } from "./scripts/msix-shared.mjs";
+            console.log(JSON.stringify({identity: identity.msixAppIdWithOrg, publisher: OUT_OF_STORE_PUBLISHER}));
+          ' > staged/expected-identity.json
+          python - <<'PY'
+          import json, os, re
+          from pathlib import Path
+          from scripts.bundles.release_artifacts import main, single
+          expected = json.loads(Path('staged/expected-identity.json').read_text(encoding='utf-8'))
+          bundle = single(Path('staged').glob('HermesBundled-*-win.msixbundle'))
+          # The handoff binds the assembly filename and bytes. Never recompute
+          # its revision against stable tags that can change after native smoke.
+          match = re.fullmatch(r'HermesBundled-(\d+\.\d+\.\d+\.\d+)-win\.msixbundle', bundle.name)
+          if not match:
+              raise ValueError('Missing assembly version in receipt-bound bundle name')
+          version = match[1]
+          if (any(str(int(part)) != part or int(part) > 65535 for part in version.split('.'))
+                  or version.rsplit('.', 1)[0] != os.environ['HERMES_PAYLOAD_TAG'].split('-')[0].removeprefix('v')):
+              raise ValueError('Assembly version differs from the release tag base')
+          # publish-appinstaller compares this version to the baked envelope.
+          main(['publish-appinstaller', '--root', 'staged', '--bundle', str(bundle),
+                '--tag', os.environ['HERMES_PAYLOAD_TAG'], '--variant', 'bundled',
+                '--identity', expected['identity'], '--publisher', expected['publisher'],
+                '--version', version])
+          PY
 
   # ── macOS updater channel (REAL) ───────────────────────────────────────────
   # Merges the per-arch feed ymls (arm64-stable-mac.yml / x64-stable-mac.yml
@@ -1171,8 +1378,12 @@ jobs:
   # publish in parallel by design (distinct feed files).
   publish-darwin-updater:
     name: Publish the macOS updater feed
-    needs: [validate, build-darwin]
-    if: inputs.build_commit == '' && inputs.upload_release == true && inputs.termux_only != true
+    needs: [validate, build-darwin, smoke-darwin]
+    if: >-
+      !cancelled() && inputs.build_commit == '' && inputs.channel == '' && inputs.upload_release == true
+      && inputs.release-phase == '' && inputs.termux_only != true
+      && needs.validate.result == 'success' && needs.validate.outputs.sha != ''
+      && needs.build-darwin.result == 'success' && needs.smoke-darwin.result == 'success'
     runs-on: ubuntu-24.04
     environment: release-signing
     timeout-minutes: 15
@@ -1233,14 +1444,14 @@ jobs:
 
   termux-deb:
     name: Build + publish the termux .deb (aarch64)
-    needs: [validate, archive-inputs]
-    if: inputs.upload_release == true || inputs.release-phase == 'candidate' || inputs.build_commit != ''
+    needs: [validate]
+    if: inputs.channel == '' && inputs.disposable_channel == '' && (inputs.upload_release == true || inputs.release-phase == 'candidate' || inputs.build_commit != '')
     runs-on: ubuntu-24.04-arm
     environment: release-signing
     timeout-minutes: 90
     env:
       HERMES_PAYLOAD_TAG: ${{ inputs.tag }}
-      HERMES_BUILD_COMMIT: ${{ needs.validate.outputs.sha && inputs.build_commit != '' && needs.validate.outputs.sha || '' }}
+      HERMES_BUILD_COMMIT: ${{ inputs.build_commit != '' && needs.validate.outputs.channel-build == '' && needs.validate.outputs.sha || '' }}
       # termux_build.sh gates on `gh release view <tag>` (refuse to build
       # before the release exists); gh needs GH_TOKEN or it errors out and
       # the gate misreads that as "release not found".
@@ -1255,8 +1466,9 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: ${{ needs.validate.outputs.sha }}
-          fetch-depth: 0
-          fetch-tags: true
+          # Commit builds only rev-parse HEAD; tag builds verify ancestry.
+          fetch-depth: ${{ inputs.build_commit != '' && 1 || 0 }}
+          fetch-tags: ${{ inputs.build_commit == '' }}
 
       - name: Set up the locked build toolchain
         id: pm
@@ -1335,7 +1547,6 @@ jobs:
         # payload env composition exposes it, desktop payload model).
         run: bash scripts/termux/build_uv.sh termux-build/payload
 
-
       - name: Stage the remaining CLI runtime tools
         shell: bash
         run: |
@@ -1366,9 +1577,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
-        # Content-addressed off the pm lock digest: builds once per lock
-        # bump, then no-ops. The wheelhouse container phase boots this
-        # instead of the bare base, skipping the ~10-min toolchain apt.
+        # The pinned base and Dockerfile select the pre-baked toolchain.
+        # Recipe changes must not reuse an image built without those tools.
         run: |
           mkdir -p termux-build
           # The builder script prints progress (build logs, smoke output)
@@ -1380,10 +1590,8 @@ jobs:
           echo "image=$img" >> "$GITHUB_OUTPUT"
 
       - name: Restore the wheelhouse
-        # The manufactured native wheels are the expensive artifact of this
-        # job. build_wheels.py skips any dist whose exact-pinned wheel is
-        # already present, so a restored wheelhouse turns the 20-minute
-        # native compile phase into a cache-hit verification.
+        # Reuse manufactured wheels only when the complete input identity
+        # and wheel hashes pass admission. A prefix hit alone is not proof.
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -1606,11 +1814,24 @@ jobs:
 
   builds-table:
     name: Render the release builds table
-    needs: [validate, build-win32, build-darwin, build-linux, publish-win32-updater, publish-darwin-updater, termux-deb]
+    needs:
+      [
+        validate,
+        build-win32,
+        build-darwin,
+        build-linux,
+        assemble-win32-bundle,
+        smoke-darwin,
+        smoke-win32,
+        smoke-win32-universal,
+        publish-win32-updater,
+        publish-darwin-updater,
+        termux-deb
+      ]
     # Failed builds still get a per-tag diagnostic page. The renderer only
     # advances the channel landing page when every prerequisite succeeded.
     if: |
-      always() && inputs.build_commit == '' && inputs.upload_release == true && inputs.release-phase == ''
+      always() && inputs.build_commit == '' && inputs.channel == '' && inputs.upload_release == true && inputs.release-phase == ''
       && needs.validate.result == 'success' && needs.validate.outputs.sha != ''
     runs-on: ubuntu-24.04
     environment: release-signing
@@ -1649,10 +1870,21 @@ jobs:
           PY
 
   commit-builds-summary:
-    name: Commit build summary (every binary, built or not)
-    needs: [validate, build-win32, build-darwin, build-linux, publish-win32-updater, termux-deb]
+    name: Upload status page to R2
+    needs:
+      [
+        validate,
+        build-win32,
+        build-darwin,
+        build-linux,
+        assemble-win32-bundle,
+        smoke-darwin,
+        smoke-win32,
+        smoke-win32-universal,
+        termux-deb
+      ]
     if: |
-      always() && inputs.build_commit != ''
+      always() && inputs.build_commit != '' && inputs.channel == '' && inputs.disposable_channel == ''
       && needs.validate.result == 'success' && needs.validate.outputs.sha != ''
     runs-on: ubuntu-24.04
     environment: release-signing
@@ -1665,6 +1897,7 @@ jobs:
           ref: ${{ needs.validate.outputs.sha }}
       - name: Render the full expected-binary matrix
         env:
+          HERMES_BUNDLE_ENV_JSON: ${{ inputs.bundle_env }}
           CLOUDFLARE_R2_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_R2_ACCOUNT_ID }}
           CLOUDFLARE_R2_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
           CLOUDFLARE_R2_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
@@ -1686,14 +1919,30 @@ jobs:
           PY
           )
           python3 scripts/render-builds-table.py \
-            --summary-commit "$RELEASE_COMMIT" \
+            --summary-commit "$RELEASE_COMMIT" --repo "$GITHUB_REPOSITORY" \
             --summary-out "$GITHUB_STEP_SUMMARY" \
             --summary-failed-legs "$failed" --run-url "$RUN_URL"
 
   candidate-manifest:
     name: Stage verified stable candidate artifacts
-    needs: [validate, build-win32, build-darwin, publish-win32-updater, termux-deb]
-    if: inputs.release-phase == 'candidate'
+    needs:
+      [
+        validate,
+        build-win32,
+        build-darwin,
+        assemble-win32-bundle,
+        smoke-darwin,
+        smoke-win32,
+        smoke-win32-universal,
+        termux-deb
+      ]
+    if: >-
+      !cancelled() && inputs.release-phase == 'candidate'
+      && needs.validate.result == 'success' && needs.validate.outputs.sha != ''
+      && needs.build-win32.result == 'success' && needs.build-darwin.result == 'success'
+      && needs.assemble-win32-bundle.result == 'success' && needs.termux-deb.result == 'success'
+      && needs.smoke-darwin.result == 'success' && needs.smoke-win32.result == 'success'
+      && needs.smoke-win32-universal.result == 'success'
     runs-on: ubuntu-latest-32-core
     environment: release-signing
     timeout-minutes: 90
@@ -1723,6 +1972,8 @@ jobs:
             --name termux --name windows-universal --root candidates \
             --include 'metadata-*.json' --include '*.msixbundle'
       - id: manifest
+        env:
+          RELEASE_NEEDS: ${{ toJSON(needs) }}
         run: python -m scripts.bundles.release_artifacts assemble --root candidates --out release-candidates.json
 
   stable-publish:
@@ -1810,12 +2061,31 @@ jobs:
         with:
           cache-python: false
       - run: python -m scripts.ci.python_packages ruamel.yaml==0.18.17 -- -m scripts.bundles.release_artifacts promote --root verified
-      - run: python scripts/render-builds-table.py --tag "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY"
+      - name: Render the admitted candidate smoke results
+        env:
+          RELEASE_COMMIT: ${{ needs.validate.outputs.sha }}
+        run: |
+          python scripts/render-builds-table.py --tag "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --candidate-manifest-sha256 "$CANDIDATE_MANIFEST_SHA256" --candidate-commit "$RELEASE_COMMIT"
 
   stable-phase-result:
     name: Stable bundle phase completed
     if: always() && inputs.release-phase != ''
-    needs: [validate, build-win32, build-darwin, publish-win32-updater, termux-deb, candidate-manifest, stable-publish, stable-store, stable-promote]
+    needs:
+      [
+        validate,
+        build-win32,
+        build-darwin,
+        assemble-win32-bundle,
+        smoke-darwin,
+        smoke-win32,
+        smoke-win32-universal,
+        termux-deb,
+        candidate-manifest,
+        stable-publish,
+        stable-store,
+        stable-promote
+      ]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -1830,7 +2100,7 @@ jobs:
           import json, os
           from scripts.releases.stable import require_success
           phases = {
-              'candidate': ['validate', 'build-win32', 'build-darwin', 'publish-win32-updater', 'termux-deb', 'candidate-manifest'],
+              'candidate': ['validate', 'build-win32', 'build-darwin', 'assemble-win32-bundle', 'smoke-darwin', 'smoke-win32', 'smoke-win32-universal', 'termux-deb', 'candidate-manifest'],
               'publish': ['validate', 'stable-publish', 'stable-store'],
               'promote': ['validate', 'stable-promote'],
           }
@@ -1839,20 +2109,50 @@ jobs:
 
   publish-canary:
     name: Publish the canary release
-    needs: [build-win32, build-darwin, build-linux, builds-table, publish-win32-updater, publish-darwin-updater]
+    needs:
+      [
+        validate,
+        build-win32,
+        build-darwin,
+        build-linux,
+        builds-table,
+        assemble-win32-bundle,
+        smoke-darwin,
+        smoke-win32,
+        smoke-win32-universal,
+        publish-win32-updater,
+        publish-darwin-updater
+      ]
     if: |
       always()
-      && inputs.build_commit == ''
+      && inputs.build_commit == '' && inputs.channel == ''
       && inputs.upload_release == true
       && contains(inputs.tag, '-canary.')
       && needs.build-win32.result == 'success'
       && needs.build-darwin.result == 'success'
       && needs.build-linux.result == 'success'
       && needs.builds-table.result == 'success'
+      && needs.assemble-win32-bundle.result == 'success'
+      && needs.smoke-darwin.result == 'success'
+      && needs.smoke-win32.result == 'success'
+      && needs.smoke-win32-universal.result == 'success'
       && needs.publish-win32-updater.result == 'success'
       && needs.publish-darwin-updater.result == 'success'
     runs-on: ubuntu-24.04
+    environment: release-signing
     steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ needs.validate.outputs.sha }}
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-pm
+        with:
+          cache-python: false
+      - name: Set up the native identity reader
+        uses: ./.github/actions/setup-pm
+        with:
+          toolchain: node
+          cache-python: false
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1860,3 +2160,17 @@ jobs:
         run: |
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false
           echo "Published $TAG"
+      # The controller rechecks native job results, the remote tag and published
+      # GitHub release before any R2 head write; receipts bind the exact bytes.
+      - name: Advance protected canary head from the published release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_COMMIT: ${{ needs.validate.outputs.sha }}
+          RELEASE_NEEDS: ${{ toJSON(needs) }}
+          CLOUDFLARE_R2_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_R2_ACCOUNT_ID }}
+          CLOUDFLARE_R2_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
+          CLOUDFLARE_R2_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
+          CLOUDFLARE_R2_BUCKET: ${{ vars.CLOUDFLARE_R2_BUCKET }}
+          CLOUDFLARE_R2_PUBLIC_URL: ${{ vars.CLOUDFLARE_R2_PUBLIC_URL }}
+        run: python -m scripts.releases.channel_releases canary

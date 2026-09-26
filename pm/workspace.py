@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import os
-import subprocess
+import shutil
 from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
@@ -18,8 +18,8 @@ if TYPE_CHECKING:
 
 from pm import paths
 from pm.package import InstallError
+from pm.plugin_declarations import read_python_declaration, manifest_version_error
 
-WORKSPACE_DIRNAME = ".pm-workspace"
 _MEMBER_EXCLUDE = frozenset({".git", ".venv", "venv", "node_modules", "__pycache__"})
 
 
@@ -27,46 +27,10 @@ def _member_ignored(directory, names):
     return [name for name in names if name in _MEMBER_EXCLUDE or name.endswith(".egg-info")]
 
 
-class ResolutionConflict(InstallError):
-    """uv's resolver proved the union has no valid solution."""
-
-
-# Markers uv prints ONLY when the resolver itself proves no solution
-# exists (its conflict report: "Because ...", "no solution found").
-# Deliberately narrow: a fetch timeout or index outage must not be
-# misread as a conflict — and regardless of classification, nothing
-# here ever disables a plugin; the caller decides.
-_RESOLVER_MARKERS = (
-    "no solution found",
-    "conflicting requirements",
-    "conflicting urls",
-    "because only the following versions",
-    "and your pyproject depends on",
-)
-
-
-def classify_uv_failure(stage: str, returncode: int, output: str) -> InstallError:
-    """Turn a failed `uv <stage>` into the right classified error.
-
-    Resolver-conflict output → ResolutionConflict; anything else (fetch,
-    build, tooling) → plain InstallError with the tail of the output.
-    """
-    cause = f"uv {stage} exited {returncode}: {output.strip()[-600:]}"
-    lowered = output.lower()
-    if any(marker in lowered for marker in _RESOLVER_MARKERS):
-        return ResolutionConflict("venv", cause)
-    return InstallError("venv", cause)
-
-
-def workspace_root() -> Path:
-    """Default preparation root; callers can supply a fresh transaction root."""
-    from hermes_cli.runtime_paths import install_state_dir
-    return install_state_dir(paths.repo_root()) / WORKSPACE_DIRNAME
-
-
-def _member_rel(root: Path, plugin_dir: Path) -> str:
-    """Use portable separators for a member inside the generated workspace."""
-    return os.path.relpath(plugin_dir.resolve(), root.resolve()).replace("\\", "/")
+# The uv failure classifier lives beside the uv runner (stdlib-only imports): the bootstrap
+# runner streams uv output from a pre-3.11 system python where this module's tomllib import
+# cannot load. Workspace callers keep reaching it from here.
+from pm.environment import ResolutionConflict, classify_uv_failure  # noqa: E402,F401
 
 
 def member_sources(plugin_dirs) -> dict[Path, Path]:
@@ -81,10 +45,10 @@ def members_stamp(plugin_dirs) -> str:
     for identity, entry in sorted(member_sources(plugin_dirs).items()):
         h.update(str(identity).encode("utf-8"))
         h.update(b"\0")
-        for name in ("pyproject.toml", "plugin.yaml"):
-            source = entry / name
-            if source.is_file():
-                h.update(source.read_bytes())
+        declaration = read_python_declaration(entry)
+        for source in declaration.files:
+            h.update(source.name.encode("utf-8"))
+            h.update(source.read_bytes())
             h.update(b"\0")
         if (entry / "pyproject.toml").is_file():
             for directory, dirs, files in os.walk(entry):
@@ -100,8 +64,6 @@ def members_stamp(plugin_dirs) -> str:
 
 def _copy_core_inputs(source: Path, destination: Path) -> None:
     """Build from a writable snapshot, never from signed/read-only source."""
-    import shutil
-
     import fnmatch
     import tomllib
 
@@ -130,8 +92,6 @@ def _copy_core_inputs(source: Path, destination: Path) -> None:
                 and not entry.name.startswith(".") and entry.resolve() != destination.resolve()
                 and any(fnmatch.fnmatchcase(entry.name, pattern) for pattern in package_roots)):
             target = destination / entry.name
-            if target.exists():
-                shutil.rmtree(target)
             shutil.copytree(entry, target, ignore=ignore)
     for name in files:
         entry = source / name
@@ -144,25 +104,19 @@ def _copy_core_inputs(source: Path, destination: Path) -> None:
         shutil.copy2(entry, target)
 
 
-def _generate_pyproject(plugin_dirs: list[Path], root: Optional[Path] = None, *,
-                        source: Optional[Path] = None) -> tuple[Path, bool]:
-    """(Re)generate the workspace root's pyproject.toml from core's
-    pyproject + the enabled plugin members. Idempotent — same inputs,
-    same bytes. Returns (root, changed): changed is True when the member
-    surface moved (member set or a member's pyproject content), which is
-    the signal to re-seed the resolution from the committed lock."""
-    if root is None:
-        root = workspace_root()
-    source = (paths.repo_root() if source is None else source).resolve()
+def _generate_pyproject(plugin_dirs: list[Path] | Mapping[Path, Path], root: Path, *, source: Path) -> None:
+    """Snapshot core and plugin build inputs into a fresh generation."""
+    source = source.resolve()
     if root.resolve() == source or source.is_relative_to(root.resolve()):
         raise InstallError("venv", "workspace must not replace the core source")
-    root.mkdir(parents=True, exist_ok=True)
+    root.mkdir(parents=True)
 
     core_pyproject = source / "pyproject.toml"
     core_text = core_pyproject.read_text(encoding="utf-8-sig")
 
-    members = [_member_rel(root, _workspace_member(source, root, identity=identity))
-               for identity, source in member_sources(plugin_dirs).items()]
+    members = [_workspace_member(source, root, identity=identity).relative_to(root).as_posix()
+               for identity, source in member_sources(plugin_dirs).items()
+               if _is_member_candidate(source)]
 
     lines = [core_text.rstrip("\n")]
     if members:
@@ -172,82 +126,20 @@ def _generate_pyproject(plugin_dirs: list[Path], root: Optional[Path] = None, *,
 
     text = "\n".join(lines) + "\n"
     target = root / "pyproject.toml"
-    try:
-        changed = target.read_text(encoding="utf-8") != text
-    except OSError:
-        changed = True
     _copy_core_inputs(source, root)
     target.write_text(text, encoding="utf-8")
-    return root, changed
-
-
-def build_root(plugin_dirs: list[Path], root: Optional[Path] = None) -> Path:
-    """(Re)generate the workspace root's pyproject.toml. ``root`` pins a
-    parent-supplied STAGING workspace (tests, staged syncs); default is
-    the per-install generated root beside the byte store."""
-    generated, _changed = _generate_pyproject(plugin_dirs, root)
-    return generated
-
-
-def _seed_lock(root: Path, seed_lock: Optional[Path] = None, *, source: Optional[Path] = None) -> None:
-    """Seed the generated root's uv.lock with the CURRENT resolution.
-
-    Seed precedence: the parent-supplied ``seed_lock`` path first, then
-    the root's own existing uv.lock (the current EXTENDED resolution from
-    the previous sync), then the committed core lock — so a plugin-driven
-    extension keeps every compatible selection it already made, and a
-    fresh root extends the committed resolution. uv preserves compatible
-    selections from the seed (a plugin's range spec does not move core
-    pins); explicit exact requirements stay binding as declared
-    constraints. The lock is COPIED — shipped/extended source bytes are
-    never rewritten; only the staging root receives the copy.
-
-    Called only when the member surface changed; an unchanged root keeps
-    its lock untouched, so repeated syncs are stable. Seed failures
-    SURFACE (they would silently degrade the resolution otherwise)."""
-    if seed_lock is None:
-        existing = root / "uv.lock"
-        if existing.is_file():
-            seed_lock = existing
-        else:
-            seed_lock = (paths.repo_root() if source is None else source) / "uv.lock"
-    if not seed_lock.is_file():
-        return  # nothing committed to seed from; uv resolves from scratch
-    (root / "uv.lock").write_bytes(seed_lock.read_bytes())
 
 
 def _is_member_candidate(plugin_dir: Path) -> bool:
-    """A plugin dir is a workspace-member candidate when it declares python
-    deps: a pyproject.toml (modern), or legacy pip_dependencies/
-    python_dependencies in plugin.yaml (the bridge materializes those)."""
-    import stat
-
-    for name in ("pyproject.toml", "plugin.yaml"):
-        path = plugin_dir / name
-        try:
-            mode = path.stat().st_mode
-        except FileNotFoundError:
-            continue
-        except OSError as exc:
-            raise ValueError(f"could not inspect plugin metadata: {path}") from exc
-        if not stat.S_ISREG(mode):
-            continue
-        if name == "pyproject.toml":
-            return True
-        try:
-            text = path.read_text(encoding="utf-8-sig")
-        except (OSError, UnicodeError) as exc:
-            raise ValueError(f"could not read plugin metadata: {path}") from exc
-        return "pip_dependencies" in text or "python_dependencies" in text
-    return False
+    return read_python_declaration(plugin_dir).is_member
 
 
-def enabled_plugin_dirs(*, proposed_home=None, enabled=None, disabled=None) -> list[Path]:
+def enabled_plugin_dirs(*, proposed_home=None, enabled=None, disabled=None, installing: Path | None = None) -> list[Path]:
     """Resolve the effective plugin selection without filtering dependency declarations."""
     from pm.plugins_state import _is_directory, enabled_plugins_ordered
 
-    selection = enabled_plugins_ordered() if proposed_home is None else enabled_plugins_ordered(
-        proposed_home=proposed_home, enabled=enabled, disabled=disabled,
+    selection = enabled_plugins_ordered(
+        proposed_home=proposed_home, enabled=enabled, disabled=disabled, installing=installing,
     )
     members = []
     for plugins_dir, names in selection.items():
@@ -256,57 +148,44 @@ def enabled_plugin_dirs(*, proposed_home=None, enabled=None, disabled=None) -> l
             if relative.is_absolute() or ".." in relative.parts:
                 raise InstallError("venv", f"invalid plugin key: {name}")
             plugin_dir = plugins_dir / relative
-            if not _is_directory(plugin_dir):
+            proposed = installing is not None and plugin_dir.resolve() == installing.resolve()
+            if not proposed and not _is_directory(plugin_dir):
                 plugin_dir = paths.repo_root() / "plugins" / relative
-            if _is_directory(plugin_dir):
+            if proposed or _is_directory(plugin_dir):
                 members.append(plugin_dir)
     return list(dict.fromkeys(members))
 
 
 def enabled_member_dirs(*, proposed_home=None, enabled=None, disabled=None) -> list[Path]:
     """Keep every selected member or refuse an incompatible selection."""
-    from hermes_cli.plugins_cmd import _check_manifest_version, _read_manifest_for_install
-
     selected = enabled_plugin_dirs(proposed_home=proposed_home, enabled=enabled, disabled=disabled)
+    members = []
     for path in selected:
-        _check_manifest_version(_read_manifest_for_install(path), path.name)
-    return [path for path in selected if _is_member_candidate(path)]
+        declaration = read_python_declaration(path)
+        reason = manifest_version_error(declaration.manifest, path.name)
+        if reason:
+            raise InstallError("venv", reason)
+        if declaration.is_member:
+            members.append(path)
+    return members
 
 
-def _legacy_requirements(plugin_dir: Path) -> list[str]:
-    from utils import fast_safe_load
-
-    manifest = plugin_dir / "plugin.yaml"
-    if not manifest.is_file():
-        return []
-    data = fast_safe_load(manifest.read_text(encoding="utf-8-sig"))
-    if not isinstance(data, dict):
-        raise InstallError("venv", f"invalid plugin manifest: {manifest}")
-    specs = []
-    for key in ("pip_dependencies", "python_dependencies"):
-        values = data.get(key, [])
-        if not isinstance(values, list) or any(not isinstance(v, str) for v in values):
-            raise InstallError("venv", f"invalid {key}: {manifest}")
-        specs.extend(values)
-    return list(dict.fromkeys(specs))
-
-
-def _workspace_member(plugin_dir: Path, root: Path, *, identity: Path | None = None) -> Path:
+def _workspace_member(plugin_dir: Path, root: Path, *, identity: Path) -> Path:
     """Keep workspace members with their generation, not a temporary install clone."""
     import json
-    import shutil
     import tomllib
 
-    key = hashlib.sha256(str((identity or plugin_dir).resolve()).encode()).hexdigest()[:16]
-    pyproject = plugin_dir / "pyproject.toml"
-    if pyproject.is_file() and "GENERATED by pm" not in pyproject.read_text(encoding="utf-8-sig"):
+    key = hashlib.sha256(str(identity.resolve()).encode()).hexdigest()[:16]
+    declaration = read_python_declaration(plugin_dir)
+    pyproject = declaration.pyproject
+    if pyproject is not None:
         member = root / "plugin-sources" / key
-        if member.exists():
-            shutil.rmtree(member)
         shutil.copytree(plugin_dir, member, symlinks=True,
                         ignore=_member_ignored)
         document = tomllib.loads(pyproject.read_text(encoding="utf-8-sig"))
-        changed = False
+        changed = declaration.install_requirements != declaration.requirements
+        if changed:
+            document["project"]["dependencies"] = list(declaration.install_requirements)
         for sources in document.get("tool", {}).get("uv", {}).get("sources", {}).values():
             for spec in sources if isinstance(sources, list) else [sources]:
                 if not isinstance(spec, dict) or "path" not in spec:
@@ -317,16 +196,16 @@ def _workspace_member(plugin_dir: Path, root: Path, *, identity: Path | None = N
                 resolved = (plugin_dir / relative).resolve()
                 if resolved.is_relative_to(plugin_dir.resolve()):
                     continue  # The referenced tree was copied with this member.
-                spec["path"] = ((identity or plugin_dir) / relative).resolve().as_posix()
+                spec["path"] = (identity / relative).resolve().as_posix()
                 changed = True
         if changed:
             import tomli_w
 
             (member / "pyproject.toml").write_text(tomli_w.dumps(document), encoding="utf-8")
         return member
-    specs = _legacy_requirements(plugin_dir)
+    specs = declaration.install_requirements
     member = root / "plugin-deps" / key
-    member.mkdir(parents=True, exist_ok=True)
+    member.mkdir(parents=True)
     (member / "pyproject.toml").write_text(
         f'[project]\nname = "hermes-plugin-{key}"\nversion = "0.0.0"\n'
         'requires-python = ">=3.11"\n'
@@ -336,53 +215,38 @@ def _workspace_member(plugin_dir: Path, root: Path, *, identity: Path | None = N
     return member
 
 
-def scan_plugin(plugin_dir: Path) -> dict:
-    """Auto-pickup scan of one plugin dir: which dep surfaces it declares.
-    Priority (settled): pyproject (python), package.json (node sidecar),
-    packages.py (pm store binaries), legacy manifest deps (bridge)."""
-    found: dict = {
-        "pyproject": (plugin_dir / "pyproject.toml").is_file(),
-        "package_json": (plugin_dir / "package.json").is_file(),
-        "packages_py": (plugin_dir / "packages.py").is_file(),
-        "legacy_deps": _is_member_candidate(plugin_dir)
-        and not (plugin_dir / "pyproject.toml").is_file(),
-        "dir": plugin_dir,
-    }
-    return found
-
-
 def install_node_sidecar(
     plugin_dir: Path,
     *,
-    npm_bin: Optional[str] = None,
-    runner=subprocess.run,
+    explicit: bool = False,
 ) -> Optional[str]:
-    """`npm ci` the plugin's package.json into ITS OWN node_modules —
-    the declared sidecar install (plugin-deps plan §B item 2; wired here).
+    """Install plugin-local dependencies using PM's paired npm/Node context.
 
-    Plugin-local (never a global npm prefix), pm's pinned npm when the
-    store has one (ambient PATH npm otherwise), gated by the lazy-install
-    policy, receipt-noted. Returns None on success, else why not.
+    Explicit user consent permits acquisition even when on-demand installs
+    are disabled. Returns None on success, otherwise a diagnostic.
     """
     package_json = plugin_dir / "package.json"
     if not package_json.is_file():
         return None  # nothing to install
 
-    from pm.ensure import lazy_installs_allowed
+    import pm
+    from pm.install import lazy_installs_allowed
 
-    if not lazy_installs_allowed():
-        return "lazy installs are disabled — run `hermes pm install` after enabling"
+    # Tool availability does not authorize mutation of the sidecar itself.
+    if not explicit and not lazy_installs_allowed():
+        return "lazy installs are disabled — run `hermes plugins install` and approve Node dependencies"
 
     # a lockfile means reproducible `npm ci`; plain `npm install` otherwise
     install_cmd = ["ci"] if (plugin_dir / "package-lock.json").is_file() else ["install"]
-    if npm_bin is None:
-        npm_bin = _node_npm_binary("npm")
-    if npm_bin is None:
-        return "npm not found (pm store or PATH)"
-
     try:
-        proc = runner(
-            [npm_bin, *install_cmd, "--no-audit", "--no-fund"],
+        runner = pm.ensure("npm", explicit=explicit)
+        # Resolve inside the composed context, including npm.cmd on Windows;
+        # CreateProcess does not search a child's replacement PATH itself.
+        npm = shutil.which("npm", path=runner.env.get("PATH", ""))
+        if npm is None:
+            return "npm is missing from the prepared PM environment"
+        proc = runner.run(
+            [npm, *install_cmd, "--no-audit", "--no-fund"],
             cwd=str(plugin_dir),
             capture_output=True,
             text=True,
@@ -398,80 +262,36 @@ def install_node_sidecar(
     return None
 
 
-def _node_npm_binary(name: str) -> Optional[str]:
-    """pm's pinned npm from the store (store-first), PATH second."""
-    from pm.ensure import env_for
-
-    try:
-        env = env_for("npm")
-    except Exception:
-        env = None
-    if env:
-        path_value = env.get("PATH", "")
-        import shutil as _shutil
-
-        for d in path_value.split(os.pathsep):
-            if d:
-                candidate = Path(d) / ("npm.cmd" if os.name == "nt" else name)
-                if candidate.is_file():
-                    return str(candidate)
-    import shutil as _shutil
-
-    return _shutil.which(name)
-
-
 def lock_and_sync(
-    plugin_dirs: list[Path],
-    extras: Optional[list[str]] = None,
+    plugin_dirs: list[Path] | Mapping[Path, Path],
+    extras: list[str],
     *,
-    venv_dir: Path,
-    root: Optional[Path] = None,
-    env: Optional[dict] = None,
-    seed_lock: Optional[Path] = None,
+    root: Path,
+    source: Path,
+    seed_lock: Path | None,
+    environment: PythonEnvironment,
     frozen: bool = False,
-    replay: Optional[Path] = None,
-    source: Optional[Path] = None,
-    environment: PythonEnvironment | None = None,
+    replay: Path | None = None,
 ) -> None:
-    """Build the root, then `uv lock` + `uv sync --frozen --extra ...`.
+    """Prepare a fresh generation using explicit inputs and a prepared engine.
 
-    Everything resolves into a parent-supplied STAGING surface: ``root``
-    pins the generated workspace dir, ``venv_dir`` pins
-    UV_PROJECT_ENVIRONMENT and ``seed_lock`` (optional) pins which
-    existing lock seeds the extension (default: the root's current
-    extended lock, else the committed core lock). ``env`` replaces the
-    ambient base environment when supplied; either way the subprocess
-    gets a COPY — the live process environment is never mutated. ``replay``
-    copies a recorded sibling workspace and uses its lock without resolution
-    or plugin discovery; it is reserved for restoring an existing selection.
-    ``source`` and ``environment`` bypass live source/tool discovery when supplied;
-    the environment owns the child process policy, cache and interpreter.
-
-    Raises a CLASSIFIED InstallError on failure: ResolutionConflict only
-    for a confirmed resolver conflict; network, build and tool failures
-    stay generic InstallError — they are not evidence of a dependency
-    conflict and must not disable plugins.
+    The caller selects the seed; uv retains its compatible versions. Repair
+    copies the recorded build inputs and never reads current manifests.
+    Resolver conflicts remain distinct from download/build failures.
     """
-    if environment is not None and environment.destination != venv_dir:
-        raise ValueError("workspace and environment destinations differ")
-
+    if root.exists() or root.is_symlink():
+        raise InstallError("venv", f"workspace must be fresh: {root}")
     if replay is None:
-        generated, changed = _generate_pyproject(plugin_dirs, root, source=source)
-        if changed:
-            _seed_lock(generated, seed_lock, source=source)
+        _generate_pyproject(plugin_dirs, root, source=source)
+        if seed_lock is not None:
+            (root / "uv.lock").write_bytes(seed_lock.read_bytes())
     else:
-        import shutil
-
-        if root is None or not (replay / "pyproject.toml").is_file() or not (replay / "uv.lock").is_file():
+        if not (replay / "pyproject.toml").is_file() or not (replay / "uv.lock").is_file():
             raise InstallError("venv", f"recorded workspace is missing: {replay}")
-        # Generation workspaces are siblings at the same depth. External
-        # member paths still resolve. Generated members move with the copy.
-        shutil.copytree(replay, root, ignore=shutil.ignore_patterns("__pycache__", ".venv", "build", "*.egg-info"))
-        generated = root
+        # Sibling generations keep external relative paths at the same depth;
+        # snapshotted members and their exact lock travel with the workspace.
+        # Use the snapshot's exclusions: build/ may hold an in-tree backend.
+        shutil.copytree(replay, root, symlinks=True, ignore=_member_ignored)
         frozen = True
 
-    if environment is None:
-        from pm.environment import managed_environment
-
-        environment = managed_environment(venv_dir, env=env)
-    environment.sync(generated, extras=extras or (), frozen=frozen)
+    environment.sync(root, extras=extras, frozen=frozen)

@@ -12,7 +12,7 @@ from tools.mcp_tool_common import _MISSING, _exc_str, _safe_numeric, _sanitize_e
 from tools.mcp_tool_schema import _normalize_mcp_input_schema
 
 if TYPE_CHECKING:  # annotations only; mcp_tool imports this module, so a real import is circular
-    from tools.mcp_tool import MCPServerTask
+    pass
 
 logger = logging.getLogger("tools.mcp_tool")
 

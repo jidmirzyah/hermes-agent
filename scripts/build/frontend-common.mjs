@@ -50,6 +50,9 @@ function requireOwnedOutput(out, source) {
   }
 }
 
+// Classify in-tree destinations here, not by enumerating existing workspace
+// children: generated parents also exist after the first build. inputs names
+// explicit prepared trees/files; their protection wins even in generated homes.
 export function productOutput(source, out, inputs) {
   if (!source || !out) throw new Error('source and output paths are required')
   const src = realpathSync(path.resolve(source))

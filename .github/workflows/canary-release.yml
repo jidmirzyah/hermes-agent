@@ -17,7 +17,10 @@ name: Canary Release
 # does — same tag, same draft, same build, same auto-publish.
 #
 # The desktop build uploads the installers to the Cloudflare R2 release
-# bucket and publishes the draft when the whole matrix is green. A failed
+# bucket and publishes the draft when the whole matrix is green. Its final
+# protected channel_releases canary step advances the R2 head from those same
+# receipts, after the published-release read-back. This scheduler must not
+# advance a head: dispatch success is not native acceptance. A failed
 # matrix leaves a draft: inspectable, re-runnable, and unreachable by
 # users. The prune job deletes both the GitHub releases+tags and the R2
 # canary objects older than 14 days.

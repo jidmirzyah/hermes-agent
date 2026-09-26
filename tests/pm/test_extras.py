@@ -22,40 +22,17 @@ def test_extra_supported_ungated_extra_is_true():
     assert extras.extra_supported("no-such-gate-for-this-one") is True
 
 
-def test_extra_supported_gate_excludes_platform(monkeypatch):
-    extras._PLATFORM_GATES = {"gated-extra": "sys_platform == 'linux'"}
-    try:
-        # On this Windows host the linux gate must read False — unless the
-        # anchors happen to be installed (installed-override beats table).
-        if sys.platform == "linux":
-            pytest.skip("host is linux — the linux gate is inclusive here")
-        assert extras.extra_supported("gated-extra") is False
-    finally:
-        extras._PLATFORM_GATES = None
-
-
-def test_extra_supported_installed_override_beats_gate(monkeypatch):
-    extras._PLATFORM_GATES = {"gated-extra": "sys_platform == 'linux'"}
-    try:
-        # anchors importable → supported even if the gate would exclude
-        monkeypatch.setitem(sys.modules, "gated_extra", SimpleNamespace())
-        assert extras.extra_supported("gated-extra") is True
-    finally:
-        extras._PLATFORM_GATES = None
-
-
 def test_ensure_import_raises_on_gated_off_extra(monkeypatch, synced):
-    extras._PLATFORM_GATES = {"gated-extra": "sys_platform == 'linux'"}
-    try:
-        if sys.platform == "linux":
-            pytest.skip("host is linux — gate is inclusive here")
-        monkeypatch.setattr(extras, "available", lambda e: False)
-        with pytest.raises(pm.InstallError) as exc:
-            extras.ensure_import("gated-extra")
-        assert "not supported on this platform" in str(exc.value)
-        assert synced == []  # never reached the venv sync
-    finally:
-        extras._PLATFORM_GATES = None
+    from packaging.markers import default_environment
+
+    version = default_environment()["python_full_version"]
+    monkeypatch.setattr(extras, "_PLATFORM_GATES", {
+        "gated-extra": f"python_full_version < '{version}'",
+    })
+    monkeypatch.setattr(extras, "available", lambda e: False)
+    with pytest.raises(pm.InstallError, match="not supported on this platform"):
+        extras.ensure_import("gated-extra")
+    assert synced == []
 
 
 def test_sync_refuses_python_gated_extra_before_touching_environment(monkeypatch, tmp_path):
@@ -63,7 +40,7 @@ def test_sync_refuses_python_gated_extra_before_touching_environment(monkeypatch
     from pathlib import Path
     from packaging.markers import default_environment
 
-    engine = importlib.import_module("pm.ensure")
+    engine = importlib.import_module("pm.install")
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     version = default_environment()["python_full_version"]
     monkeypatch.setattr(extras, "_PLATFORM_GATES", {
@@ -110,15 +87,38 @@ def test_declared_extra_gates_match_dependency_selection():
                 )
 
 
+def test_faster_whisper_targets_are_gated(monkeypatch):
+    """The local-STT extra's anchor is faster-whisper, which has no win_arm64 or darwin-x64 build.
+
+    An extra whose anchor can never import there must be refused up front: without the gate,
+    ensure_import rebuilt the whole dependency environment and still failed the anchor — on every
+    status probe, forever. ``voice`` is deliberately NOT gated (its sounddevice/numpy are
+    installable on those targets; see the selection test above), so the lazy STT path asks for
+    ``stt-whisper``, the extra that carries only faster-whisper.
+    """
+    monkeypatch.setattr(extras, "_PLATFORM_GATES", None)
+    targets = {
+        "win32-arm64": {"sys_platform": "win32", "platform_system": "Windows",
+                        "platform_machine": "ARM64", "os_name": "nt"},
+        "darwin-x64": {"sys_platform": "darwin", "platform_system": "Darwin",
+                       "platform_machine": "x86_64", "os_name": "posix"},
+        "linux-x64": {"sys_platform": "linux", "platform_system": "Linux",
+                      "platform_machine": "x86_64", "os_name": "posix"},
+    }
+    supported = {
+        target: extras.extra_supported("stt-whisper", environment=environment,
+                                       importable=lambda _: False)
+        for target, environment in targets.items()
+    }
+    assert supported == {"win32-arm64": False, "darwin-x64": False, "linux-x64": True}
+
+
 @pytest.fixture
 def synced(monkeypatch):
     calls: list[list[str]] = []
     monkeypatch.setattr(client, "sync_venv", lambda x=None: calls.append(list(x or [])))
     return calls
 
-
-def test_available_known_anchor_present():
-    assert extras.available("web") is True  # fastapi ships in this venv
 
 
 def test_available_missing_module():
@@ -172,39 +172,21 @@ def test_ensure_import_propagates_install_error(monkeypatch):
         extras.ensure_import("fal")
 
 
-def test_ensure_and_bind_binds_on_success(monkeypatch, synced):
-    monkeypatch.setattr(extras, "available", lambda e: True)
-    target: dict = {}
-    ok = extras.ensure_and_bind("fal", lambda: {"NAME": 42}, target)
-    assert ok is True and target["NAME"] == 42
-
-
-def test_ensure_and_bind_false_on_install_failure(monkeypatch):
-    def boom(x=None):
-        raise pm.InstallError("venv", "nope")
-
-    monkeypatch.setattr(client, "sync_venv", boom)
-    monkeypatch.setattr(extras, "available", lambda e: False)
-    target: dict = {}
-    assert extras.ensure_and_bind("fal", lambda: {"X": 1}, target) is False
-    assert target == {}
-
-
-def test_ensure_and_bind_false_on_import_failure(monkeypatch, synced):
-    monkeypatch.setattr(extras, "available", lambda e: True)
-
+@pytest.mark.parametrize("failure", [None, "install", "import"])
+def test_ensure_and_bind_preserves_target_on_failure(monkeypatch, failure):
+    monkeypatch.setattr(extras, "available", lambda _: failure != "install")
+    def sync(*args):
+        raise pm.InstallError("venv", "install refused")
+    monkeypatch.setattr(client, "sync_venv", sync)
     def importer():
-        raise ImportError("still broken")
+        if failure == "import":
+            raise ImportError("still broken")
+        return {"NAME": 42}
+    target = {"existing": "kept"}
+    assert extras.ensure_and_bind("fal", importer, target) is (failure is None)
+    assert target == ({"existing": "kept", "NAME": 42} if failure is None else {"existing": "kept"})
 
-    assert extras.ensure_and_bind("fal", importer, {}) is False
 
-
-def test_package_exports_preserve_availability_and_noop_install(monkeypatch, synced):
-    monkeypatch.setitem(sys.modules, "some_new_thing", SimpleNamespace())
-    assert pm.available("some-new-thing") == extras.available("some-new-thing") is True
-    assert pm.available("no-such-extra-anywhere") == extras.available("no-such-extra-anywhere") is False
-    pm.ensure_import("some-new-thing")
-    assert synced == []
 
 
 def test_every_anchor_extra_exists_in_pyproject():

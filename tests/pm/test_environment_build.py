@@ -7,31 +7,15 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
-import zipfile
 
 import pytest
-
-
-def _wheel(directory: Path, name: str, version: str = "1.0", requirements=()) -> Path:
-    metadata = f"{name}-{version}.dist-info"
-    entries = {
-        f"{name}/__init__.py": f"__version__ = {version!r}\n",
-        f"{metadata}/METADATA": f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n"
-        + "".join(f"Requires-Dist: {requirement}\n" for requirement in requirements),
-        f"{metadata}/WHEEL": "Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
-    }
-    entries[f"{metadata}/RECORD"] = "".join(f"{path},,\n" for path in entries)
-    wheel = directory / f"{name}-{version}-py3-none-any.whl"
-    with zipfile.ZipFile(wheel, "w") as archive:
-        for path, body in entries.items():
-            archive.writestr(path, body)
-    return wheel
-
-
-def _run(command, *, cwd: Path, env: dict) -> str:
-    result = subprocess.run(command, cwd=cwd, env=env, capture_output=True, text=True, timeout=60)
-    assert result.returncode == 0, result.stderr
-    return result.stdout.strip()
+from tests.pm._fixtures import (
+    _run,
+    _wheel,
+    build_worker as build_worker,
+    client as client,
+    isolated_python as isolated_python,
+)
 
 
 def test_prune_site_pth_keeps_only_load_bearing_pth(tmp_path):
@@ -105,12 +89,8 @@ def locked_project(tmp_path):
 
 
 @pytest.fixture
-def installable_project(locked_project, monkeypatch):
+def installable_project(locked_project, build_worker):
     source, uv, env = locked_project
-    # The parent suite exercises the worker transport; these tests exercise the
-    # build adapter and engine with locally supplied, real tool binaries.
-    monkeypatch.setattr("pm.client.is_runtime", lambda: True)
-    monkeypatch.setattr("pm._uv._toolchain", lambda **kwargs: (uv, Path(sys.executable)))
     metadata = source / "pyproject.toml"
     metadata.write_text(metadata.read_text().replace("package=false", "package=true") +
                         '\n[build-system]\nrequires=[]\nbuild-backend="local_backend"\nbackend-path=["."]\n')
@@ -148,8 +128,11 @@ def test_public_build_installs_all_extras_at_explicit_destination(installable_pr
     import pm.workspace
 
     source, uv, env = installable_project
-    monkeypatch.setattr(pm.paths, "repo_root", lambda: pytest.fail("implicit source"))
+    monkeypatch.setattr(pm.paths, "repo_root", lambda: tmp_path / "unrelated-project")
     monkeypatch.setattr(pm.workspace, "enabled_member_dirs", lambda: pytest.fail("user plugins"))
+    monkeypatch.setenv("UV_PYTHON", "/not-the-interpreter")
+    monkeypatch.setenv("UV_PROJECT_ENVIRONMENT", str(tmp_path / "wrong-environment"))
+    monkeypatch.setenv("VIRTUAL_ENV", str(tmp_path / "wrong-environment"))
     before = dict(os.environ)
     locked = (source / "uv.lock").read_bytes()
     executable = build_environment(explicit=True,
@@ -161,7 +144,9 @@ def test_public_build_installs_all_extras_at_explicit_destination(installable_pr
                  "import root_app, member_dep, chosen_dep, other_dep; print(root_app.VALUE)"],
                 cwd=tmp_path, env=env) == "installed from the explicit source"
     assert executable.parent.parent == tmp_path / "native environment"
-    from hermes_cli.runtime_paths import site_packages
+    assert not (tmp_path / "wrong-environment").exists()
+    assert "root_app" not in sys.modules
+    from pm.environments import site_packages
 
     site = site_packages(executable.parent.parent)
     assert (site / "_virtualenv.pth").exists() is not sealed
@@ -199,7 +184,7 @@ def test_public_dependency_only_build_needs_no_application_source(installable_pr
     assert not Path(env["HERMES_HOME"]).exists()
 
 
-def test_group_only_build_excludes_application_dependencies(locked_project, tmp_path):
+def test_group_only_build_excludes_application_dependencies(locked_project, tmp_path, build_worker):
     import pm
 
     source, _, env = locked_project
@@ -213,6 +198,204 @@ def test_group_only_build_excludes_application_dependencies(locked_project, tmp_
     assert _run([str(python), "-I", "-c", "import chosen_dep, importlib.util; "
                  "assert importlib.util.find_spec('base_dep') is None; print(chosen_dep.__version__)"],
                 cwd=tmp_path, env=env) == "1.0"
+
+
+@pytest.mark.parametrize("lazy", [False, True])
+def test_first_bundle_extension_preserves_shipped_extras(locked_project, build_worker, tmp_path, monkeypatch, lazy):
+    import pm
+    from pm.environments import selected_venv, runtime_facts_path
+    from pm import paths
+    from pm.features import write_features
+    from pm.lock import Facts
+
+    source, _, env = locked_project
+    manifest = source / "pyproject.toml"
+    manifest.write_text(manifest.read_text().replace('[tool.uv.workspace]\nmembers=["member"]\n', ""), encoding="utf-8")
+    monkeypatch.setattr(paths, "repo_root", lambda: source)
+    pm.lock_project(source, offline=True, explicit=True)
+    base = tmp_path / "shipped"
+    pm.build_environment(source=source, out=base, extras=["chosen"], env=env,
+                         cache=tmp_path / "cache", offline=True, explicit=True)
+    (tmp_path / "manifest.json").write_text(json.dumps({"repo": source.name, "venv": base.name}), encoding="utf-8")
+    write_features(["chosen"], tmp_path)
+    home = Path(os.environ["HERMES_HOME"])
+    home.mkdir(exist_ok=True)
+    (home / "config.yaml").write_text(f"security:\n  allow_lazy_installs: {str(lazy).lower()}\n", encoding="utf-8")
+    assert selected_venv(source) == base
+    assert Facts(runtime_facts_path(source)).get("venv") is None
+    python_relative = "Scripts/python.exe" if os.name == "nt" else "bin/python"
+    assert _run([str(base / python_relative), "-I", "-c",
+                 "import chosen_dep; print(chosen_dep.__version__)"], cwd=tmp_path, env=env) == "1.0"
+    locked = (source / "uv.lock").read_bytes()
+
+    # Admission adds only a plugin, not a list of the bundle's optional extras.
+    pm.sync_venv(explicit=True, plugin_dirs=[source / "member"])
+    first = selected_venv(source)
+    assert first != base
+    executable = first / python_relative
+    assert _run([str(executable), "-I", "-c",
+                 "import base_dep, chosen_dep, member_dep; print(chosen_dep.__version__)"],
+                cwd=tmp_path, env=env) == "1.0"
+    first_fact = Facts(runtime_facts_path(source)).get("venv")
+    assert first_fact is not None and first_fact["extras"] == ["chosen"]
+
+    # Once recorded, the selection owns the baseline, even if inventory changes.
+    write_features(["other"], tmp_path)
+    _wheel(tmp_path / "wheels", "member_dep", "1.1")
+    member = source / "member" / "pyproject.toml"
+    member.write_text(member.read_text().replace("member-dep==1.0", "member-dep==1.1"), encoding="utf-8")
+    pm.sync_venv(explicit=True, plugin_dirs=[source / "member"])
+    second = selected_venv(source)
+    assert second != first
+    second_fact = Facts(runtime_facts_path(source)).get("venv")
+    assert second_fact is not None and second_fact["extras"] == ["chosen"]
+    assert _run([str(second / executable.relative_to(first)), "-I", "-c",
+                 "import chosen_dep, member_dep, importlib.util; "
+                 "assert importlib.util.find_spec('other_dep') is None; print(member_dep.__version__)"],
+                cwd=tmp_path, env=env) == "1.1"
+    assert (source / "uv.lock").read_bytes() == locked
+
+
+def test_worker_sync_reuses_unions_and_reports_real_lock_drift(locked_project, build_worker, tmp_path, monkeypatch):
+    import pm
+    from pm.environments import selected_venv, runtime_facts_path
+    from pm.lock import Facts, Lockfile
+    from pm import paths
+
+    source, _, env = locked_project
+    manifest = source / "pyproject.toml"
+    manifest.write_text(manifest.read_text().replace('[tool.uv.workspace]\nmembers=["member"]\n', ""), encoding="utf-8")
+    monkeypatch.setattr(paths, "repo_root", lambda: source)
+    pm.lock_project(source, offline=True, explicit=True)
+    assert pm.check() == []
+    parent_path, parent_env = list(sys.path), dict(os.environ)
+    # The worker imports its own class; this trap affects only inline installs.
+    monkeypatch.setattr("pm.packages.Venv.apply", lambda *a, **kw: pytest.fail("venv apply ran in caller"))
+
+    pm.sync_venv(["chosen"], explicit=True, plugin_dirs=[])
+    first = selected_venv(source)
+    first_fact = Facts(runtime_facts_path(source)).get("venv")
+    pm.sync_venv(["chosen"], explicit=True, plugin_dirs=[])
+    assert selected_venv(source) == first
+    assert Facts(runtime_facts_path(source)).get("venv") == first_fact
+    assert _run([str(first / ("Scripts/python.exe" if os.name == "nt" else "bin/python")), "-I", "-c",
+                 "import base_dep, chosen_dep, importlib.util; assert importlib.util.find_spec('other_dep') is None; print(chosen_dep.__version__)"],
+                cwd=tmp_path, env=env) == "1.0"
+
+    pm.sync_venv(["other"], explicit=True, plugin_dirs=[])
+    second = selected_venv(source)
+    assert second != first
+    assert Facts(runtime_facts_path(source)).get("venv")["extras"] == ["chosen", "other"]
+    pm.sync_venv(["chosen"], explicit=True, plugin_dirs=[])
+    assert selected_venv(source) == second
+    assert _run([str(second / ("Scripts/python.exe" if os.name == "nt" else "bin/python")), "-I", "-c",
+                 "import chosen_dep, other_dep; print(chosen_dep.__version__, other_dep.__version__)"],
+                cwd=tmp_path, env=env) == "1.0 1.0"
+    assert pm.check() == []
+    _wheel(tmp_path / "wheels", "base_dep", "1.1")
+    manifest.write_text(manifest.read_text().replace("base-dep==1.0", "base-dep==1.1"), encoding="utf-8")
+    pm.lock_project(source, offline=True, explicit=True)
+    assert pm.check() == ["venv: out of sync with uv.lock"]
+    lock = Lockfile(paths.lockfile_path())
+    lock.set_pin("node", "fixture", {"any": {"url": "https://example.invalid/node", "sha256": "0" * 64}})
+    lock.save()
+    assert "node: not installed or outdated" in pm.check()
+    assert selected_venv(source) == second
+    assert list(sys.path) == parent_path and dict(os.environ) == parent_env
+    assert not {"base_dep", "chosen_dep", "other_dep"} & sys.modules.keys()
+
+
+@pytest.mark.parametrize("operation", ["sync", "requirements", "application"])
+def test_build_backend_output_is_streamed_before_build_finishes(installable_project, tmp_path, monkeypatch, operation):
+    import io
+    from pm.environment import PythonEnvironment
+
+    source, uv, env = installable_project
+    release = tmp_path / "release-build"
+    stdout_marker = "construction-root: backend stdout"
+    stderr_marker = "construction-root: backend stderr"
+    backend = source / "local_backend.py"
+    backend.write_text(backend.read_text() + f'''
+import sys
+import time
+
+original_build = build_wheel
+
+def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
+    print({stdout_marker!r}, flush=True)
+    print({stderr_marker!r}, file=sys.stderr, flush=True)
+    release = Path({str(release)!r})
+    deadline = time.monotonic() + 10
+    while not release.exists() and time.monotonic() < deadline:
+        time.sleep(.01)
+    assert release.exists(), "backend output was hidden until build exit"
+    return original_build(wheel_directory, config_settings, metadata_directory)
+
+build_editable = build_wheel
+''', encoding="utf-8")
+
+    class AcknowledgingLog(io.StringIO):
+        def write(self, text):
+            written = super().write(text)
+            if stdout_marker in self.getvalue() and stderr_marker in self.getvalue():
+                release.touch()
+            return written
+
+    output = AcknowledgingLog()
+    environment = PythonEnvironment(
+        uv=uv, python=Path(sys.executable), destination=tmp_path / "built",
+        cache=tmp_path / "build-cache", offline=True, output=output,
+        env=dict(env, UV_NO_INDEX="1", UV_FIND_LINKS=str(tmp_path / "wheels")),
+    )
+    if operation == "application":
+        from pm.packages import Venv
+
+        monkeypatch.setattr("pm._uv._toolchain", lambda **kwargs: (uv, Path(sys.executable)))
+        monkeypatch.setattr(sys, "stderr", output)
+        result = Venv(source).apply([], plugin_dirs=[], explicit=True)
+        executable = result["environment"] / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    else:
+        environment.create()
+        if operation == "sync":
+            environment.sync(source, timeout=30)
+        else:
+            environment.install_requirements([source.as_uri()])
+        environment.check()
+        executable = environment.executable
+    assert release.is_file(), "both backend streams must arrive during the build"
+    assert _run([str(executable), "-I", "-c", "import root_app; print(root_app.VALUE)"],
+                cwd=tmp_path, env=env) == "installed from the explicit source"
+
+
+@pytest.mark.parametrize("diagnostic", ["No solution found", "Connection timed out", "Failed to build wheel"])
+def test_streaming_bounds_memory_without_losing_failure_class(tmp_path, diagnostic):
+    import tracemalloc
+    from pm.environment import PythonEnvironment
+    from pm.workspace import classify_uv_failure
+
+    # Separate writes split the resolver marker across pipe reads; subsequent
+    # verbose output evicts it from the retained tail without changing its class.
+    script = (
+        f"import os, time; os.write(2, {diagnostic[:4].encode()!r}); time.sleep(.15); "
+        f"os.write(2, {diagnostic[4:].encode()!r}); "
+        "[os.write(2, b'x' * 65536) for _ in range(128)]; "
+        "os.write(2, b'final diagnostic'); raise SystemExit(1)"
+    )
+    with open(os.devnull, "w") as output:
+        environment = PythonEnvironment(uv=Path(sys.executable), python=Path(sys.executable),
+            destination=tmp_path / "venv", cache=tmp_path / "cache", env=dict(os.environ), output=output)
+        tracemalloc.start()
+        try:
+            result = environment._run(["-c", script], cwd=tmp_path, timeout=30)
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+    assert result.returncode == 1
+    assert len(result.stderr) <= 2000
+    assert peak < 2 * 1024 * 1024, f"stream capture retained {peak} bytes"
+    actual = classify_uv_failure("sync", result.returncode, result.stderr)
+    assert type(actual) is type(classify_uv_failure("sync", 1, diagnostic))
+    assert "final diagnostic" in str(actual)
 
 
 def test_child_output_is_live_and_keeps_explicit_index_credentials(tmp_path):
@@ -258,20 +441,37 @@ def test_child_output_is_live_and_keeps_explicit_index_credentials(tmp_path):
     assert "child-complete" in result.stderr, "failure diagnostics must retain a bounded output tail"
 
 
-@pytest.mark.parametrize("parent_exits", [True, False])
-def test_streaming_deadline_includes_inherited_stdout(tmp_path, parent_exits):
+@pytest.fixture(params=["environment", "cli"])
+def streaming_runner(request, tmp_path):
+    import contextlib
     import io
-    import threading
-    import time
+    from pm.cli import _run_live
     from pm.environment import PythonEnvironment
 
-    release = tmp_path / "release-descendant"
-    finished = tmp_path / "descendant-finished"
     output = io.StringIO()
     environment = PythonEnvironment(
         uv=Path(sys.executable), python=Path(sys.executable), destination=tmp_path / "venv",
         cache=tmp_path / "cache", env=dict(os.environ), output=output,
     )
+
+    def run(script, timeout):
+        if request.param == "cli":
+            with contextlib.redirect_stdout(output):
+                return _run_live([sys.executable, "-c", script], cwd=tmp_path,
+                                 env=dict(os.environ), timeout=timeout)
+        return environment._run(["-c", script], cwd=tmp_path, timeout=timeout)
+
+    return run, output, RuntimeError if request.param == "cli" else subprocess.TimeoutExpired
+
+
+@pytest.mark.parametrize("parent_exits", [True, False])
+def test_streaming_deadline_includes_inherited_stdout(tmp_path, parent_exits, streaming_runner):
+    import threading
+    import time
+
+    run, output, timeout_error = streaming_runner
+    release = tmp_path / "release-descendant"
+    finished = tmp_path / "descendant-finished"
     # The descendant inherits stdout even when the direct child has already exited.
     # Its finite lifetime also bounds this regression on the broken implementation.
     descendant = (
@@ -290,8 +490,8 @@ def test_streaming_deadline_includes_inherited_stdout(tmp_path, parent_exits):
     timeout = 2
     started = time.monotonic()
     try:
-        with pytest.raises(subprocess.TimeoutExpired):
-            environment._run(["-c", parent], cwd=tmp_path, timeout=timeout)
+        with pytest.raises(timeout_error):
+            run(parent, timeout)
         assert time.monotonic() - started < timeout + 2, "draining stdout restarted the timeout"
         assert "inherited-output" in output.getvalue()
         assert set(threading.enumerate()) <= threads_before, "timeout leaked an output reader"
@@ -307,16 +507,10 @@ def test_streaming_deadline_includes_inherited_stdout(tmp_path, parent_exits):
             thread.join(timeout=5)
 
 
-def test_streaming_eof_does_not_restart_process_wait_timeout(tmp_path):
-    import io
+def test_streaming_eof_does_not_restart_process_wait_timeout(tmp_path, streaming_runner):
     import time
-    from pm.environment import PythonEnvironment
 
-    output = io.StringIO()
-    environment = PythonEnvironment(
-        uv=Path(sys.executable), python=Path(sys.executable), destination=tmp_path / "venv",
-        cache=tmp_path / "cache", env=dict(os.environ), output=output,
-    )
+    run, output, timeout_error = streaming_runner
     # Spend most of the budget before EOF, then leave the process alive without
     # any pipe writers. Waiting for exit must use only the remaining budget.
     script = (
@@ -325,10 +519,9 @@ def test_streaming_eof_does_not_restart_process_wait_timeout(tmp_path):
     )
     timeout = 4
     started = time.monotonic()
-    with pytest.raises(subprocess.TimeoutExpired) as error:
-        environment._run(["-c", script], cwd=tmp_path, timeout=timeout)
+    with pytest.raises(timeout_error):
+        run(script, timeout)
     assert time.monotonic() - started < timeout + 2, "EOF restarted the process wait budget"
-    assert error.value.timeout == timeout
     assert "before-eof" in output.getvalue()
 
 
@@ -345,7 +538,7 @@ def test_failed_build_removes_only_its_candidate(installable_project, tmp_path, 
     source_lock = (source / "uv.lock").read_bytes()
     # Check destination refusal with valid inputs. The contract does not specify
     # which error comes first when the source is also damaged.
-    with pytest.raises(FileExistsError):
+    with pytest.raises(FileExistsError, match="already exists"):
         build_environment(explicit=True, source=source, python=Path(sys.executable),
                           out=previous, env=env, cache=tmp_path / "cache", offline=True)
     if damage == "source":
@@ -443,6 +636,9 @@ def test_explicit_workspace_preserves_seed_and_replays_copied_members(locked_pro
     _wheel(tmp_path / "wheels", "base_dep", "1.1")
     original_member = source / "member"
     before_member = (original_member / "pyproject.toml").read_bytes()
+    stamp = workspace.members_stamp([original_member])
+    assert stamp != workspace.members_stamp([])
+    assert workspace.members_stamp([original_member, original_member]) == stamp
     monkeypatch.setattr(workspace.paths, "repo_root", lambda: pytest.fail("implicit source discovery"))
     monkeypatch.setattr(workspace, "enabled_member_dirs", lambda: pytest.fail("profile discovery"))
 
@@ -451,7 +647,7 @@ def test_explicit_workspace_preserves_seed_and_replays_copied_members(locked_pro
     first.create()
     workspace.lock_and_sync(
         [original_member], ["chosen"], source=source, root=tmp_path / "first" / "workspace",
-        venv_dir=first.destination, environment=first, seed_lock=source / "uv.lock",
+        environment=first, seed_lock=source / "uv.lock",
     )
     first.check()
     assert _run([str(first.executable), "-I", "-c", "import base_dep, member_dep; print(base_dep.__version__)"],
@@ -460,6 +656,15 @@ def test_explicit_workspace_preserves_seed_and_replays_copied_members(locked_pro
     assert (original_member / "pyproject.toml").read_bytes() == before_member
     recorded = tmp_path / "first" / "workspace"
     recorded_lock = (recorded / "uv.lock").read_bytes()
+    import tomllib
+    document = tomllib.loads((recorded / "pyproject.toml").read_text())
+    assert document["project"] == tomllib.loads(project.read_text())["project"]
+    [relative] = document["tool"]["uv"]["workspace"]["members"]
+    copied = recorded / relative / "pyproject.toml"
+    assert copied.read_bytes() == before_member
+    assert copied.resolve().is_relative_to(recorded.resolve())
+    (original_member / "pyproject.toml").unlink()
+    assert workspace.members_stamp([original_member]) != stamp
 
     # Repair replays recorded inputs, not today's edited source/plugins.
     (original_member / "pyproject.toml").write_text("broken plugin TOML")
@@ -469,7 +674,7 @@ def test_explicit_workspace_preserves_seed_and_replays_copied_members(locked_pro
     second.create()
     workspace.lock_and_sync(
         [], ["chosen"], source=source, root=tmp_path / "second" / "workspace",
-        venv_dir=second.destination, environment=second, replay=recorded,
+        environment=second, seed_lock=None, replay=recorded,
     )
     second.check()
     assert _run([str(second.executable), "-I", "-c", "import member_dep, chosen_dep; print(member_dep.__version__)"],
@@ -478,8 +683,53 @@ def test_explicit_workspace_preserves_seed_and_replays_copied_members(locked_pro
     assert (recorded / "uv.lock").read_bytes() == recorded_lock
 
 
+@pytest.mark.parametrize("failure", ["facts", "missing-cfg", "restart"])
+def test_real_sync_retains_selection_until_commit(locked_project, tmp_path, monkeypatch, failure):
+    import importlib
+    import pm.extras as extras
+    from pm import paths
+    from pm.lock import Facts
+    from pm.environments import selected_venv
+
+    source, uv, env = locked_project
+    monkeypatch.setattr(paths, "repo_root", lambda: source)
+    monkeypatch.setattr("pm._uv._toolchain", lambda **kw: (uv, Path(sys.executable)))
+    engine = importlib.import_module("pm.install")
+    monkeypatch.setattr(engine, "lazy_installs_allowed", lambda: True)
+    engine.sync_venv(["chosen"], plugin_dirs=[], explicit=True)
+    old = selected_venv(source)
+    facts = paths.runtime_facts_path().read_bytes()
+    home = Path(os.environ["HERMES_HOME"])
+    config = home / "config.yaml"
+    config.write_text("plugins: {enabled: []}\nsecurity: {allow_lazy_installs: true}\n")
+    config_bytes = config.read_bytes()
+    if failure == "facts":
+        def refuse(*args, **kwargs):
+            raise OSError("facts disk full")
+        with monkeypatch.context() as fault:
+            fault.setattr(Facts, "record_state", refuse)
+            with pytest.raises(OSError, match="facts disk full"):
+                engine.sync_venv(["other"], plugin_dirs=[], explicit=True)
+        assert selected_venv(source) == old
+        assert paths.runtime_facts_path().read_bytes() == facts
+    elif failure == "missing-cfg":
+        (old / "pyvenv.cfg").unlink()
+        engine.sync_venv(["chosen"], plugin_dirs=[], explicit=True)
+        assert selected_venv(source) != old
+        assert (selected_venv(source) / "pyvenv.cfg").is_file()
+    else:
+        monkeypatch.setattr("pm.client.sync_venv", engine.sync_venv)
+        monkeypatch.setattr(extras, "available", lambda _: False)
+        with pytest.raises(engine.InstallError, match="restart"):
+            extras.ensure_import("other")
+        assert selected_venv(source) != old
+        assert "other_dep" not in sys.modules
+    assert old.is_dir()
+    assert config.read_bytes() == config_bytes
+
+
 def test_live_apply_keeps_selection_on_failed_union(locked_project, tmp_path, monkeypatch):
-    from hermes_cli.runtime_paths import runtime_facts_path, selected_venv
+    from pm.environments import runtime_facts_path, selected_venv
     from pm.lock import Facts
     from pm.packages import Venv
     import pm.paths

@@ -16,7 +16,7 @@ def _toolchain(*, realize: bool = True, explicit: bool = False) -> tuple[Path, P
     A read-only probe never installs. Windows bundle builds need a verified
     writable interpreter so their venv redirectors can run outside the MSIX.
     """
-    from pm.ensure import (
+    from pm.install import (
         _install, _installed_location, _lockfile, _refuse_lazy,
         ensure, lazy_installs_allowed, sealed,
     )

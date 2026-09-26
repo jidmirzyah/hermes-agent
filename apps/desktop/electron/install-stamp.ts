@@ -29,6 +29,35 @@ export interface PayloadRuntime {
   commands: Record<string, string>
 }
 
+/** Immutable admitted channel build. Native names come from R2, never the slug. */
+export interface ChannelBuildRequest {
+  schema: 1
+  buildId: string
+  channel: string
+  sequence: number
+  repository: string
+  commit: string
+  controllerCommit?: string
+  sourceVersion: string
+  /** Build-only official receiver rehearsal, admitted under a disposable authority. */
+  receiverCandidate?: true
+  releaseTag?: string
+  version: string
+  windowsVersion: string
+  identity: {
+    token: string
+    displayName: string
+    appId: string
+    appNamePascal: string
+    artifactNamePascal: string
+    cliName: string
+    windowsExecutableName: string
+    msixAppIdWithOrg: string
+  }
+  bundleEnv: Record<string, string | null>
+  publicBase: string
+}
+
 /** Mirrors the build stamp with the PM builder's completed launch contract. */
 export interface InstallStamp {
   schemaVersion: number
@@ -38,7 +67,18 @@ export interface InstallStamp {
   builtAt: string | null
   dirty: boolean
   /** Build provenance: where the stamp's facts came from. */
-  source: 'build' | 'commit-build' | 'ci' | 'docker' | 'fallback' | 'git' | 'local' | 'nix' | 'unknown' | null
+  source:
+    | 'build'
+    | 'commit-build'
+    | 'channel-build'
+    | 'ci'
+    | 'docker'
+    | 'fallback'
+    | 'git'
+    | 'local'
+    | 'nix'
+    | 'unknown'
+    | null
   /** The steward of a sealed tree ('desktop-app' | 'docker' | 'nix'), when packaged. */
   distribution: string | null
   /** Who applies the next update. Required in every stamp. */
@@ -49,15 +89,30 @@ export interface InstallStamp {
   payload: ArtifactKind
   /** Present on bundled artifacts. Validated at build time, never discovered at boot. */
   runtime?: PayloadRuntime
-  /** The pinned release tag. Always set for 'bundled' and 'light', never for 'bootstrap'. */
+  /** Complete channel inputs, absent on legacy releases and one-off builds. */
+  channelBuild?: Readonly<ChannelBuildRequest>
+  /** Cross-application receiver shipped in this artifact, absent on older builds. */
+  receiverProtocol?: 1
+  /** Pinned release tag; null for channel builds, one-offs and bootstrap. */
   tag: string | null
 }
 
 declare const __HERMES_INSTALL_STAMP__: InstallStamp
 
+/** The baked request is immutable as well as its containing artifact stamp. */
+function freezeStamp(stamp: InstallStamp): Readonly<InstallStamp> {
+  if (stamp.channelBuild) {
+    Object.freeze(stamp.channelBuild.identity)
+    Object.freeze(stamp.channelBuild.bundleEnv)
+    Object.freeze(stamp.channelBuild)
+  }
+
+  return Object.freeze(stamp)
+}
+
 /** The baked stamp of this artifact, or null on dev bundles. */
 export const INSTALL_STAMP: Readonly<InstallStamp> | null =
-  typeof __HERMES_INSTALL_STAMP__ === 'undefined' ? null : Object.freeze(__HERMES_INSTALL_STAMP__)
+  typeof __HERMES_INSTALL_STAMP__ === 'undefined' ? null : freezeStamp(__HERMES_INSTALL_STAMP__)
 
 /**
  * The install shape this process runs as — THE single split every

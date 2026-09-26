@@ -17,6 +17,9 @@ def _command_name(token):
     return str(token).replace("\\", "/").rsplit("/", 1)[-1].lower().removesuffix(".exe")
 
 def _git_argv_tail(cmd):
+    if cmd is None:
+        # Popen(args=None, executable=...) and shell-less spawns without argv: nothing to classify.
+        return None
     if isinstance(cmd, (list, tuple)):
         tokens = [os.fsdecode(t) for t in cmd]
     else:
@@ -43,7 +46,12 @@ def _git_argv_tail(cmd):
     return None
 
 def _git_verb_and_targets(tail, kwargs):
-    cwd = Path(kwargs.get("cwd") or os.getcwd())
+    try:
+        cwd = Path(kwargs.get("cwd") or os.getcwd())
+    except FileNotFoundError:
+        # The process cwd was deleted (deferred kanban cleanup, #33774); git itself will
+        # resolve relative to whatever it finds, and nothing under a dead dir is protected.
+        cwd = Path("/nonexistent-deleted-cwd")
     env = kwargs.get("env")
     if env is None:
         env = os.environ

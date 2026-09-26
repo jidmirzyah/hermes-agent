@@ -14,7 +14,9 @@ import { customWindowControlsEnabled } from './window-controls'
 const translucencySupport = ipcRenderer.sendSync('hermes:translucency:support')
 const hudWindowing = ipcRenderer.sendSync('hermes:hud:windowing')
 const hudNativeDrag = hudWindowing?.nativeDrag === true
-const launchFlags: { localModels?: boolean; guestOnboarding?: boolean; skipIntro?: boolean } | undefined = ipcRenderer.sendSync('hermes:feature-flags')
+
+const launchFlags: { localModels?: boolean; guestOnboarding?: boolean; skipIntro?: boolean } | undefined =
+  ipcRenderer.sendSync('hermes:feature-flags')
 
 contextBridge.exposeInMainWorld('hermesDesktop', {
   glassSupported: translucencySupport?.glass === true,

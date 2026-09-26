@@ -24,12 +24,15 @@ from __future__ import annotations
 import hashlib
 import http.client
 import json
+import os
 import re
 import shutil
 import logging
 import threading
+import time
 import urllib.error
 import urllib.request
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional, Sequence
@@ -168,6 +171,36 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+# How long a finished download may wait for another process to let go of it before the
+# publication is reported as failed.
+_RELEASE_WAIT_SECONDS = 60.0
+
+
+def replace_when_released(tmp: Path, dest: Path, *, timeout: float = _RELEASE_WAIT_SECONDS) -> None:
+    """Rename a finished download into place, waiting out a transient hold on the file.
+
+    On Windows a multi-gigabyte file whose last write handle just closed is often still open
+    to an antivirus or indexing scan, and renaming it fails with a permission error until the
+    scan lets go — which for a 22 GB model can take many seconds. ``os.replace`` is retried
+    through that window; it never falls back to copying (``shutil.move`` does, which duplicates
+    the whole file and then reports the leftover's failed delete as the download's failure).
+    A hold that outlasts the window raises a plain-language error.
+    """
+    deadline = time.monotonic() + timeout
+    delay = 0.1
+    while True:
+        try:
+            os.replace(tmp, dest)
+            return
+        except PermissionError as exc:
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    f"The download finished, but another program (usually an antivirus scan) kept "
+                    f"{tmp.name} open and it could not be renamed into place. Please try again.") from exc
+            time.sleep(delay)
+            delay = min(delay * 2, 2.0)
+
+
 def _existing_dest_ok(source: "Source") -> bool:
     """Pinned destinations are rehashed; unpinned model files are accepted as-is.
 
@@ -268,21 +301,18 @@ class Download:
             totals[key] = remote.total
             coverage[key] = covered
 
-        progress_lock = threading.Lock()
-
         def report(key: str, written: _Ranges, total: int, *, complete: bool = False) -> None:
-            with progress_lock:
-                totals[key] = total
-                if total or complete:
-                    unknown.discard(key)
-                else:
-                    unknown.add(key)
-                # The last key identifies the source reporting this tick.
-                coverage.pop(key, None)
-                coverage[key] = list(written)
-                if progress is not None:
-                    done = sum(b - a for rows in coverage.values() for a, b in rows)
-                    progress(done, 0 if unknown else sum(totals.values()), dict(coverage))
+            totals[key] = total
+            if total or complete:
+                unknown.discard(key)
+            else:
+                unknown.add(key)
+            # The last key identifies the source reporting this tick.
+            coverage.pop(key, None)
+            coverage[key] = list(written)
+            if progress is not None:
+                done = sum(b - a for rows in coverage.values() for a, b in rows)
+                progress(done, 0 if unknown else sum(totals.values()), dict(coverage))
 
         for source in selected:
             key = str(source.dest)
@@ -411,7 +441,6 @@ class Download:
 
     @staticmethod
     def _write_sidecar(side: Path, part: Path, covered: _Ranges, remote: _Remote, sha256: str) -> None:
-        import os
         from hermes_cli.runtime_state import _atomic_bytes
 
         # All writers have closed before coverage is persisted. A sidecar can
@@ -468,12 +497,16 @@ class Download:
         lock = threading.Lock()
         errors: list[Exception] = []
         stop = threading.Event()
+        updated = threading.Event()
+        pending = len(ranges)
         covered = list(covered)
+        reported = list(covered)
 
         def worker(start: int, end: int) -> None:
-            if self._paused.is_set() or stop.is_set():
-                return
+            nonlocal pending
             try:
+                if self._paused.is_set() or stop.is_set():
+                    return
                 headers = {**_UA, "Range": f"bytes={start}-{end - 1}"}
                 if remote.etag:
                     headers["If-Range"] = remote.etag
@@ -494,7 +527,7 @@ class Download:
                         position += len(chunk)
                         with lock:
                             covered[:] = _coalesce(covered + [(start, position)])
-                            tick(list(covered))
+                            updated.set()
                     if response.read(1):
                         raise _RangeError("range body exceeds its declared bounds")
             except Exception as exc:
@@ -503,9 +536,36 @@ class Download:
                 with lock:
                     errors.append(exc)
                 stop.set()
+            finally:
+                with lock:
+                    pending -= 1
+                    updated.set()
 
         with ThreadPoolExecutor(max_workers=connections, thread_name_prefix="hermes-download") as pool:
             futures = [pool.submit(worker, start, end) for start, end in ranges]
+            observer_failed = False
+            finished = not ranges
+            while not finished:
+                updated.wait()
+                with lock:
+                    snapshot = list(covered)
+                    finished = pending == 0
+                    updated.clear()
+                # Only the coordinator observes progress. Slow UI/worker IPC
+                # coalesces intermediate snapshots, never holds up range writes.
+                if not observer_failed and snapshot != reported:
+                    try:
+                        tick(snapshot)
+                    except Exception as exc:
+                        with lock:
+                            errors.append(exc)
+                        observer_failed = True
+                        stop.set()
+                    except BaseException:
+                        stop.set()
+                        raise
+                    reported = snapshot
+
             for future in futures:
                 future.result()
         return covered, errors
@@ -555,12 +615,13 @@ class Download:
         if source.sha256:
             actual = _sha256_file(part)
             if actual != source.sha256:
-                part.unlink(missing_ok=True)
-                side.unlink(missing_ok=True)
+                # Best effort: a leftover that cannot be removed must not mask the hash error.
+                with suppress(OSError):
+                    part.unlink(missing_ok=True)
+                    side.unlink(missing_ok=True)
                 raise HashError(
                     f"sha256 mismatch for {source.url}: pinned "
                     f"{source.sha256}, got {actual}")
-        import os
         import tempfile
 
         self._check_pause()
@@ -575,8 +636,13 @@ class Download:
             if staged.stat().st_size != part.stat().st_size:
                 raise DownloadError("destination copy did not preserve the complete download")
             self._check_pause()
-            os.replace(staged, source.dest)
+            replace_when_released(staged, source.dest)
         finally:
-            staged.unlink(missing_ok=True)
-        part.unlink(missing_ok=True)
-        side.unlink(missing_ok=True)
+            # Best effort: a leftover that cannot be removed must not hide the error that left it.
+            with suppress(OSError):
+                staged.unlink(missing_ok=True)
+        # The published file is what the caller asked for; a partial the OS still holds must not
+        # turn a completed download into a failure.
+        with suppress(OSError):
+            part.unlink(missing_ok=True)
+            side.unlink(missing_ok=True)

@@ -14,9 +14,6 @@ import sys
 from pathlib import Path
 from typing import Collection, Optional
 
-from hermes_cli.update_cmd_common import _best_effort
-from hermes_constants import project_venv_dir
-
 # Log-record parity with the origin module.
 logger = logging.getLogger("hermes_cli.update_cmd")
 
@@ -374,50 +371,15 @@ def _download_and_swap_zip(branch: str, zip_url: str) -> None:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
-def _reinstall_python_deps_after_zip() -> None:
-    """Reinstall Python deps via the PM sync authority (pm.sync_venv, no pip fallback).
-
-    The PM sync stages a fresh generation environment and commits the selection — the live
-    environment of the running process is never mutated, so no self-lock deferral guards this
-    and no pip/uv restore re-arms tool deps into the superseded pre-swap environment
-    (pm-clean-audit-49945b1402 final-gates item 9)."""
-    from hermes_cli.update_cmd import _m
-
-    import pm
-
-    try:
-        pm.sync_venv(["all"], explicit=True)
-    except pm.InstallError as _sync_err:
-        print(f"  ✗ {_sync_err}")
-        print("  Re-run `hermes update` (or `hermes pm install`) once resolved.")
-        raise
-
-    _m()._refresh_active_memory_provider_dependencies()
-    _m()._reapply_plugin_python_dependencies()
-
 
 def _update_via_zip(args, *, had_desktop_app_before_update: bool = False,
-                   target_sha: str | None = None, target_repository: str | None = None) -> bool:
-    """Update via ZIP archive; used on Windows when git file I/O is broken (antivirus / NTFS filter
-    drivers causing 'Invalid argument'). Returns ``False`` when a Desktop rebuild ran and failed.
+                   target_sha: str | None = None, target_repository: str | None = None,
+                   completion_request=None) -> bool:
+    """Update via ZIP when Windows git file I/O fails; dependency/build failures propagate.
 
     A supplied commit keeps the archive on the target selected before Git failed.
     """
-    from hermes_cli.update_cmd import (
-        _finish_dashboard_update_cleanup,
-        _m,
-        _print_curator_first_run_notice,
-        _print_curator_recent_run_notice,
-        _print_update_summary,
-        _read_project_version,
-        _rebuild_desktop_after_update,
-        _update_node_dependencies,
-        _validate_critical_modules_import,
-        _verify_and_restore_state_dbs_post_update,
-    )
-    from hermes_cli.update_cmd_maint import _print_bundled_skills_sync_report
-    from hermes_cli.update_cmd_maint import _sweep_bytecode_after_update
-    pre_update_version = _read_project_version()  # snapshot before files are replaced, for the completion line
+    from hermes_cli.update_cmd import _m, _complete_source_update
     # The static archive would silently ignore --branch — the exact silent-divergence bug it exists to
     # prevent. Refuse rather than lie.
     branch = _m()._resolve_update_branch(args)
@@ -431,6 +393,10 @@ def _update_via_zip(args, *, had_desktop_app_before_update: bool = False,
         )
         _m().sys.exit(1)
     _abort_zip_update_if_dirty_tree()
+    # Older callers lack the snapshot/receipt/lifecycle handoff. Refuse before swap.
+    if completion_request is None:
+        from hermes_cli._old_updater import stop_for_relaunch
+        stop_for_relaunch(incomplete=True)
     if target_sha is not None and not re.fullmatch(r"[0-9a-f]{40}", target_sha):
         raise ValueError("ZIP update requires an exact full commit SHA")
     ref = target_sha if target_sha is not None else f"refs/heads/{branch}"
@@ -439,49 +405,6 @@ def _update_via_zip(args, *, had_desktop_app_before_update: bool = False,
             or any(part in (".", "..") for part in repository.split("/"))):
         raise ValueError("ZIP update requires a GitHub owner/repository")
     _download_and_swap_zip(branch, f"https://github.com/{repository}/archive/{ref}.zip")
-    _sweep_bytecode_after_update(branch)
-    print("→ Updating Python dependencies...")
-    _reinstall_python_deps_after_zip()
-    # Verify the tree imports (catches the parse-OK-but-skewed tree an interrupted copy leaves). Runs
-    # *after* the dep reinstall so a genuinely-new third-party requirement isn't misreported as a partial
-    # copy. No SHA to roll back to — surface a concrete recovery step instead of success over a bricked install.
-    import_ok, failing_module, import_error = _validate_critical_modules_import(_m().PROJECT_ROOT)
-    if not import_ok:
-        print()
-        print("✗ Update left the install in an unimportable state:")
-        print(f"  {failing_module}: {import_error}")
-        print()
-        print("  This usually means the copy was interrupted partway through.")
-        print("  Re-run `hermes update` to complete it.")
-        _m().sys.exit(1)
-    node_failures = _update_node_dependencies()
-    _m()._build_web_ui(_m().PROJECT_ROOT / "web")
-    desktop_build_ok = _rebuild_desktop_after_update(
-        _m().PROJECT_ROOT / "apps" / "desktop", had_desktop_app_before_update=had_desktop_app_before_update,
-    )
-    with suppress(Exception):
-        print("→ Syncing bundled skills...")
-        _print_bundled_skills_sync_report()
-    # Seed the model-catalog disk cache from the fresh checkout (same rationale as _cmd_update_impl). Non-fatal.
-    with _best_effort('Model catalog seed during zip update failed: %s'):
-        from hermes_cli.model_catalog import seed_cache_from_checkout
-        if seed_cache_from_checkout(_m().PROJECT_ROOT):
-            print("  ✓ Model catalog cache refreshed from checkout")
-    # state.db integrity guard: root home AND every sibling profile, each auto-restored from its own snapshot.
-    with _best_effort('Post-update state.db integrity check (zip path) failed: %s'):
-        # See #97994.
-        _verify_and_restore_state_dbs_post_update()
-    update_complete = _print_update_summary(
-        node_failures=node_failures, desktop_build_ok=desktop_build_ok, pre_update_version=pre_update_version,
-    )
-    with _best_effort('Curator first-run notice failed: %s'):
-        _print_curator_first_run_notice()
-    with _best_effort('Curator recent-run notice failed: %s'):
-        _print_curator_recent_run_notice()
-    # Don't stop a working dashboard when the Node refresh failed — see the git-update path for rationale.
-    # See #30271.
-    _finish_dashboard_update_cleanup(node_failures)
-    with _best_effort('Update receipt finalize (zip path) failed: %s'):
-        from hermes_cli.update_receipt import finalize_update_receipt
-        finalize_update_receipt("success" if update_complete and not node_failures else "partial")
-    return update_complete
+    completion_request["expected_sha"] = target_sha
+    _complete_source_update(completion_request)
+    return True

@@ -810,7 +810,16 @@ Hermes integrates [tirith](https://github.com/sheeki03/tirith) for content-level
 - Pipe-to-interpreter patterns (`curl | bash`, `wget | sh`)
 - Terminal injection attacks
 
-Tirith auto-installs from GitHub releases on first use with SHA-256 checksum verification (and cosign provenance verification if cosign is available).
+Tirith requests a pinned [PM package](../reference/package-management.md#optional-security-tools)
+when enabled and absent. PM checks artifact hashes from `pm/lock.json` and
+calls the cosign checker when available. An explicit provenance rejection aborts
+installation. Startup requests installation in the background, subject to the
+lazy-install policy. PM owns durable installation state and recovery, not a
+separate `.tirith-install-failed` marker.
+
+An explicit `security.tirith_path` remains authoritative, even if the executable
+is missing. With the default name, lookup uses `PATH` before the PM selection.
+External binaries remain outside PM's hash and provenance checks.
 
 ```yaml
 # In ~/.hermes/config.yaml
@@ -825,7 +834,10 @@ When `tirith_fail_open` is `true` (default), commands proceed if tirith is not i
 
 Three consecutive operational failures (spawn error, timeout, crash) suspend scanning for five minutes so a broken binary cannot stall every command; after that window one command re-probes tirith, and any completed scan (allow, warn or block) resumes normal scanning. A probe that fails again re-arms the five-minute window.
 
-Tirith ships prebuilt binaries for Linux (x86_64 / aarch64) and macOS (x86_64 / arm64). On platforms with no prebuilt binary (Windows, etc.), tirith is silently skipped — pattern-matching guards still run, and the CLI does not surface an "unavailable" banner. To use tirith on Windows, run Hermes under WSL.
+PM supports Tirith on Linux (x86_64 / aarch64) and macOS (x86_64 / arm64).
+With the default path, unsupported targets, including native Windows and
+Android/Termux, skip Tirith. Pattern-matching guards still run. To use the managed
+Tirith package on Windows, run Hermes under WSL.
 
 Tirith's verdict integrates with the approval flow: safe commands pass through, while both suspicious and blocked commands trigger user approval with the full tirith findings (severity, title, description, safer alternatives). Users can approve or deny — the default choice is deny to keep unattended scenarios secure.
 

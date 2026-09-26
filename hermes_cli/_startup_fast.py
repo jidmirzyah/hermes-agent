@@ -28,7 +28,7 @@ import os
 import sys
 
 __all__ = [
-    "project_root_str",
+    "project_root_str", "normalize_hermes_home_env",
     "ensure_project_root_on_path",
     "is_global_fast_version_argv",
     "is_container_startup_environment",
@@ -208,10 +208,10 @@ def print_fast_version_info(*, check_updates: bool = True) -> None:
     # Synchronous update status — bounded by check_for_updates' own subprocess/network timeouts
     # and its 6-hour cache; any failure prints nothing.
     try:
-        from hermes_cli.banner import UPDATE_AVAILABLE_NO_COUNT, check_for_updates
+        from hermes_cli.source_check import UPDATE_AVAILABLE_NO_COUNT, check_for_updates
         from hermes_cli.config import recommended_update_command
 
-        behind = check_for_updates(passive=True)
+        behind = check_for_updates(passive=True).get("behind")
         if behind == UPDATE_AVAILABLE_NO_COUNT:
             print(f"Update available — run '{recommended_update_command()}'")
         elif behind and behind > 0:

@@ -64,7 +64,7 @@ distinguishes runtime activation from independent test and editor environments.
 Implementation does not mean that every platform acceptance test is complete.
 The updater, backup, setup, voice-text helpers, and several plugins now use
 one implementation per reconciled concern. Runtime paths have a shared owner
-in `hermes_cli/runtime_paths.py`.
+in `pm/environments.py`.
 
 ## Closure implementation
 

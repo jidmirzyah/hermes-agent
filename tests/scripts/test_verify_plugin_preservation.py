@@ -60,6 +60,11 @@ def home(tmp_path):
     directory-only, so the scanner cannot recurse into a dependency graph and
     the test needs no network/Torch."""
     h = tmp_path / "hermes-home"
+    if os.name != "nt":
+        vpp.seed_fixtures(h, tmp_path / "external-mnemosyne-runtime")
+        (h / "profiles/e2e-preserve").rename(h / "profiles/work")
+        return h
+    # Retained native NTFS fixture until the shared-seed successor runs on Windows.
     # active-home plugin: directory wrapper with marker + payload
     plugin = h / "plugins" / "mnemosyne-wrapper"
     plugin.mkdir(parents=True)
@@ -79,162 +84,65 @@ def home(tmp_path):
     return h
 
 
-def _snapshot(home, out):
-    snap = vpp.snapshot_home(str(home))
-    with open(out, "w", encoding="utf-8") as fh:
-        json.dump(snap, fh)
-    return snap
-
-
-def _verify(home, snap):
-    return vpp.verify_home(str(home), snap)
-
-
-def test_snapshot_records_all_trees(home, tmp_path):
-    snap = _snapshot(home, tmp_path / "snap.json")
-    keys = set(snap["entries"])
-    assert "plugins/mnemosyne-wrapper/mnemosyne-wrapper.json" in keys
-    assert "plugins/mnemosyne-wrapper/plugin.py" in keys
-    assert "profiles/work/plugins/second-plugin/data.bin" in keys
-    assert snap["roots"] == [
-        "<home>/plugins",
-        "<home>/profiles/work/plugins",
-    ]
-
-
-def test_snapshot_captures_bytes_and_symlinks(home, tmp_path):
-    snap = _snapshot(home, tmp_path / "snap.json")
-    e = snap["entries"]
-    assert e["plugins/mnemosyne-wrapper/plugin.py"]["sha256"] != ""
-    assert e["plugins/mnemosyne-wrapper/plugin.py"]["size"] == 16
-    link = e["plugins/mnemosyne-wrapper/runtime"]
-    assert link["kind"] == "symlink"
-    assert link["target_resolves"] is True
-    assert link["target_kind"] == "dir"
-    tree = link["target_tree"]
-    assert tree["sidecar-witness.txt"]["sha256"] != ""
-    assert tree["engine.bin"]["kind"] == "file"
-
-
-def test_untouched_home_verifies_clean(home, tmp_path):
-    snap = _snapshot(home, tmp_path / "snap.json")
-    report = _verify(home, snap)
-    assert report["ok"] is True
-    assert report["counts"]["deleted"] == 0
-    assert report["counts"]["modified"] == 0
-
-
-def test_catches_plugin_file_deletion(home, tmp_path):
-    snap = _snapshot(home, tmp_path / "snap.json")
-    (home / "plugins" / "mnemosyne-wrapper" / "plugin.py").unlink()
-    report = _verify(home, snap)
-    assert report["ok"] is False
-    assert "plugins/mnemosyne-wrapper/plugin.py" in report["deleted"]
-
-
-def test_catches_whole_plugin_root_deletion(home, tmp_path):
-    snap = _snapshot(home, tmp_path / "snap.json")
-    shutil.rmtree(home / "plugins")
-    report = _verify(home, snap)
-    assert report["ok"] is False
-    assert report["counts"]["deleted"] > 0
-
-
-def test_catches_wrapper_marker_modification(home, tmp_path):
-    snap = _snapshot(home, tmp_path / "snap.json")
-    (home / "plugins" / "mnemosyne-wrapper" / "mnemosyne-wrapper.json").write_text(
-        '{"wrapper": false}\n', encoding="utf-8"
-    )
-    report = _verify(home, snap)
-    assert report["ok"] is False
-    assert "plugins/mnemosyne-wrapper/mnemosyne-wrapper.json" in report["modified"]
-
-
-def test_catches_symlink_target_repoint(home, tmp_path):
-    snap = _snapshot(home, tmp_path / "snap.json")
-    link = home / "plugins" / "mnemosyne-wrapper" / "runtime"
-    other = tmp_path / "other-runtime"
-    other.mkdir()
-    (other / "sidecar-witness.txt").write_text("different\n", encoding="utf-8")
-    _remove_link(link)
-    _make_link(other, link)
-    report = _verify(home, snap)
-    assert report["ok"] is False
-    assert "plugins/mnemosyne-wrapper/runtime" in report["modified"]
-
-
-def test_catches_external_witness_modification(home, tmp_path):
-    # The externally-owned sidecar witness lives OUTSIDE the home; an upgrade
-    # that tramples it must still be caught through the symlink fingerprint.
-    snap = _snapshot(home, tmp_path / "snap.json")
-    witness = tmp_path / "external-mnemosyne-runtime" / "sidecar-witness.txt"
-    witness.write_text("external-witness-TAMPERED\n", encoding="utf-8")
-    report = _verify(home, snap)
-    assert report["ok"] is False
-    # Depending on the platform's walk, the tamper surfaces either as the
-    # link entry (target fingerprint) or as the linked file itself.
-    assert any(
-        "runtime" in key for key in list(report["modified"]) + report["deleted"]
-    )
-
-
-def test_catches_external_witness_deletion(home, tmp_path):
-    snap = _snapshot(home, tmp_path / "snap.json")
-    (tmp_path / "external-mnemosyne-runtime" / "engine.bin").unlink()
-    report = _verify(home, snap)
-    assert report["ok"] is False
-
-
-def test_catches_profile_plugin_deletion(home, tmp_path):
-    snap = _snapshot(home, tmp_path / "snap.json")
-    (home / "profiles" / "work" / "plugins" / "second-plugin" / "data.bin").unlink()
-    report = _verify(home, snap)
-    assert report["ok"] is False
-    assert "profiles/work/plugins/second-plugin/data.bin" in report["deleted"]
-
-
-def test_added_entries_do_not_fail(home, tmp_path):
-    # An upgrade may ADD files (new bundled plugin, caches); only taking
-    # away or changing existing entries is a violation.
-    snap = _snapshot(home, tmp_path / "snap.json")
-    newp = home / "plugins" / "fresh-from-upgrade"
-    newp.mkdir()
-    (newp / "b.txt").write_text("new\n", encoding="utf-8")
-    report = _verify(home, snap)
-    assert report["ok"] is True
-    assert "plugins/fresh-from-upgrade/b.txt" in report["added"]
-
-
-def test_verifier_is_read_only_against_home(home, tmp_path):
-    snap = _snapshot(home, tmp_path / "snap.json")
-    before = sorted(
-        (p, p.stat().st_size if p.is_file() else "dir")
-        for p in home.rglob("*")
-    )
-    _verify(home, snap)
-    _verify(home, snap)
-    after = sorted(
-        (p, p.stat().st_size if p.is_file() else "dir")
-        for p in home.rglob("*")
-    )
-    assert before == after
-
-
-def test_catches_empty_dir_deletion(home, tmp_path):
-    # A plugin directory emptied (or an empty dir removed) must be caught:
-    # directories themselves are recorded, not skipped.
-    empty = home / "plugins" / "wrapper-b" / "empty-cache"
+@pytest.mark.parametrize("relative,action,category", [
+    ("plugins/mnemosyne-wrapper/plugin.py", "delete", "deleted"),
+    ("plugins", "tree", "deleted"),
+    ("plugins/mnemosyne-wrapper/mnemosyne-wrapper.json", "change", "modified"),
+    ("plugins/mnemosyne-wrapper/runtime", "repoint", "modified"),
+    ("plugins/mnemosyne-wrapper/runtime/sidecar-witness.txt", "change", "modified"),
+    ("plugins/mnemosyne-wrapper/runtime/engine.bin", "delete", "modified"),
+    ("profiles/work/plugins/second-plugin/data.bin", "delete", "deleted"),
+    ("plugins/wrapper-b/empty-cache", "tree", "deleted"),
+    ("plugins/fresh-from-upgrade/b.txt", "add", "added"),
+])
+def test_preservation_cli_fault_matrix(home, tmp_path, relative, action, category):
+    empty = home / "plugins/wrapper-b/empty-cache"
     empty.mkdir(parents=True)
-    snap2 = _snapshot(home, tmp_path / "snap2.json")
-    assert snap2["entries"]["plugins/wrapper-b/empty-cache"] == {"kind": "dir"}
-    empty.rmdir()
-    (home / "plugins" / "wrapper-b").rmdir()
-    report = _verify(home, snap2)
-    assert report["ok"] is False
-    assert "plugins/wrapper-b/empty-cache" in report["deleted"]
+    snapshot = tmp_path / "snap.json"
+    report = tmp_path / "report.json"
+    command = [sys.executable, VERIFIER, "verify", "--home", str(home),
+               "--snapshot", str(snapshot), "--report", str(report)]
+    def fingerprint():
+        return {str(p): (p.read_bytes() if p.is_file() else None, p.lstat().st_mtime_ns,
+                         os.readlink(p) if p.is_symlink() or p.is_junction() else None)
+                for root in (home, tmp_path / "external-mnemosyne-runtime") for p in root.rglob("*")}
+    before = fingerprint()
+    result = subprocess.run([sys.executable, VERIFIER, "snapshot", "--home", str(home), "--out", str(snapshot)],
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    entries = json.loads(snapshot.read_text(encoding="utf-8-sig"))["entries"]
+    assert {"plugins/mnemosyne-wrapper/plugin.py", "profiles/work/plugins/second-plugin/data.bin",
+            "plugins/mnemosyne-wrapper/mnemosyne-wrapper.json", "plugins/wrapper-b/empty-cache"} <= entries.keys()
+    assert entries["plugins/wrapper-b/empty-cache"] == {"kind": "dir"}
+    link = entries["plugins/mnemosyne-wrapper/runtime"]
+    assert link["kind"] == "symlink" and link["target_resolves"] and link["target_kind"] == "dir"
+    assert {"engine.bin", "sidecar-witness.txt"} <= link["target_tree"].keys()
+    assert subprocess.run(command, capture_output=True, text=True, timeout=30).returncode == 0
+    assert fingerprint() == before
+    target = home / relative
+    if action == "repoint":
+        other = tmp_path / "other-runtime"
+        other.mkdir()
+        _remove_link(target)
+        _make_link(other, target)
+    elif action == "tree":
+        shutil.rmtree(target)
+    elif action == "delete":
+        target.unlink()
+    else:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"tampered or added")
+    before = fingerprint()
+    result = subprocess.run(command, capture_output=True, text=True, timeout=30)
+    assert result.returncode == (0 if action == "add" else 1), result.stderr
+    data = json.loads(report.read_text(encoding="utf-8-sig"))
+    affected = "plugins/mnemosyne-wrapper/runtime" if "/runtime/" in relative else relative
+    assert affected in data[category]
+    assert data["ok"] == (action == "add")
+    assert fingerprint() == before
 
 
-def test_empty_snapshot_is_inconclusive(home, tmp_path):
+def test_empty_snapshot_is_inconclusive(tmp_path):
     # Zero recorded entries cannot prove anything: the CLI refuses.
     empty_home = tmp_path / "bare-home"
     empty_home.mkdir()
@@ -268,7 +176,7 @@ def test_unreadable_path_is_hard_error(home, tmp_path):
     os.chmod(secret, 0o000)
     try:
         with pytest.raises((OSError, vpp.ScanError)):
-            _snapshot(home, tmp_path / "snap2.json")
+            vpp.snapshot_home(str(home))
     finally:
         os.chmod(secret, 0o755)
 
@@ -280,28 +188,6 @@ def test_missing_home_fails_snapshot(tmp_path):
         capture_output=True, text=True,
     )
     assert proc.returncode == 2
-
-
-def test_cli_roundtrip_end_to_end(home, tmp_path):
-    """The exact command shape the E2E drivers use."""
-    snap_file = tmp_path / "snap.json"
-    r1 = subprocess.run(
-        [sys.executable, VERIFIER, "snapshot", "--home", str(home), "--out", str(snap_file)],
-        capture_output=True, text=True,
-    )
-    assert r1.returncode == 0, r1.stderr
-    r2 = subprocess.run(
-        [sys.executable, VERIFIER, "verify", "--home", str(home), "--snapshot", str(snap_file)],
-        capture_output=True, text=True,
-    )
-    assert r2.returncode == 0, r2.stderr
-    (home / "plugins" / "mnemosyne-wrapper" / "plugin.py").unlink()
-    r3 = subprocess.run(
-        [sys.executable, VERIFIER, "verify", "--home", str(home), "--snapshot", str(snap_file)],
-        capture_output=True, text=True,
-    )
-    assert r3.returncode == 1
-    assert "PLUGIN PRESERVATION FAILED" in r3.stderr
 
 
 def test_release_fixture_seed_is_shared_and_never_repairs_damage(tmp_path):

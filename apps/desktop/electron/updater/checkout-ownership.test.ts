@@ -1,66 +1,41 @@
-import { describe, expect, it, vi } from 'vitest'
+import { expect, it, vi } from 'vitest'
 
 import { type CheckoutStrategyDeps, createCheckoutStrategy } from './checkout'
+import type { SourceUpdate } from './checkout-source'
 
-function dependencies(): CheckoutStrategyDeps {
-  return {
-    isGitCheckout: (): boolean => true,
-    updateCheckCachePath: 'unused-cache.json',
-    writeFileAtomic: vi.fn(),
-    readSourceUpdate: vi.fn(async (): Promise<{ channel: 'main' }> => ({ channel: 'main' })),
-    fetchGitHubApi: vi.fn(),
-    hermesHome: 'home',
-    isWindows: process.platform === 'win32',
-    isMac: process.platform === 'darwin',
-    defaultUpdateBranch: 'main',
-    updateHandoffDwellMs: 0,
-    directoryExists: () => true,
-    readCanonicalInstallStamp: () => ({ updateMechanism: 'external' }),
-    readDesktopUpdateConfig: () => ({ branch: 'main' }),
-    resolveUpdateRoot: () => 'repo',
-    resolveUpdaterBinary: () => null,
-    resolveHealedBranch: async (_, branch) => branch,
-    getOriginUrl: async () => '',
-    runGit: vi.fn(async () => { throw new Error('unexpected git invocation') }),
-    firstLine: text => text.split('\n')[0],
+it.each(['not-a-git-checkout', 'update-root-steward-owned-git-tree', 'fetch-failed'])(
+  'preserves the Python refusal or error before handoff: %s',
+  async (reason: string): Promise<void> => {
+    const status: SourceUpdate =
+      reason === 'fetch-failed' ? { supported: true, error: reason } : { supported: false, reason }
 
-    pathWithVenvBin: () => '',
-    venvHermesShimPath: () => '',
-    emitUpdateProgress: vi.fn(),
-    rememberLog: vi.fn(),
-    startHermes: vi.fn(async () => {}),
-    startGatewaysAfterUpdateAbort: vi.fn(),
-    releaseBackendLockForUpdate: vi.fn(async () => ({ unlocked: true })),
-    repairMacUpdaterHelper: vi.fn(),
-    preflightStateDb: vi.fn(),
-    runningAppBundle: () => null,
-    markQuittingForHandoff: vi.fn(),
-    quit: vi.fn()
-  }
-}
+    const deps: CheckoutStrategyDeps = {
+      readSourceUpdate: vi.fn(async (): Promise<SourceUpdate> => status),
+      hermesHome: 'home',
+      isWindows: process.platform === 'win32',
+      isMac: process.platform === 'darwin',
+      defaultUpdateBranch: 'main',
+      updateHandoffDwellMs: 0,
+      resolveUpdateRoot: (): string => 'repo',
+      resolveUpdaterBinary: vi.fn((): null => null),
+      remoteGatewayActive: (): boolean => false,
+      emitUpdateProgress: vi.fn(),
+      rememberLog: vi.fn(),
+      startHermes: vi.fn(async (): Promise<void> => {}),
+      stopBackendsForUpdate: vi.fn(async (): Promise<void> => {}),
+      repairMacUpdaterHelper: vi.fn(),
+      preflightStateDb: vi.fn(),
+      runningAppBundle: (): null => null,
+      markQuittingForHandoff: vi.fn(),
+      quit: vi.fn()
+    }
 
-describe('checkout update admission', () => {
-  it.each(['external', 'app-installer', 'electron-updater'] as const)('refuses %s-owned code without fetching or stopping the backend', async updateMechanism => {
-    const deps = dependencies()
-    deps.readCanonicalInstallStamp = () => ({ updateMechanism })
-    const strategy = createCheckoutStrategy(deps)
-    const result = await strategy.check()
-
-    expect(result.supported).toBe(false)
-    expect(await strategy.apply({})).toMatchObject({ ok: false })
-    expect(deps.readSourceUpdate).not.toHaveBeenCalled()
-    expect(result.mechanism).toBe(strategy.mechanism)
-    expect(deps.runGit).not.toHaveBeenCalled()
-    expect(deps.releaseBackendLockForUpdate).not.toHaveBeenCalled()
+    const strategy: ReturnType<typeof createCheckoutStrategy> = createCheckoutStrategy(deps)
+    expect(await strategy.check()).toMatchObject({ ...status, mechanism: strategy.mechanism })
+    expect(await strategy.apply()).toMatchObject({ ok: false, error: reason })
+    expect(deps.readSourceUpdate).toHaveBeenLastCalledWith('repo', { force: true })
+    expect(deps.resolveUpdaterBinary).not.toHaveBeenCalled()
+    expect(deps.stopBackendsForUpdate).not.toHaveBeenCalled()
     expect(deps.quit).not.toHaveBeenCalled()
-  })
-
-  it('rejects a missing source checkout without attempting git', async () => {
-    const deps = dependencies()
-    deps.isGitCheckout = (): boolean => false
-    const result = await createCheckoutStrategy(deps).check()
-
-    expect(result.reason).toBe('not-a-git-checkout')
-    expect(deps.runGit).not.toHaveBeenCalled()
-  })
-})
+  }
+)

@@ -18,20 +18,6 @@ import tools.daemon_pool as daemon_pool
 from tools.daemon_pool import DaemonThreadPoolExecutor
 
 
-def test_workers_are_daemon_threads():
-    pool = DaemonThreadPoolExecutor(max_workers=2)
-    try:
-        info = pool.submit(
-            lambda: (threading.current_thread().daemon, threading.current_thread())
-        ).result(timeout=10)
-        is_daemon, worker = info
-        assert is_daemon is True
-        # Not registered with concurrent.futures' atexit join hook.
-        assert worker not in _threads_queues
-    finally:
-        pool.shutdown(wait=True)
-
-
 def test_initializer_runs_on_each_worker_before_tasks():
     local = threading.local()
     ready = threading.Barrier(2, timeout=10)

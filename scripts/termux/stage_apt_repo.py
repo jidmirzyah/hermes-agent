@@ -113,7 +113,7 @@ def deb_control_fields_and_bytes(deb_path: Path) -> tuple[dict, bytes]:
                 f = tf.extractfile(member)
                 if f is None:
                     continue
-                fields = _parse_debian_control(f.read().decode("utf-8", "replace"))
+                fields = _parse_debian_control(f.read().decode("utf-8-sig", "replace"))
                 break
     for req in REQUIRED_CONTROL_FIELDS:
         if req not in fields:
@@ -202,7 +202,7 @@ def existing_published(out_dir: Path, suite: str) -> set:
     packages_file = out_dir / "dists" / suite / COMPONENT / f"binary-{ARCH}" / "Packages"
     published = set()
     if packages_file.exists():
-        text = packages_file.read_text(encoding="utf-8")
+        text = packages_file.read_text(encoding="utf-8-sig")
         # deb822 records are separated by blank lines; never rely on field
         # order inside a record.
         for stanza in text.split("\n\n"):

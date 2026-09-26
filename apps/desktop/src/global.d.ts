@@ -1,6 +1,8 @@
 import type { GatewayWsUrlResult } from '@hermes/shared'
 import type { TranslucencyState } from '@hermes/shared/translucency'
 
+import type { ScreenshotApi } from '../electron/command-screenshot-types'
+import type { HudModifierApi } from '../electron/hud-modifier-types'
 import type { MachineProfile } from '../electron/machine-profile'
 import type { HermesNotification } from '../electron/notification-types'
 import type { PoolLimits } from '../electron/pool-limits'
@@ -680,7 +682,7 @@ export interface DesktopVersionInfo {
   /** Packaged client version, or the runtime version for source installs. */
   appVersion: string
   /** Fixed release identity. Commit builds have no update channel. */
-  channel?: 'stable' | 'canary' | null
+  channel?: string | null
   electronVersion: string
   nodeVersion: string
   platform: string
@@ -703,6 +705,14 @@ export interface DesktopVersionInfo {
    *  Store-identity build — the Settings label keys off this, never
    *  process.windowsStore (which also matches sideloaded MSIX). */
   updateMechanism?: 'self' | 'app-installer' | 'electron-updater' | 'external' | 'microsoft-store'
+  /** The artifact kind of the desktop app carrying this info ('bootstrap' |
+   *  'bundled' | 'light'). 'bootstrap' is the old-style installer shell over
+   *  a managed checkout; the Distribution label keys on it. */
+  payload?: 'bootstrap' | 'bundled' | 'light'
+  /** True when the runtime checkout carries the bootstrap installers'
+   *  `.hermes-bootstrap-complete` receipt — install.sh / install.ps1 (or the
+   *  desktop first-launch bootstrap) created it, a manual clone did not. */
+  installedByScript?: boolean
   /** sha16 of the canonical install-root path — the per-install channel key and
    *  the shape `hermes update --install-id` prints. */
   installId?: string
@@ -733,7 +743,6 @@ export type RuntimeSource =
   | { type: 'path'; command: string } // an existing `hermes` CLI found on PATH
   | { type: 'system-python'; command: string } // pip-installed hermes_cli on system Python
   | { type: 'bootstrap' } // nothing usable yet; the first-launch installer runs
-
 
 export type DesktopUninstallMode = 'full' | 'gui' | 'lite'
 
@@ -769,16 +778,16 @@ export interface DesktopUpdateCommit {
 }
 
 export type UpdaterMechanismClient =
-  | 'app-installer'
-  | 'electron-updater'
-  | 'external'
-  | 'microsoft-store'
-  | 'windows-handoff'
-  | 'posix-handoff'
-  | 'manual'
+  'app-installer' | 'electron-updater' | 'external' | 'microsoft-store' | 'windows-handoff' | 'posix-handoff' | 'manual'
 
 export interface DesktopUpdateStatus {
   supported: boolean
+  retirement?: {
+    state: 'discontinued'
+    destination: string
+    version: string
+    message?: string
+  }
   /** Which mechanism owns updates for this install (see electron/updater). */
   mechanism?: UpdaterMechanismClient
   updateAvailable?: boolean
@@ -794,9 +803,8 @@ export interface DesktopUpdateStatus {
   currentSha?: string
   /** Backend only: the version string the backend reports for itself. */
   currentVersion?: string
-  /** Release feed the check read from ('stable'/'canary'); when set, the
-   *  update is a release and `latestTag` names it instead of a commit count. */
-  channel?: 'stable' | 'canary'
+  /** The R2 channel name; independent of source branch and package version. */
+  channel?: string
   /** The latest release tag on a release-feed channel, e.g. `v0.18.0`. */
   latestTag?: string | null
   targetSha?: string
@@ -807,21 +815,8 @@ export interface DesktopUpdateStatus {
 
 export type DesktopUpdateDirtyStrategy = 'abort' | 'stash' | 'force'
 
-export interface DesktopUpdateBlocker {
-  pid: number
-  name: string
-  cmdline: string
-  kind: 'local-preview' | 'other'
-  safeToStop: boolean
-  label?: string
-  port?: number
-  createTime?: number
-}
-
 export interface DesktopUpdateApplyOptions {
   dirtyStrategy?: DesktopUpdateDirtyStrategy
-  /** User confirmed that Desktop may stop freshly re-scanned safe local preview servers. */
-  stopSafeBlockers?: boolean
 }
 
 export interface DesktopUpdateApplyResult {
@@ -831,7 +826,7 @@ export interface DesktopUpdateApplyResult {
   branch?: string
   error?: string
   message?: string
-  blockers?: DesktopUpdateBlocker[]
+
   /** True when no staged updater exists (CLI install) and the user should run
    *  `hermes update` themselves. `command` is the exact line to run. */
   manual?: boolean
@@ -1407,6 +1402,15 @@ export interface HermesApiRequest {
   // through the owning connection, not the local profile pool. Omit / '' to
   // keep the legacy profile-routed path; explicit 'local' forces this device.
   connectionId?: string | null
+  // Passive background read that must never cold-start a pooled backend (#103375).
+  // When true and the target profile has no warm pool entry, the main process
+  // fails fast without spawning a child or consuming a pool slot, so background
+  // tile reconciles cannot starve interactive opens.
+  passive?: boolean
+  // An interactive Settings scope selection may cold-start a profile backend.
+  // Keep that intent separate from passive hydration so the pool can reserve a
+  // slot for the user's visible request.
+  priority?: 'foreground'
 }
 
 export interface HermesPreviewTarget {

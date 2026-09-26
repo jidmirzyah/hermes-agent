@@ -2,10 +2,11 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import { createRequire } from 'node:module'
 import path from 'node:path'
+import os from 'node:os'
 import { pathToFileURL } from 'node:url'
-import { test } from 'vitest'
+import { test, vi } from 'vitest'
 
-import { azureConfigFromEnv, shouldSignFile } from './sign-msix.mjs'
+import { azureConfigFromEnv, azureSignFile, shouldSignFile } from './sign-msix.mjs'
 
 const require = createRequire(import.meta.url)
 
@@ -75,46 +76,35 @@ test('azureConfigFromEnv composes the Azure signing config from the environment'
   })
 })
 
-// ─── builder-bump tripwire ──────────────────────────────────────────────────
-// sign-msix.mjs deep-imports app-builder-lib's WindowsSignAzureManager by
-// file path (the package exports map exposes only "." and "./internal", so
-// the dist path is reached the same way run-electron-builder.mjs finds the
-// CLI: resolve the entry, walk up to the package root, then direct-file
-// import). If an electron-builder/app-builder-lib bump moves or renames the
-// class, THIS test is what fails in js-tests — before a release build does.
-// 60s timeout: the direct-file import drags in app-builder-lib's whole
-// module graph (toolsets, electronGet, vm), which takes ~30s on a cold
-// disk cache — far past vitest's 5s default.
-test('the real WindowsSignAzureManager resolves and constructs against a packager shim', { timeout: 60_000 }, async () => {
-  const entry = require.resolve('app-builder-lib')
-  let root = path.dirname(entry)
-  while (!fs.existsSync(path.join(root, 'package.json'))) {
-    const parent = path.dirname(root)
-    assert.notEqual(parent, root, 'app-builder-lib package root not found')
-    root = parent
+test('azureSignFile calls the real supplier through a prepared local toolset', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sign-supplier-'))
+  const lib = path.dirname(path.dirname(require.resolve('app-builder-lib')))
+  const { VmManager } = await import(pathToFileURL(path.join(lib, 'dist/vm/vm.js')).href)
+  const { WineVmManager } = await import(pathToFileURL(path.join(lib, 'dist/vm/WineVm.js')).href)
+  const native = process.platform === 'win32' ? VmManager : WineVmManager
+  const calls = []
+  // Only the final native execution is intercepted; manager init, dispatch and metadata are real.
+  const execution = vi.spyOn(native.prototype, 'exec').mockImplementation(async (file, args) => { calls.push({ file, args }) })
+  const kits = path.join(root, 'kits')
+  const kit = path.join(kits, process.arch === 'ia32' ? 'x86' : 'x64')
+  fs.mkdirSync(kit, { recursive: true })
+  const metadata = path.join(root, 'metadata.json')
+  for (const [name, value] of Object.entries({ AZURE_SIGN_ENDPOINT: 'https://test.invalid', AZURE_SIGN_ACCOUNT: 'account', AZURE_SIGN_PROFILE: 'profile', AZURE_SIGN_PUBLISHER: 'CN=Fixture' })) vi.stubEnv(name, value)
+  try {
+    await azureSignFile(path.join(root, 'fixture.msix'), {
+      platformOptions: { sign: { type: 'signtool' } },
+      config: { toolsets: { winCodeSign: { url: `file://${kits}` } } },
+      buildResourcesDir: root,
+      getTempFile: async () => metadata
+    })
+    assert.deepEqual(JSON.parse(fs.readFileSync(metadata, 'utf8')), { Endpoint: 'https://test.invalid', CodeSigningAccountName: 'account', CertificateProfileName: 'profile' })
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].file, path.join(kit, 'signtool.exe'))
+    assert.deepEqual(calls[0].args.slice(0, 7), ['sign', '/fd', 'SHA256', '/tr', 'http://timestamp.acs.microsoft.com', '/td', 'SHA256'])
+    assert.ok(calls[0].args[calls[0].args.indexOf('/dlib') + 1].endsWith('Azure.CodeSigning.Dlib.dll'))
+    assert.ok(calls[0].args.at(-1).endsWith('fixture.msix'))
+  } finally {
+    execution.mockRestore(); vi.unstubAllEnvs()
+    fs.rmSync(root, { recursive: true, force: true })
   }
-  const mod = await import(
-    pathToFileURL(path.join(root, 'dist', 'codeSign', 'win', 'windowsSignAzureManager.js')).href
-  )
-  assert.equal(typeof mod.WindowsSignAzureManager, 'function')
-
-  // Constructor contract (verified against 27.0.0-alpha.6): reads
-  // packager.platformOptions.sign (throws unless type === 'azure'),
-  // packager.config.toolsets (optional), and packager.buildResourcesDir
-  // (only stored — WineVmManager's constructor touches no filesystem).
-  const mgr = new mod.WindowsSignAzureManager({
-    platformOptions: {
-      sign: {
-        type: 'azure',
-        endpoint: 'x',
-        codeSigningAccountName: 'y',
-        certificateProfileName: 'z',
-        publisherName: 'p'
-      }
-    },
-    config: {},
-    buildResourcesDir: '/tmp'
-  })
-  assert.equal(typeof mgr.signFile, 'function')
-  assert.equal(typeof mgr.initialize, 'function')
 })

@@ -10,10 +10,28 @@ import sys
 import pytest
 
 from hermes_cli import venv_sync
-from hermes_cli.runtime_paths import runtime_facts_path
+from pm.environments import runtime_facts_path
 
 
-def test_first_launch_syncs_without_marker_then_uses_completion_fact(tmp_path, monkeypatch):
+@pytest.fixture
+def completion_tail(monkeypatch):
+    """Record the source-completion child prepare_launch spawns after a sync instead of running it.
+
+    The real child is ``hermes_cli/source_completion.py`` from the checkout under test — a
+    scratch tree here — building products with the selected interpreter; the tests below
+    cover the sync decision, not the build.
+    """
+    spawned = []
+
+    def call(command, **kwargs):
+        spawned.append(command)
+        return 0
+
+    monkeypatch.setattr(venv_sync.subprocess, "call", call)
+    return spawned
+
+
+def test_first_launch_syncs_without_marker_then_uses_completion_fact(tmp_path, monkeypatch, completion_tail):
     import pm
     from hermes_cli import _launchers
 
@@ -43,6 +61,7 @@ def test_first_launch_syncs_without_marker_then_uses_completion_fact(tmp_path, m
     assert venv_sync.prepare_launch(root, []) == Path(sys.executable)
     assert calls == [(["all"], {"explicit": True, "project_root": root})]
     assert not (root / ".update-incomplete").exists()
+    assert any("source_completion.py" in str(part) for cmd in completion_tail for part in cmd)
     assert venv_sync.prepare_launch(root, []) is None
     assert len(calls) == 1
 
@@ -113,7 +132,7 @@ def test_failed_launch_keeps_previous_completion_and_retries(tmp_path, monkeypat
     assert not (root / ".update-incomplete").exists()
 
 
-def test_blessed_legacy_install_is_adopted_before_sync(tmp_path, monkeypatch):
+def test_blessed_legacy_install_is_adopted_before_sync(tmp_path, monkeypatch, completion_tail):
     import pm
     from hermes_cli import _launchers
     monkeypatch.setattr(Path, "home", lambda: tmp_path)

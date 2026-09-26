@@ -270,7 +270,12 @@ def test_uninspectable_watched_identity_blocks_alias_before_sqlite(
     real_stat = hermes_state_holders.os.stat
 
     def _stat(path, *args, **kwargs):
-        if str(path) == str(db) and not args and not kwargs:
+        # ``os`` is shared: deny only the holder scan's own probe of the watched file, not
+        # the ``Path.exists`` precheck in repair_state_db_schema (which would otherwise
+        # swallow the error and report the database missing).
+        frame = sys._getframe(1)
+        if (str(path) == str(db) and not args and not kwargs
+                and frame.f_globals.get("__name__") == "hermes_state_holders"):
             raise PermissionError(errno.EACCES, "watched identity denied", path)
         if path == "/proc/4242/fd/7":
             return real_stat(db)

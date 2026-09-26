@@ -23,7 +23,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from hermes_constants import venv_python_path
+from pm.environments import venv_python
 from utils import atomic_write_text
 
 logger = logging.getLogger(__name__)
@@ -33,82 +33,9 @@ _MARKER_NAME = ".tcc-anchor-source"
 _STORE_COMMON_MARKERS = ("cpython-", "-macos-")
 # Recognize both historical interpreter locations during upgrades.
 _STORE_ROOT_MARKERS = ("/uv/python/", "/.hermes-runtime/python/")
-_MACOS_MANAGED_PYTHON_IDENTIFIER = "com.nousresearch.hermes.managed-python"
 
 _ALIAS_NAMES = ("python3", f"python3.{sys.version_info.minor}")
 _STORE_BIN_NAMES = (f"python3.{sys.version_info.minor}", "python3", "python")
-
-
-def _macos_sign_managed_python(python: Path) -> bool:
-    """Give a newly downloaded managed Python a stable macOS code identity.
-
-    python-build-standalone binaries are ad-hoc signed, which leaves macOS
-    TCC with a cdhash-only identity that changes whenever Hermes provisions a
-    new runtime generation.  An identifier-pinned designated requirement
-    gives those generations a stable identity even when no Developer ID
-    certificate is available locally.
-
-    Signing is deliberately best effort.  An unavailable or incompatible ``codesign``
-    must not prevent a bootable interpreter from being anchored.
-    """
-    if platform.system() != "Darwin":
-        return False
-
-    codesign = shutil.which("codesign")
-    if not codesign:
-        logger.info(
-            "macOS codesign is unavailable; using the downloaded Python signature"
-        )
-        return False
-
-    requirement = (
-        "=designated => identifier "
-        f'"{_MACOS_MANAGED_PYTHON_IDENTIFIER}"'
-    )
-    try:
-        signed = subprocess.run(
-            [
-                codesign,
-                "--force",
-                "--deep",
-                "--sign",
-                "-",
-                "--timestamp=none",
-                "--identifier",
-                _MACOS_MANAGED_PYTHON_IDENTIFIER,
-                "--requirements",
-                requirement,
-                str(python),
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        if signed.returncode != 0:
-            logger.warning(
-                "could not stably sign managed Python %s: %s",
-                python,
-                (signed.stderr or signed.stdout or "codesign failed").strip(),
-            )
-            return False
-
-        verified = subprocess.run(
-            [codesign, "--verify", "--deep", "--strict", str(python)],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        if verified.returncode != 0:
-            logger.warning(
-                "macOS signature verification failed for managed Python %s: %s",
-                python,
-                (verified.stderr or verified.stdout or "verification failed").strip(),
-            )
-            return False
-        return True
-    except Exception as exc:
-        logger.warning("could not sign managed Python %s: %s", python, exc)
-        return False
 
 
 class _BootGateFailed(Exception):
@@ -133,7 +60,7 @@ def _is_uv_macos_store(path: str) -> bool:
 
 def _venv_dir(project_root: Path | None = None) -> Path | None:
     root = Path(project_root) if project_root is not None else Path(__file__).resolve().parents[1]
-    return next((root / n for n in ("venv", ".venv") if _present(venv_python_path(root / n))), None)
+    return next((root / n for n in ("venv", ".venv") if _present(venv_python(root / n))), None)
 
 
 def _present(path: Path) -> bool:
@@ -158,7 +85,7 @@ def _interpreter_file(src: str | Path) -> Path | None:
 
 def _interpreter_source(venv_dir: Path) -> str | None:
     """Return the interpreter file the venv currently resolves to (symlink target or pyvenv.cfg home)."""
-    venv_py = venv_python_path(venv_dir)
+    venv_py = venv_python(venv_dir)
     if venv_py.is_symlink():
         try:
             return str(venv_py.resolve(strict=False))
@@ -186,7 +113,7 @@ def _managed_venv(project_root: Path | None) -> tuple[Path, Path, str] | str:
     source = _interpreter_source(venv_dir)
     if source is None or not _is_uv_macos_store(source):
         return "interpreter not uv-managed (stable path)"
-    return venv_dir, venv_python_path(venv_dir), source
+    return venv_dir, venv_python(venv_dir), source
 
 
 def _anchor_marker(venv_bin: Path) -> Path:
@@ -354,7 +281,9 @@ def _passes_boot_gate(staged: Path, venv_dir: Path) -> bool:
 
 def _install_anchor(venv_dir: Path, source_file: Path) -> None:
     """Replace ``bin/python`` with a signed copy, gated on a real boot."""
-    venv_py = venv_python_path(venv_dir)
+    from hermes_cli.macos_signing import sign_managed_python
+
+    venv_py = venv_python(venv_dir)
     venv_bin = venv_py.parent
     venv_bin.mkdir(parents=True, exist_ok=True)
 
@@ -363,7 +292,7 @@ def _install_anchor(venv_dir: Path, source_file: Path) -> None:
     tmp_path = _stage_copy(venv_bin, ".python-tcc-", source_file)
     try:
         try:
-            _macos_sign_managed_python(tmp_path)
+            sign_managed_python(tmp_path)
         except Exception:  # pragma: no cover - never block the anchor
             logger.debug("anchor copy signing skipped", exc_info=True)
         if not _passes_boot_gate(tmp_path, venv_dir):

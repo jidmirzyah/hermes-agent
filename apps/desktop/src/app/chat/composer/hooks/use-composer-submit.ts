@@ -119,26 +119,11 @@ export function useComposerSubmit({
   // Busy: a request from a card the user just clicked must not be dropped
   // because the agent is mid-sentence — that gap is exactly when they click.
   // Steer the live turn (the same stop-and-correct a typed message gets), and
-  // if the turn has already ended, queue it so it runs next.
-  const dispatchSubmitRef = useRef(dispatchSubmit)
-  dispatchSubmitRef.current = dispatchSubmit
-  const steerOrQueueRef = useRef((_text: string) => {})
-
-  steerOrQueueRef.current = (text: string) => {
-    const queue = () => enqueueQueuedPrompt(activeQueueSessionKeyRef.current, { text, attachments: [] })
-
-    if (!onSteer) {
-      queue()
-
-      return
-    }
-
-    void Promise.resolve(onSteer(text)).then(accepted => {
-      if (!accepted) {
-        queue()
-      }
-    })
-  }
+  // if the turn has already ended, or a steer is not possible, queue it so it
+  // runs next. This holds for hidden setup notes and for visible messages a
+  // button sends on the user's behalf alike.
+  const externalSubmitRef = useRef({ busy, compacting, dispatchSubmit, onSteer, onSteerHidden })
+  externalSubmitRef.current = { busy, compacting, dispatchSubmit, onSteer, onSteerHidden }
 
   useLayoutEffect(
     () =>
@@ -150,14 +135,58 @@ export function useComposerSubmit({
           paneVisible &&
           !inputDisabled
         ) {
-          if (busy && displayKind === 'hidden') {
-            steerOrQueueRef.current(text)
+          const current = externalSubmitRef.current
+
+          if (!current.busy) {
+            current.dispatchSubmit(text, undefined, displayKind)
+
+            return
+          }
+
+          const queueKey = activeQueueSessionKeyRef.current
+
+          // External requests contain only text; the unsent draft and its attachments stay in the composer.
+          const enqueue = () =>
+            void enqueueQueuedPrompt(queueKey, { text, attachments: [], ...(displayKind ? { displayKind } : {}) })
+
+          // A hidden note never becomes a user turn: it rides session.steer into
+          // the model's next tool result, and keeps its kind if it has to queue.
+          if (displayKind) {
+            if (current.onSteerHidden) {
+              void Promise.resolve(current.onSteerHidden(text))
+                .then(accepted => {
+                  if (!accepted) {
+                    enqueue()
+                  }
+                })
+                .catch(enqueue)
+            } else {
+              enqueue()
+            }
+
+            return
+          }
+
+          if (
+            current.onSteer &&
+            !current.compacting &&
+            !hasBlockingPromptRequest(sessionId) &&
+            text.trim() &&
+            !SLASH_COMMAND_RE.test(text.trim())
+          ) {
+            void Promise.resolve(current.onSteer(text))
+              .then(accepted => {
+                if (!accepted) {
+                  enqueue()
+                }
+              })
+              .catch(enqueue)
           } else {
-            dispatchSubmitRef.current(text, undefined, displayKind)
+            enqueue()
           }
         }
       }),
-    [busy, inputDisabled, paneVisible, scope.target, surfaceId]
+    [activeQueueSessionKeyRef, inputDisabled, paneVisible, scope.target, sessionId, surfaceId]
   )
 
   const submitDraft = () => {

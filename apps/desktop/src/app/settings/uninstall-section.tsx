@@ -1,7 +1,8 @@
-import { type ReactElement, useEffect, useState } from 'react'
+import { type ReactElement, useContext, useEffect, useState } from 'react'
 
 import { Button } from '@/components/ui/button'
 import type { DesktopUninstallMode, DesktopUninstallResult, DesktopUninstallSummary } from '@/global'
+import { useI18n } from '@/i18n'
 import { AlertTriangle, Loader2, Trash2 } from '@/lib/icons'
 import { cn } from '@/lib/utils'
 
@@ -46,6 +47,8 @@ const OPTIONS: ModeOption[] = [
 ]
 
 export function UninstallSection(): ReactElement | null {
+  const hasBreadcrumb = useContext(SettingsBreadcrumbContext)
+  const { t } = useI18n()
   const [summary, setSummary] = useState<DesktopUninstallSummary | null>(null)
   const [pending, setPending] = useState<DesktopUninstallMode | null>(null)
   const [running, setRunning] = useState<boolean>(false)

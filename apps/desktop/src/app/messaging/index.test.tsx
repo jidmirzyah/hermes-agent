@@ -105,12 +105,12 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
-// Import at module scope (after the hoisted vi.mock calls) so the heavy
-// component-tree transform is paid during collection, not billed against the
-// first test's testTimeout — inside a test body it exceeded the budget on
+// Static import at module scope (after the hoisted vi.mock calls) so the
+// heavy component-tree transform is paid during collection, not billed against
+// the first test's testTimeout — inside a test body it exceeded the budget on
 // loaded CI runners and cascaded the whole file (main runs 34599517793,
 // 34600757569, 34601269252). Same pattern as chat/index.test.tsx.
-const { MessagingView } = await import('./index')
+void import('./index')
 
 async function renderMessaging() {
   let result: ReturnType<typeof render>

@@ -28,11 +28,14 @@ def test_boot_recovers_plugin_publication_after_process_death(tmp_path, committe
     program = '''
 from pathlib import Path
 import os,sys
-from hermes_cli.plugins_transaction import PluginPublication
-from hermes_cli.runtime_paths import runtime_facts_path
+from pm.publication import StagedPlugin
+from pm.store import tree_digest
+from pm.environments import runtime_facts_path
 from pm.lock import Facts
 project,staged,target = map(Path,sys.argv[1:4])
-pub = PluginPublication(project,staged,target,{"example":{"revision":"new"}})
+StagedPlugin({"staged": str(staged), "target": str(target), "target_digest": tree_digest(target),
+              "old_metadata": {"example":{"revision":"old"}},
+              "new_metadata": {"example":{"revision":"new"}}}).publish(project)
 if sys.argv[4] == "True":
     Facts(runtime_facts_path(project)).record_state("venv","new",[])
 os._exit(17)

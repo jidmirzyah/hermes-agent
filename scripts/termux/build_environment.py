@@ -28,7 +28,7 @@ def application(root: Path, requirements: Path, python: Path) -> None:
     from pm import build_requirements_environment
 
     build_requirements_environment(
-        requirements.read_text(encoding="utf-8").splitlines(), out=root / "venv",
+        requirements.read_text(encoding="utf-8-sig").splitlines(), out=root / "venv",
         python=python, wheelhouse=root / "wheelhouse", offline=True, sealed=True, explicit=True,
     )
 

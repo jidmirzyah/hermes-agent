@@ -495,7 +495,7 @@ security:
 
 当请求被阻止的 URL 时，工具会返回一条错误，说明该域名已被策略阻止。黑名单在 `web_search`、`web_extract`、`browser_navigate` 及所有支持 URL 的工具中均强制执行。
 
-完整详情请参见配置指南中的[网站黑名单](/user-guide/configuration#网站黑名单)。
+完整详情请参见配置指南中的[网站黑名单](./configuration.md#网站黑名单)。
 
 ### SSRF 防护
 
@@ -677,4 +677,4 @@ hermes config set security.allow_lazy_installs false
 官方 Docker 镜像还通过内部策略关闭按需安装，仅更改配置不能覆盖它。
 
 用 `hermes tools` 和 `hermes doctor` 检查缺失需求。
-不要向签名载荷或系统 Python 执行 pip 安装。详见[包管理](/reference/package-management)。
+不要向签名载荷或系统 Python 执行 pip 安装。详见[包管理](../reference/package-management.md)。

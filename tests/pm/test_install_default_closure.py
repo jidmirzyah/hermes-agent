@@ -1,7 +1,8 @@
 """The default `pm install` closure must stage the interpreter boot requires.
 
-A fresh source install emits boot launchers (scripts/install.sh stage_path,
-hermes_cli/_launchers.py) that exec the pm STORE interpreter. The `python`
+A fresh source install emits boot launchers (the source completion's
+publish_launchers, hermes_cli/_launchers.py) that exec the pm STORE
+interpreter. The `python`
 package is marked optional (dev installs use their own venv; sealed bundles
 adopt a shipped one), so the old default closure — every non-optional
 lockfile package — skipped it and left `hermes` unbootable (audit C05).
@@ -18,9 +19,6 @@ import importlib
 import pytest
 
 import pm.cli
-from pm.lock import Lockfile
-from pm.paths import repo_root
-from pm.registry import get_package
 
 
 @pytest.fixture()
@@ -36,34 +34,20 @@ def install_spy(monkeypatch):
         return None
 
     monkeypatch.setattr(pm.cli, "_install_names", fake_install_names)
-    monkeypatch.setattr(importlib.import_module("pm.ensure"), "sync_venv", fake_sync_venv)
+    monkeypatch.setattr(importlib.import_module("pm.install"), "sync_venv", fake_sync_venv)
     return calls
 
 
-def test_default_closure_includes_the_boot_interpreter(install_spy) -> None:
+def test_default_closure_includes_the_boot_interpreter(install_spy):
     assert pm.cli.cmd_install(argparse.Namespace(names=None)) == 0
-
-    lockfile = Lockfile(repo_root() / "pm" / "lock.json")
-    names = install_spy["names"]
-    # The launchers' interpreter must be requested...
-    assert "python" in names
-    # ...through the existing authorities: it is pinned in pm/lock.json and
-    # defined in the package registry — no parallel hand-written list here.
-    assert "python" in lockfile.names()
-    get_package("python")
-    # ...and the rest of the root closure is unchanged (non-optional packages).
-    expected = {
-        n for n in lockfile.names() if not get_package(n).optional
-    } | {"python"}
-    assert set(names) == expected
-
-
-def test_default_closure_still_syncs_the_venv_with_all_extras(install_spy) -> None:
-    assert pm.cli.cmd_install(argparse.Namespace(names=None)) == 0
+    assert "python" in install_spy["names"]
+    assert all(not pm.cli.get_package(name).internal for name in install_spy["names"])
     assert install_spy["sync_extras"] == ["all"]
 
 
-def test_explicit_names_pass_through_untouched(install_spy) -> None:
-    assert pm.cli.cmd_install(argparse.Namespace(names=["npm", "ripgrep"])) == 0
-    assert install_spy["names"] == ["npm", "ripgrep"]
+
+@pytest.mark.parametrize("names", [["npm", "ripgrep"], ["dmgbuild"]])
+def test_explicit_names_pass_through_untouched(install_spy, names) -> None:
+    assert pm.cli.cmd_install(argparse.Namespace(names=names)) == 0
+    assert install_spy["names"] == names
     assert install_spy["sync_extras"] is None

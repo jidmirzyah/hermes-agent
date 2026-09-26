@@ -13,8 +13,8 @@ from packaging.utils import parse_wheel_filename
 import pytest
 
 from pm.runtime import runtime_environment
-from pm.runtime_stage import stage_runtime
 from scripts.bundles.payload import seal_pm_runtime
+from tests.pm._fixtures import stage_host_python
 
 
 @pytest.fixture(scope="module")
@@ -22,7 +22,7 @@ def locked_wheelhouse(tmp_path_factory):
     """Download host wheels first; only the subsequent stage runs offline."""
     wheelhouse = tmp_path_factory.mktemp("pm-wheelhouse")
     project = Path(__file__).resolve().parents[2] / "pm"
-    lock = tomllib.loads((project / "uv.lock").read_text(encoding="utf-8"))
+    lock = tomllib.loads((project / "uv.lock").read_text(encoding="utf-8-sig"))
     tags = set(sys_tags())
     versions = {}
     for package in lock["package"]:
@@ -57,21 +57,31 @@ def isolated_builder(tmp_path, monkeypatch):
 
 @pytest.mark.platforms("linux")
 def test_offline_wheelhouse_runtime_survives_sealing_and_move(
-    tmp_path, isolated_builder, locked_wheelhouse,
+    tmp_path, isolated_builder, locked_wheelhouse, monkeypatch,
 ):
     wheelhouse, versions = locked_wheelhouse
     root = tmp_path / "payload"
-    python = root / "tools/python/bin/python"
-    python.parent.mkdir(parents=True)
-    shutil.copy2(Path(sys._base_executable).resolve(), python)
-    executable = stage_runtime(isolated_builder, python, root / "pm-runtime",
-                               wheelhouse=wheelhouse, offline=True)
+    python = stage_host_python(root / "tools/python/bin/python")
+    from pm import stage_manager_runtime
+    from pm.lock import _write
+
+    monkeypatch.setattr("pm._uv._toolchain", lambda **kwargs: (isolated_builder, python))
+    executable = stage_manager_runtime(python=python, destination=root / "pm-runtime",
+                                       wheelhouse=wheelhouse, offline=True)
     assert executable.is_file()
+    marker_path = root / "pm-runtime/pm-runtime.json"
+    assert marker_path.stat().st_mode & 0o777 == 0o600
+    assert (root / "pm-runtime/.lock").is_file()
     seal_pm_runtime(root, python)
+    assert marker_path.stat().st_mode & 0o777 == 0o644
+    assert not (root / "pm-runtime/.lock").exists()
+    private = tmp_path / "mutable/selected.json"
+    _write(private, {"runtime": "private"})
+    assert private.stat().st_mode & 0o777 == 0o600
     moved = tmp_path / "installed elsewhere"
     root.rename(moved)
     runtime = moved / "pm-runtime"
-    marker = json.loads((runtime / "pm-runtime.json").read_text(encoding="utf-8"))
+    marker = json.loads((runtime / "pm-runtime.json").read_text(encoding="utf-8-sig"))
     probe = """
 import importlib.metadata, importlib.util, json, sys
 sys.path.insert(0, sys.argv[1])
@@ -91,11 +101,27 @@ print(json.dumps({canonicalize_name(d.metadata['Name']): d.version
     )
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == versions
+    from pm import paths
+    from pm.runtime import runtime_command
+    repo = moved / "hermes-agent"
+    repo.mkdir()
+    (moved / "manifest.json").write_text('{"repo":"hermes-agent"}', encoding="utf-8")
+    script = repo / "probe.py"
+    script.write_text("import sys,json; print(json.dumps(sys.path))", encoding="utf-8")
+    with pytest.MonkeyPatch.context() as patcher:
+        patcher.setattr(paths, "repo_root", lambda: repo)
+        child = subprocess.run(runtime_command(script), cwd=tmp_path, env=runtime_environment(),
+                               capture_output=True, text=True, check=True, timeout=30)
+    entries = json.loads(child.stdout)
+    assert str((runtime / marker["sitePackages"]).resolve()) in entries
+    recorded_site = (runtime / marker["sitePackages"]).resolve()
+    assert not any(Path(entry).name in {"site-packages", "dist-packages"}
+                   and Path(entry).resolve() != recorded_site for entry in entries)
 
 
 @pytest.mark.platforms("linux")
 def test_offline_wheelhouse_rejects_missing_transitive_wheel(
-    tmp_path, isolated_builder, locked_wheelhouse, capfd,
+    tmp_path, isolated_builder, locked_wheelhouse, capfd, monkeypatch,
 ):
     from pm.package import InstallError
 
@@ -105,8 +131,10 @@ def test_offline_wheelhouse_rejects_missing_transitive_wheel(
     native_wheel, = incomplete.glob("ruamel_yaml_clib-*.whl")
     native_wheel.unlink()
     destination = tmp_path / "pm-runtime"
+    monkeypatch.setattr("pm._uv._toolchain", lambda **kwargs: (isolated_builder, Path(sys.executable)))
     with pytest.raises(InstallError, match="pip exited"):
-        stage_runtime(isolated_builder, Path(sys.executable), destination,
-                      wheelhouse=incomplete, offline=True)
+        from pm import stage_manager_runtime
+        stage_manager_runtime(python=Path(sys.executable), destination=destination,
+                              wheelhouse=incomplete, offline=True)
     assert "ruamel-yaml-clib" in capfd.readouterr().err
-    assert not (destination / "pm-runtime.json").exists()
+    assert not destination.exists()

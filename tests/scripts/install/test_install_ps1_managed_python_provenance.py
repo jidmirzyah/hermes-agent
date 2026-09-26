@@ -9,7 +9,7 @@ import sys
 import pytest
 
 pytestmark = pytest.mark.platforms("windows")
-INSTALLER = Path(__file__).resolve().parents[1] / "scripts" / "install.ps1"
+INSTALLER = Path(__file__).resolve().parents[3] / "scripts" / "install.ps1"
 
 
 @pytest.mark.parametrize("stage,exit_code", [("venv", 0), ("python-deps", 0), ("python-deps", 17)])

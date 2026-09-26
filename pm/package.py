@@ -51,10 +51,10 @@ class Package:
     name: unique id.
     deps: packages installed before this one.
     optional: not part of the root closure; installed on demand.
-    internal: a package manager pm uses inside install steps — never on
-        PATH and never part of the root closure. uv is the single internal
-        package; node/npm are shipped runtime tools (TUI, plugins), not
-        install machinery.
+    internal: tooling PM uses inside install/build steps — never on PATH
+        and never selected as an application root. Dependencies and explicit
+        build requests can select it. node/npm are shipped runtime tools
+        (TUI, plugins), not install machinery.
     on_path: contributes PATH dirs.
     url: template with {version} and {target} holes. override fetch_url()
         when a platform needs a completely different url.
@@ -351,7 +351,7 @@ class StatePackage(Package):
     def expected_stamp(self, extras: list[str]) -> str:
         raise NotImplementedError
 
-    def apply(self, extras: list[str]) -> None:
+    def apply(self, extras: list[str], *, explicit: bool = False) -> None:
         raise NotImplementedError
 
 

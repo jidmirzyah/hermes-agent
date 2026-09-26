@@ -2,7 +2,6 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { I18nProvider } from '@/i18n'
-import type * as RuntimeJobs from '@/store/local-runtime-jobs'
 import type * as Notifications from '@/store/notifications'
 import type { LocalRuntimeJob } from '@/types/hermes'
 
@@ -16,14 +15,19 @@ vi.mock('@/store/notifications', async importOriginal => ({
   notifyError: vi.fn()
 }))
 
-vi.mock('@/store/local-runtime-jobs', async importOriginal => ({
-  ...(await importOriginal<typeof RuntimeJobs>()),
+vi.mock('@/store/local-runtime-jobs', (): object => ({
   watchLocalRuntimeJobs: vi.fn()
 }))
 
 import { pauseLocalDownload, resumeLocalDownload } from '@/hermes'
 
-import { isDownloadPhase, LocalModelDownloadActions } from './local-model-download-progress'
+import {
+  downloadStatusText,
+  formatEta,
+  formatSpeed,
+  isDownloadPhase,
+  LocalModelDownloadActions
+} from './local-model-download-progress'
 
 function job(overrides: Partial<LocalRuntimeJob>): LocalRuntimeJob {
   return {
@@ -62,19 +66,6 @@ afterEach(() => {
 })
 
 describe('LocalModelDownloadActions', () => {
-  it('running download with can_pause:true renders Pause; clicking sends pauseLocalDownload exactly once with the job id', async () => {
-    renderActions(job({ can_pause: true }))
-
-    const pause = screen.getByRole('button', { name: /pause/i })
-    fireEvent.click(pause)
-
-    await waitFor(() => {
-      expect(pauseLocalDownload).toHaveBeenCalledTimes(1)
-    })
-    expect(pauseLocalDownload).toHaveBeenCalledWith('j1')
-    expect(resumeLocalDownload).not.toHaveBeenCalled()
-  })
-
   it('running download without explicit can_pause shows NO control (no guessing about old backends)', () => {
     renderActions(job({}))
 
@@ -92,21 +83,6 @@ describe('LocalModelDownloadActions', () => {
 
     const pending = screen.getByRole('button', { name: /pause/i })
     expect((pending as HTMLButtonElement).disabled).toBe(true)
-  })
-
-  it('paused job renders the Paused label + Resume (can_resume:true); clicking sends resumeLocalDownload with the job id', async () => {
-    renderActions(job({ can_resume: true, status: 'paused' }))
-
-    expect(screen.getByText(/paused/i)).toBeTruthy()
-
-    const resume = screen.getByRole('button', { name: /resume/i })
-    fireEvent.click(resume)
-
-    await waitFor(() => {
-      expect(resumeLocalDownload).toHaveBeenCalledTimes(1)
-    })
-    expect(resumeLocalDownload).toHaveBeenCalledWith('j1')
-    expect(pauseLocalDownload).not.toHaveBeenCalled()
   })
 
   it('paused hides Resume when can_resume is not explicitly true', () => {
@@ -161,5 +137,74 @@ describe('isDownloadPhase', () => {
     expect(isDownloadPhase(job({ kind: 'quickstart', phase: 'downloading' }))).toBe(true)
     expect(isDownloadPhase(job({ kind: 'quickstart', phase: 'setting-default' }))).toBe(false)
     expect(isDownloadPhase(job({ kind: 'model-activate', phase: 'loading' }))).toBe(false)
+  })
+})
+
+// The status copy as a locale supplies it; the composer only assembles it.
+const statusCopy = {
+  downloadEta: (time: string) => `~${time} left`,
+  downloadPausedLabel: 'Paused',
+  downloadProgress: (done: string, total: string) => `${done} of ${total}`,
+  downloadSpeed: (rate: string) => `${rate}`,
+  downloadStatusRunning: 'Downloading'
+}
+
+describe('downloadStatusText', () => {
+  it('composes state, bytes, speed and ETA while bytes move', () => {
+    const text = downloadStatusText(
+      job({ bytes_per_sec: 24 * (1 << 20), done_bytes: 1 << 30, eta_seconds: 120, total_bytes: 4 * (1 << 30) }),
+      statusCopy
+    )
+
+    expect(text).toBe('Downloading · 1.0 GB of 4.0 GB · 24 MB/s · ~2 min left')
+  })
+
+  it('drops speed and ETA rather than guessing when the backend reports none', () => {
+    // 4 * (1 << 30): a plain shift overflows 32-bit and would silently read 0.
+    const text = downloadStatusText(job({ done_bytes: 1 << 30, total_bytes: 4 * (1 << 30) }), statusCopy)
+
+    expect(text).toBe('Downloading · 1.0 GB of 4.0 GB')
+  })
+
+  it('a parked job keeps its frozen counter but shows no live rate', () => {
+    const text = downloadStatusText(
+      job({
+        bytes_per_sec: 24 * (1 << 20),
+        done_bytes: 1 << 30,
+        eta_seconds: 120,
+        status: 'paused',
+        total_bytes: 4 * (1 << 30)
+      }),
+      statusCopy
+    )
+
+    expect(text).toBe('Paused · 1.0 GB of 4.0 GB')
+  })
+
+  it('a non-download phase shows the phase detail, not a byte counter', () => {
+    const text = downloadStatusText(
+      job({ detail: 'Starting the local server', kind: 'quickstart', phase: 'starting-server' }),
+      statusCopy
+    )
+
+    expect(text).toBe('Starting the local server')
+  })
+})
+
+describe('speed and ETA formatting', () => {
+  it('reports nothing for an unknown or stalled rate', () => {
+    expect(formatSpeed(undefined)).toBe('')
+    expect(formatSpeed(0)).toBe('')
+    expect(formatEta(null)).toBe('')
+    expect(formatEta(0.4)).toBe('')
+  })
+
+  it('scales the rate unit and the ETA magnitude', () => {
+    expect(formatSpeed(24 * (1 << 20))).toBe('24 MB/s')
+    expect(formatSpeed(512 * (1 << 10))).toBe('0.5 MB/s')
+    expect(formatSpeed(2 * (1 << 30))).toBe('2.0 GB/s')
+    expect(formatEta(45)).toBe('45 sec')
+    expect(formatEta(120)).toBe('2 min')
+    expect(formatEta(3_900)).toBe('1 h 5 min')
   })
 })

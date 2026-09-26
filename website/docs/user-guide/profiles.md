@@ -432,7 +432,7 @@ Backup and restore apply the same rule to the default home and named profiles.
 Older archives cannot replace the destination machine's PM selections or tools.
 Files such as `plugins/example/facts.json` and `skills/example/tools/helper.py`
 remain user data and are preserved. Install dependencies on the destination
-through [PM](/reference/package-management), rather than copying environments.
+through [PM](../reference/package-management.md), rather than copying environments.
 
 ```bash
 # In chat, run /export, hand over the file, and they run /import on it

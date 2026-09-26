@@ -1,25 +1,25 @@
 // feature-flags.ts is the single resolver for which gated surfaces are on in
-// this artifact. These tests pin the flag table: launch argv opts in on any
-// channel, canary builds ride along by default, stable builds stay strict.
+// this artifact. These tests pin the flag table: local models ship on the
+// packaged desktop platforms (Windows, macOS) on every channel; elsewhere the
+// launch argv opts in with --local.
 import assert from 'node:assert/strict'
 
 import { test } from 'vitest'
 
 import { isCanaryTag, resolveFeatureFlags } from './feature-flags'
 
-test('stable builds need the --local launch flag for local models', () => {
-  assert.deepEqual(resolveFeatureFlags({ argv: [], canary: false }), { localModels: false })
-  assert.deepEqual(resolveFeatureFlags({ argv: ['Hermes.exe'], canary: false }), { localModels: false })
+const shipsLocalModels: boolean = process.platform === 'win32' || process.platform === 'darwin'
+
+test('without --local, local models follow the platform on every channel', () => {
+  for (const canary of [false, true]) {
+    assert.deepEqual(resolveFeatureFlags({ argv: [], canary }), { localModels: shipsLocalModels })
+    assert.deepEqual(resolveFeatureFlags({ argv: ['Hermes.exe'], canary }), { localModels: shipsLocalModels })
+  }
 })
 
-test('--local in argv opts into local models on any channel', () => {
+test('--local in argv opts into local models on any channel and platform', () => {
   assert.deepEqual(resolveFeatureFlags({ argv: ['Hermes.exe', '--local'], canary: false }), { localModels: true })
   assert.deepEqual(resolveFeatureFlags({ argv: ['--local'], canary: true }), { localModels: true })
-})
-
-test('canary builds get local models by default, no flag needed', () => {
-  assert.deepEqual(resolveFeatureFlags({ argv: [], canary: true }), { localModels: true })
-  assert.deepEqual(resolveFeatureFlags({ argv: ['Hermes.exe'], canary: true }), { localModels: true })
 })
 
 test('isCanaryTag recognizes canary stamps and rejects stable/dev tags', () => {
