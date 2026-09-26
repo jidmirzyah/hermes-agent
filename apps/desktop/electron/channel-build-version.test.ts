@@ -236,7 +236,7 @@ test('channel stamps verify the real checkout and retain source version and nati
       releaseTag: 'v0.0.1',
       receiverCandidate: true,
       bundleEnv: {},
-      publicBase: 'https://builds.example.test/ci-disposable/1/2-1',
+      publicBase: 'https://builds.example.test/ci-disposable/1/2',
       identity: { ...official, token: build.identity.token }
     }
 

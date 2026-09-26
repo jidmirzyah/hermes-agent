@@ -40,7 +40,6 @@ DEFAULT = {
     "deps": True,
     "uv_lock": True,
     "npm_lock": True,
-    "installer": True,
     "bootstrap": True,
     "desktop_updater": True,
     "rust": True,
@@ -49,7 +48,7 @@ DEFAULT = {
 }
 
 
-def _lanes(python=False, frontend=False, site=False, scan=False, deps=False, uv_lock=False, npm_lock=False, installer=False, bootstrap=False, desktop_updater=False, rust=False, mcp_catalog=False, docker_meta=False, ci_review=False, python_prod=None, nix=None, docker=None) -> dict[str, bool]:
+def _lanes(python=False, frontend=False, site=False, scan=False, deps=False, uv_lock=False, npm_lock=False, bootstrap=False, desktop_updater=False, rust=False, mcp_catalog=False, docker_meta=False, ci_review=False, python_prod=None, nix=None, docker=None) -> dict[str, bool]:
     # python_prod tracks python except for tests-only diffs; default it to
     # python so the majority of cases don't need to spell it out.
     #
@@ -70,7 +69,6 @@ def _lanes(python=False, frontend=False, site=False, scan=False, deps=False, uv_
         "deps": deps,
         "uv_lock": uv_lock,
         "npm_lock": npm_lock,
-        "installer": installer,
         "bootstrap": bootstrap,
         "desktop_updater": desktop_updater,
         "rust": rust,
@@ -155,14 +153,10 @@ CASES = {
     ),
     # Prose cannot change the closure or the binary.
     "docs-only → no nix": (["README.md"], _lanes()),
-    # install.ps1 is a shell script Python never imports, but it's also not
-    # provably prose, so python stays on (fail-open) alongside the Windows lane.
-    "install.ps1 → installer": (["scripts/install.ps1"], _lanes(python=True, installer=True)),
-    "installer test → installer": (
-        ["scripts/tests/test-install-ps1-longpath.ps1"],
-        _lanes(python=True, installer=True),
-    ),
-    "python source alone → no installer lane": (["run_agent.py"], _lanes(python=True, scan=True)),
+    # install.ps1 and its PowerShell suites are exercised by platforms("windows")
+    # pytest files, so they must turn on python (which gates tests-os).
+    "install.ps1 → python": (["scripts/install.ps1"], _lanes(python=True)),
+    "installer suite → python": (["scripts/tests/test-install-ps1-longpath.ps1"], _lanes(python=True)),
     # The Windows desktop-update hand-off is a PowerShell integration surface:
     # its tests spawn the real script and poll its loopback server. They run
     # when the script, the Electron side that launches it, or their own test

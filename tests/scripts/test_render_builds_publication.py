@@ -5,6 +5,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+from urllib.parse import unquote
 from urllib.request import urlopen
 
 import pytest
@@ -34,7 +35,7 @@ def release_body(monkeypatch):
     return state
 
 
-@pytest.mark.parametrize('tag', ['v1.2.3', 'v1.2.3-canary.20260818101010'])
+@pytest.mark.parametrize('tag', ['v1.2.3', 'v1.2.3+canary.20260818T101010Z'])
 def test_tag_publication_pending_rerun_stale_and_dry_run(monkeypatch, r2_server, release_body, tag):
     base = f'http://127.0.0.1:{r2_server.server_port}/hermes-releases'
     version = tag[1:]
@@ -63,18 +64,19 @@ def test_tag_publication_pending_rerun_stale_and_dry_run(monkeypatch, r2_server,
     body = release_body['body']
     assert 'runs/2' not in body and body.count('## Downloads') == 1
     assert body.count(rbt.MARKER) == body.count(rbt.END_MARKER) == 1
-    expected = {f'{base}/{prefix}{name}' for name in visible}
+    expected = {rbt.r2.public_url_for(base, prefix + name) for name in visible}
     assert set(re.findall(r'\]\((http[^)]+)\)', body)) == expected
     with urlopen(f'{base}/{prefix}index.html', timeout=5) as response:
         page = response.read().decode()
-    assert set(re.findall(r'href="(http[^"]+)"', page)) == expected | {f'https://github.com/o/r/releases/tag/{tag}'}
+    release_url = rbt.r2.public_url_for('https://github.com/o/r/releases/tag', tag)
+    assert set(re.findall(r'href="(http[^"]+)"', page)) == expected | {release_url}
     assert rbt.recorded_build(page) == tag and 'Bundle environment' not in page
     assert all(name not in page and name not in body for name in hidden)
     assert 'linux-arm64' not in page
     for url in expected:
         with urlopen(url, timeout=5) as response:
-            assert response.read() == url.rsplit('/', 1)[1].encode()
-    channel_key = 'releases/canary/index.html' if '-canary.' in tag else 'releases/stable/index.html'
+            assert response.read() == unquote(url.rsplit('/', 1)[1]).encode()
+    channel_key = 'releases/canary/index.html' if '+canary.' in tag else 'releases/stable/index.html'
     assert r2_server.store[channel_key][0].decode() == page
     render()
     assert release_body['body'] == body
@@ -96,7 +98,7 @@ def test_tag_publication_pending_rerun_stale_and_dry_run(monkeypatch, r2_server,
 @pytest.mark.parametrize('asset_present', [False, True])
 @pytest.mark.parametrize('result', ['failure', 'cancelled', 'skipped'])
 def test_incomplete_tag_keeps_channel_and_links_diagnostics(monkeypatch, r2_server, release_body, asset_present, result):
-    tag = 'v1.2.3-canary.20260818101010'
+    tag = 'v1.2.3+canary.20260818T101010Z'
     base = f'http://127.0.0.1:{r2_server.server_port}/hermes-releases'
     key = f'releases/tag/{tag}/HermesBundled-{tag[1:]}-win-x64.msix'
     r2_server.store['releases/canary/index.html'] = (b'previous good page', '"e"')
@@ -111,26 +113,26 @@ def test_incomplete_tag_keeps_channel_and_links_diagnostics(monkeypatch, r2_serv
     for output in (page, release_body['body']):
         assert 'Build incomplete' in output and f'publish-win32-updater ({result})' in output
         assert run in output
-        assert (base + '/' + key in output) == asset_present
+        assert (rbt.r2.public_url_for(base, key) in output) == asset_present
     assert ('No downloadable artifacts' in page) == (not asset_present)
     assert r2_server.store['releases/canary/index.html'][0] == b'previous good page'
 
 
 @pytest.mark.parametrize('version,name', [
     ('1.2.3', 'HermesBundled-1.2.3-win-x64.msix'),
-    ('1.2.3-canary.20260818', 'HermesBundled-1.2.3-canary.20260818-win-x64.msix'),
+    ('1.2.3+canary.20260818T000000Z', 'HermesBundled-1.2.3+canary.20260818T000000Z-win-x64.msix'),
 ])
 def test_exact_version_and_flat_name_boundaries(version, name):
-    names = [name, 'HermesBundled-1.2.3-canary.20260817-win-x64.msix', 'HermesBundled-1.2.4-win-x64.msix', name + '.blockmap']
+    names = [name, 'HermesBundled-1.2.3+canary.20260817T000000Z-win-x64.msix', 'HermesBundled-1.2.4-win-x64.msix', name + '.blockmap']
     assert rbt.filter_names_for_version(names, version) == [name]
     assert rbt.parse_assets([name])['HermesBundled'][('win', 'x64')] == (name, 'msix')
 
 
 @pytest.mark.parametrize('current,tag,allowed', [
     (None, 'v1.2.3', True), ('garbage', 'v1.2.3', True),
-    ('v1.2.3', 'v1.2.3-canary.20260818101010', False),
-    ('v1.2.3-canary.20260818101010', 'v1.2.3-canary.20260818101009', False),
-    ('v1.2.3-canary.20260818101010', 'v1.2.3-canary.20260818101011', True),
+    ('v1.2.3', 'v1.2.3+canary.20260818T101010Z', False),
+    ('v1.2.3+canary.20260818T101010Z', 'v1.2.3+canary.20260818T101009Z', False),
+    ('v1.2.3+canary.20260818T101010Z', 'v1.2.3+canary.20260818T101011Z', True),
 ])
 def test_channel_order_boundaries(current, tag, allowed):
     page = rbt.render_page(current, {}, 'https://cdn.example') if current and current != 'garbage' else current

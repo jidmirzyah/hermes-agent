@@ -2333,6 +2333,9 @@ class TestImportLiveSessionDatabase:
 
         backup_mod.run_import(Namespace(zipfile=str(zip_path), force=True))
 
+        out = capsys.readouterr().out
+        assert "files skipped" in out
+        assert "state.db" in out
         # The pre-import database is still the one on disk.
         assert _count_rows(live_db) == (3, 12)
 

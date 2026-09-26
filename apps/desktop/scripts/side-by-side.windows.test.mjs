@@ -96,8 +96,8 @@ foreach ($asset in @(@('Square44x44Logo.png',44,44), @('Square150x150Logo.png',1
   })
   const cases = [
     ['stable', { HERMES_PAYLOAD_TAG: 'v1.2.3' }],
-    ['canary', { HERMES_PAYLOAD_TAG: 'v1.2.4-canary.20260902000000' }],
-    ['canary-update', { HERMES_PAYLOAD_TAG: 'v1.2.4-canary.20260903000000' }],
+    ['canary', { HERMES_PAYLOAD_TAG: 'v1.2.3+canary.20260902T000000Z' }],
+    ['canary-update', { HERMES_PAYLOAD_TAG: 'v1.2.3+canary.20260903T000000Z' }],
     ['commit-a', { HERMES_BUILD_COMMIT: commitA, HERMES_PAYLOAD_VERSION: '1.2.4' }],
     ['commit-b', { HERMES_BUILD_COMMIT: commitB, HERMES_PAYLOAD_VERSION: '1.2.4' }],
     ...[65535, 65536, 0xffffffff].map(sequence => [`channel-${sequence}`, { _HERMES_CHANNEL_REQUEST_JSON: JSON.stringify(channelRequest(sequence)) }]),

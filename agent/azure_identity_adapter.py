@@ -11,6 +11,7 @@ Reference: https://learn.microsoft.com/azure/ai-foundry/foundry-models/how-to/co
 
 from __future__ import annotations
 
+from pm import install_hint
 import contextvars
 import functools
 import logging
@@ -32,7 +33,7 @@ SCOPE_AI_AZURE_DEFAULT = "https://ai.azure.com/.default"
 _AZURE_IDENTITY_FEATURE = "azure-identity"
 _INSTALL_MSG = "The 'azure-identity' package is required for Azure AI Foundry Entra ID authentication. "
 _LAZY_INSTALL_HINT = (
-    "Run: python -c \"from pm import sync_venv; sync_venv(['azure-identity'], explicit=True)\""
+    f"Run: {install_hint('azure-identity')}"
 )
 _AUTH_HEADERS = ("Authorization", "authorization", "Api-Key", "api-key", "X-Api-Key", "x-api-key")
 

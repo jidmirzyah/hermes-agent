@@ -856,6 +856,17 @@ const sidebars: SidebarsConfig = {
             'developer-guide/trajectory-format',
           ],
         },
+        {
+          type: 'category',
+          label: 'Packaging & Releases',
+          items: [
+            'developer-guide/source-update-completion',
+            'developer-guide/shared-bundle-builds',
+            'developer-guide/stable-releases',
+            'developer-guide/macos-bundle-updates',
+            'developer-guide/pm-audit-status',
+          ],
+        },
       ],
     },
     {

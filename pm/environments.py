@@ -39,6 +39,47 @@ def runtime_facts_path(project_root: Path) -> Path:
     return install_state_dir(project_root) / "facts.json"
 
 
+# The files that decide the dependency set. `scripts/_hermes-python` re-activates
+# when any of them differs in mtime from its stamp under activation_inputs_dir.
+ACTIVATION_INPUTS = ("uv.lock", "pyproject.toml", "pm/lock.json")
+
+
+def activation_inputs_dir(project_root: Path) -> Path:
+    """Beside facts.json, so the prologue finds it from ``$__HERMES_ACTIVATED``."""
+    return install_state_dir(project_root) / "inputs"
+
+
+def activation_input_mtimes(project_root: Path) -> dict[str, int]:
+    """Snapshot before installing, so an input edited mid-install records its
+    pre-install mtime and the next run re-activates."""
+    root = Path(project_root)
+    return {name: (root / name).stat().st_mtime_ns for name in ACTIVATION_INPUTS if (root / name).is_file()}
+
+
+def record_activation_inputs(stamps: Path, mtimes: dict[str, int], project_root: Path, *, test_environment: bool) -> None:
+    """Give each stamp the exact mtime of the input the install was verified against.
+
+    Recorded on every successful install, including no-op syncs: a checkout that
+    rewrites an input without changing it moves the mtime, and only this record
+    brings the stamp back to equal. The prologue compares for equality, not order,
+    because switching branches can move an input's mtime in either direction.
+    """
+    import shutil
+
+    shutil.rmtree(stamps, ignore_errors=True)
+    # The sentinel is inherited by child shells; equal input mtimes in another
+    # checkout must never make their test interpreter appear current here.
+    stamps.mkdir(parents=True, exist_ok=True)
+    (stamps / ".project-root").write_text(str(Path(project_root).resolve()), encoding="utf-8")
+    if test_environment:
+        (stamps / ".test-environment").touch()
+    for name, mtime in mtimes.items():
+        stamp = stamps / name
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        stamp.touch()
+        os.utime(stamp, ns=(mtime, mtime))
+
+
 def base_venv(project_root: Path) -> Path:
     root = Path(project_root).resolve()
     manifest_path = root.parent / "manifest.json"
@@ -138,7 +179,7 @@ def venv_python_version(venv: Path) -> tuple[int, int] | None:
     tree, and failed *after* a successful update.
     """
     try:
-        for line in (venv / "pyvenv.cfg").read_text(encoding="utf-8").splitlines():
+        for line in (venv / "pyvenv.cfg").read_text(encoding="utf-8-sig").splitlines():
             key, _, value = line.partition("=")
             if key.strip() != "version":
                 continue
@@ -208,7 +249,12 @@ def activate_dependencies(project_root: Path) -> None:
             if held:
                 recover_publication(project_root)
             environment = selected_venv(project_root)
-            lease_generation(environment)
+            release = lease_generation(environment)
+            # Without the lock, an installer may commit a new generation between the
+            # read and the lease, leaving the leased one unselected and collectable.
+            while not held and (current := selected_venv(project_root)) != environment:
+                release()
+                environment, release = current, lease_generation(current)
             selected = site_packages(environment)
             if not selected.is_dir() and not runtime_facts_path(project_root).is_file():
                 return
@@ -248,13 +294,18 @@ def activation_environment(project_root: Path) -> dict[str, str]:
     env.pop("VIRTUAL_ENV", None)
     env["PYTHONPATH"] = os.pathsep.join([str(project_root.resolve()), str(selected)])
     # The child-process sentinel. Its VALUE is the installed-state file this
-    # environment was composed against, so a consumer gets three things for
-    # free: that it inherited an activated shell, which checkout/profile that
-    # shell came from, and a staleness stamp — uv.lock / pyproject.toml /
-    # pm/lock.json newer than this file means the shell's environment predates
-    # its inputs. pm rewrites it on every real sync and no-ops otherwise, so a
-    # `-nt` comparison settles back to "current" after one re-activation.
+    # environment was composed against, so a consumer learns that it inherited
+    # an activated shell and which checkout/profile that shell came from. Its
+    # directory also holds activation_inputs_dir, the input-mtime stamps
+    # `scripts/_hermes-python` compares against to decide staleness.
     env["__HERMES_ACTIVATED"] = str(runtime_facts_path(project_root))
+    # The suite's interpreter (pm.testenv): an isolated side environment, so it
+    # never appears on PYTHONPATH/PATH above. scripts/run_tests.sh reads it.
+    from pm.testenv import testenv_python
+
+    test_python = testenv_python(project_root)
+    if test_python is not None:
+        env["__HERMES_TEST_PYTHON"] = str(test_python)
     return env
 
 

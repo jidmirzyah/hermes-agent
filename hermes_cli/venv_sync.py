@@ -124,11 +124,31 @@ def sync(project_root: Path | None = None, *, check: bool = False) -> dict:
         return {"state": "failed", "ok": False, "detail": str(exc)}
 
 
+#: Answered from the tree alone; a metadata query must never wait on (or fail with)
+#: a network-bound source-update completion.
+_METADATA_FLAGS = frozenset({"-h", "--help", "-V", "--version"})
+
+
+def completion_pending_path(project_root: Path) -> Path:
+    """Marker for a source update whose dependency sync committed but whose tail
+    (launchers, products, maintenance) has not finished.
+
+    Lives beside PM's facts, not in the checkout: it is per-install state, and a
+    root-level file would trip the ZIP updater's dirty-tree check.
+    """
+    from pm.environments import install_state_dir
+
+    return install_state_dir(project_root) / "source-completion-pending"
+
+
 def prepare_launch(project_root: Path, argv: list[str]) -> Path | None:
     """Finish a self-managed source update before importing app dependencies.
 
-    PM's successful input stamp is the only completion signal. Old updaters
-    need not write a marker (and cannot accidentally clear this obligation).
+    PM's successful input stamp signals a finished dependency sync; the
+    ``source-completion-pending`` marker signals the tail still owed after it,
+    so a tail that failed is retried on the next launch WITHOUT rebuilding
+    dependencies that are already current. Old updaters need not write a
+    marker (and cannot accidentally clear this obligation).
     Return the store interpreter when this process must restart cleanly.
     """
     import os
@@ -138,6 +158,7 @@ def prepare_launch(project_root: Path, argv: list[str]) -> Path | None:
 
     root = Path(project_root).resolve()
     if (command_argv(argv)[:1] == ["pm"]
+            or _METADATA_FLAGS & set(argv)
             or os.environ.get("HERMES_DISABLE_LAZY_INSTALLS", "").lower() in ("1", "true", "yes")
             or not (root / ".git").exists()
             or not (root / "pyproject.toml").is_file()):
@@ -151,21 +172,52 @@ def prepare_launch(project_root: Path, argv: list[str]) -> Path | None:
     if stamp.get("updateMechanism") != "self":
         return None  # Developer checkouts and packaged runtimes retain their owner.
 
-    from hermes_cli._early_recovery import _marker_owner_is_live
-    from hermes_cli.update_lock import read_live_update
-
     import pm
     from hermes_cli._launchers import resolve_store_python
-    from pm.environments import activation_environment, runtime_facts_path
+    from hermes_cli.update_lock import UpdateLock, read_live_update
 
     current = pm.venv_is_current(project_root=root)
+    pending = completion_pending_path(root)
+    if not current or pending.is_file():
+        lock = UpdateLock()
+        if not lock.acquire():
+            raise RuntimeError("an update is still running; wait for it to exit, then relaunch Hermes")
+        # The tail imports the application, whose entry point runs this very function:
+        # under the launching process's own claim (its pid is our ancestor) we ARE that
+        # tail and owe nothing — without this, a pending marker recurses forever.
+        if not lock.acquired and read_live_update() is not None:
+            return None
+        try:
+            _finish_source_update(root, current=current, pending=pending)
+        finally:
+            lock.release()
+    python = resolve_store_python(root)
+    if python is None:
+        raise RuntimeError("source update has no managed Python; run `hermes pm install`")
+    if not current or python.absolute() != Path(sys.executable).absolute():
+        publish_launchers(root)
+        return python
+    return None
+
+
+def _finish_source_update(root: Path, *, current: bool, pending: Path) -> None:
+    """Sync dependencies when they are stale, then run the tail the marker still owes."""
+    import sys
+    import pm
+    from hermes_cli._early_recovery import _marker_owner_is_live
+    from pm.environments import activation_environment, runtime_facts_path
+
     if not current:
         # Existing markers guard liveness, never create the completion obligation.
         # Current post-sync verification children can boot under a live updater.
         legacy_markers = (root / ".update-incomplete", root / ".lazy-refresh-incomplete")
-        if any(_marker_owner_is_live(marker) for marker in legacy_markers) or read_live_update():
+        if any(_marker_owner_is_live(marker) for marker in legacy_markers):
             raise RuntimeError("an update is still running; wait for it to exit, then relaunch Hermes")
         print("hermes: completing source-update dependencies...", file=sys.stderr, flush=True)
+        # Owed from before the sync commits: a crash between the commit and the
+        # tail must leave the tail, not a "current" install with nothing built.
+        pending.parent.mkdir(parents=True, exist_ok=True)
+        pending.write_text("source update tail not finished\n", encoding="utf-8")
         # Main-era installers selected [all] but had no PM ledger. Established
         # PM installs retain their recorded extras and plugin union instead.
         extras = ["all"] if not runtime_facts_path(root).is_file() else None
@@ -174,33 +226,32 @@ def prepare_launch(project_root: Path, argv: list[str]) -> Path | None:
         # must not make early recovery immediately rebuild it a second time.
         for name in (".update-incomplete", ".lazy-refresh-incomplete"):
             (root / name).unlink(missing_ok=True)
-        # Sync commits the dependency generation, but a source update also owes
-        # the product builds and the post-build maintenance -- the tail every
-        # install and finished update shares (hermes_cli/source_completion.py).
-        # Those builds need PM's selected interpreter with its dependencies
-        # activated, so hand that file THIS interpreter and let it re-exec
-        # itself, exactly as the installers do.
-        desktop_app = root / "apps/desktop"
-        desktop = ((desktop_app / "dist/index.html").is_file()
-                   or any((desktop_app / "release").glob("*")))
-        code = subprocess.call(
-            [sys.executable, "-I", "-B", "-u",
-             str(root / "hermes_cli/source_completion.py"),
-             "--source", str(root), "--finish-update",
-             *(("--desktop",) if desktop else ())],
-            cwd=root, env=activation_environment(root),
+    else:
+        print("hermes: finishing an interrupted source update...", file=sys.stderr, flush=True)
+    # Sync commits the dependency generation, but a source update also owes
+    # the product builds and the post-build maintenance -- the tail every
+    # install and finished update shares (hermes_cli/source_completion.py).
+    # Those builds need PM's selected interpreter with its dependencies
+    # activated, so hand that file THIS interpreter and let it re-exec
+    # itself, exactly as the installers do.
+    desktop_app = root / "apps/desktop"
+    desktop = ((desktop_app / "dist/index.html").is_file()
+               or any((desktop_app / "release").glob("*")))
+    # The tail's progress lines go to stderr: this is an automatic repair in
+    # front of whatever command the user ran, and that command may be
+    # emitting machine-readable stdout (a JSON probe, a piped query).
+    code = subprocess.call(
+        [sys.executable, "-I", "-B", "-u",
+         str(root / "hermes_cli/source_completion.py"),
+         "--source", str(root), "--finish-update",
+         *(("--desktop",) if desktop else ())],
+        cwd=root, env=activation_environment(root), stdout=sys.__stderr__,
+    )
+    if code != 0:
+        raise RuntimeError(
+            "source update completion failed; run `hermes update` to finish it"
         )
-        if code != 0:
-            raise RuntimeError(
-                "source update completion failed; run `hermes update` to finish it"
-            )
-    python = resolve_store_python(root)
-    if python is None:
-        raise RuntimeError("source update has no managed Python; run `hermes pm install`")
-    if not current or python.absolute() != Path(sys.executable).absolute():
-        publish_launchers(root)
-        return python
-    return None
+    pending.unlink()
 
 
 def relaunch_command(

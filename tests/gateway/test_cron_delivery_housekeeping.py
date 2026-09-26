@@ -86,6 +86,9 @@ def test_multiplex_housekeeping_scopes_primary_and_drains_each_profile(
     monkeypatch.setattr(gateway_run, "_profile_runtime_scope", fake_scope)
     from gateway import run_profile_reconcile
     monkeypatch.setattr(run_profile_reconcile, "_mcp_config_reconciler", lambda runner: lambda: None)
+    # The per-tick plugin update chore also binds every served profile's scope; this test
+    # asserts the DRAIN's scope sequence, so keep the chore wrapper out of the recording.
+    monkeypatch.setattr(run_profile_reconcile, "_for_each_served_profile", lambda runner, body: None)
     monkeypatch.setattr(
         scheduler,
         "drain_delivery_queue",

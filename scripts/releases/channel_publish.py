@@ -188,12 +188,12 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--build-id", default=os.environ.get("CHANNEL_BUILD", ""))
     parser.add_argument("--request-sha256", default=os.environ.get("CHANNEL_REQUEST_SHA256", ""))
     parser.add_argument("--public-base", help="Expected public authority (not an override in disposable CI)")
-    parser.add_argument("--disposable-run", help="Controller run-id-attempt; propagated to R2 object scope")
+    parser.add_argument("--disposable-run", help="Controller run ID; propagated to R2 object scope")
     parser.add_argument("--repository", default=os.environ.get("GITHUB_REPOSITORY", ""))
     parser.add_argument("--out", type=Path)
     parser.add_argument("--root", type=Path)
     args = parser.parse_args(argv)
-    from scripts.releases.r2_scope import channel_public_base, require_run
+    from scripts.releases.r2_scope import R2Scope, channel_public_base, require_run
     if args.disposable_run is not None:
         os.environ["R2_DISPOSABLE_RUN"] = require_run(args.disposable_run)
     args.public_base = channel_public_base(args.public_base)
@@ -233,6 +233,15 @@ def main(argv: list[str] | None = None) -> None:
             with tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 result = publish(request, root, needs=needs, publisher=publisher)
+        if args.command == "publish" and not R2Scope.configured().prefix:
+            commit_build.publish_receipt(
+                "channel", dict(os.environ), version=request["version"],
+                commit=request["commit"], details={
+                    "buildId": request["buildId"],
+                    "channel": request["channel"],
+                    "requestSha256": args.request_sha256,
+                },
+            )
         print(json.dumps(result, sort_keys=True))
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)

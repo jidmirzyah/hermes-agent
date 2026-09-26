@@ -350,7 +350,8 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
             if _npm_bin is None:
                 env = pm.ensure("npm").env
                 installed = pm.installed_package("npm")
-                assert installed is not None and installed.binary is not None
+                if installed is None or installed.binary is None:
+                    raise pm.InstallError("npm", "ensured but no selected binary was recorded")
                 _npm_bin = str(installed.binary)
             install_result = subprocess.run([_npm_bin, "install", "--silent"], cwd=str(bridge_dir), timeout=env_int("WHATSAPP_NPM_INSTALL_TIMEOUT", 300),
                                             env=env, **_RUN_TEXT)

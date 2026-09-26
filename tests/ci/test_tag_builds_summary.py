@@ -5,6 +5,7 @@ import sys
 
 import pytest
 
+from scripts.releases import r2
 from tests.ci.test_commit_build_staging import shell_step
 from tests.ci.test_desktop_release_tag_admission import _workflow
 from tests.scripts.test_release_r2 import r2_server  # noqa: F401
@@ -23,11 +24,11 @@ def test_admitted_failure_publishes_tag_info_without_promoting_channel(tmp_path,
     render = next(step for step in job["steps"] if step.get("name") == "Render")
     assert render["env"]["RELEASE_NEEDS"] == "${{ toJSON(needs) }}"
 
-    tag = "v0.28.0-canary.20260818101010"
+    tag = "v0.28.0+canary.20260818T101010Z"
     run_url = "https://github.example/o/r/actions/runs/12345"
     base = f"http://127.0.0.1:{r2_server.server_port}/hermes-releases"
     channel_key = "releases/canary/index.html"
-    previous = b'<meta name="hermes-build" content="v0.27.0-canary.20260817101010">'
+    previous = b'<meta name="hermes-build" content="v0.27.0+canary.20260817T101010Z">'
     r2_server.store[channel_key] = (previous, "text/html")
     helper = tmp_path / "bin"
     helper.mkdir()
@@ -65,7 +66,8 @@ def test_admitted_failure_publishes_tag_info_without_promoting_channel(tmp_path,
     key = f"releases/tag/{tag}/index.html"
     assert key in r2_server.store, result.stdout + result.stderr
     page = r2_server.store[key][0].decode()
-    assert f'href="https://github.com/o/r/releases/tag/{tag}"' in page
+    release_url = r2.public_url_for("https://github.com/o/r/releases/tag", tag)
+    assert f'href="{release_url}"' in page
     assert "Build incomplete" in page
     assert "build-win32 (failure)" in page and "publish-win32-updater (skipped)" in page
     assert "No downloadable artifacts" in page
@@ -74,7 +76,7 @@ def test_admitted_failure_publishes_tag_info_without_promoting_channel(tmp_path,
             assert f'<td>{name} ({info["result"]})</td><td><a href="{run_url}">View build run</a>' in page
     assert base not in page
     assert render["env"]["RUN_URL"] == "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-    assert f"{base}/{key}" in result.stdout
+    assert r2.public_url_for(base, key) in result.stdout
     assert r2_server.store[channel_key][0] == previous
     assert set(r2_server.store) == {channel_key, key}
 

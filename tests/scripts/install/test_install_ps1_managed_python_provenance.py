@@ -65,7 +65,7 @@ exit $LASTEXITCODE
                          capture_output=True, text=True, timeout=120)
     assert (run.returncode == 0) == (exit_code == 0), run.stdout + run.stderr
     assert [json.loads(line) for line in log.read_text(encoding="utf-8-sig").splitlines()] == [
-        ["python", "install", "--no-bin", "3.12"], ["python", "find", "--managed-python", "--no-project", "3.12"],
+        ["python", "install", "--no-bin", "--no-registry", "3.12"], ["python", "find", "--managed-python", "--no-project", "3.12"],
     ]
     if stage == "python-deps":
         assert json.loads(pm_log.read_text(encoding="utf-8-sig")) == ["install"]

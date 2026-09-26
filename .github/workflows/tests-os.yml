@@ -80,7 +80,9 @@ jobs:
       - name: Set up locked Python and test dependencies
         uses: ./.github/actions/setup-pm
         with:
-          extras: '["all", "dev", "anthropic", "mistral", "fal", "modal", "daytona", "hindsight", "parallel-web"]'
+          packages: ripgrep
+          extras: '["all", "telegram", "anthropic", "mistral", "fal", "modal", "daytona", "hindsight", "parallel-web"]'
+          test-environment: 'true'
           prune-python-cache: true
 
       - name: Run ${{ matrix.marker }} tests

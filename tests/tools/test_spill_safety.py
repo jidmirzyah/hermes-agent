@@ -19,7 +19,7 @@ from tools.spill_safety import (
     write_text_exclusive,
 )
 
-posix_only = pytest.mark.skipif(sys.platform == "win32", reason="POSIX perms/symlinks")
+posix_only = pytest.mark.platforms("posix")  # POSIX perms/symlinks
 
 
 def test_write_creates_file_with_content(tmp_path):

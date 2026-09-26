@@ -6,9 +6,9 @@ Subsequent work adds shared bundle assembly, signed-package E2E, the stable
 release gate, Termux APT distribution, and Python 3.14. Those changes do not
 retroactively extend earlier test receipts.
 
-For current implementation contracts, use [Package management](../website/docs/reference/package-management.md),
+For current implementation contracts, use [Package management](../reference/package-management.md),
 [shared bundle builds](shared-bundle-builds.md), [stable releases](stable-releases.md),
-and [bundled update acceptance](../tests/install/BUNDLED_UPDATES.md).
+and [bundled update acceptance](https://github.com/NousResearch/hermes-agent/blob/main/tests/install/BUNDLED_UPDATES.md).
 
 This change integrates repairs from the aggregate branch audit. It is not a
 release certificate. The audit compared `49945b14029e09fef608db9ede899377cdb54e11`
@@ -39,7 +39,7 @@ Setup completed, PM published a dependency generation, and PowerShell activation
 ran the store interpreter and source CLI. A separate PM installation passed
 its real dependency check. These checks do not prove signed-package installation,
 updates, or Nix builds. The broader PM plugin/config YAML coupling remains unchanged.
-The [developer workflow](../website/docs/reference/package-management.md#developer-workflow)
+The [developer workflow](../reference/package-management.md#developer-workflow)
 distinguishes runtime activation from independent test and editor environments.
 
 ## Implemented repairs

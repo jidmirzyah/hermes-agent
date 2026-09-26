@@ -5,12 +5,11 @@ Pure function; imported by scripts/termux/build_deb.sh and unit-tested by
 tests/scripts/test_termux_deb_version.py (Task 4 of .hermes/plans/2026-08-31_termux-deb.md).
 
 Mapping:
-    v1.2.3                     -> 1.2.3-1
-    v1.2.3-canary.2026083112  -> 1.2.3~canary.2026083112-1
+    v1.2.3                              -> 1.2.3-1
+    v1.2.3+canary.20260831T120000Z      -> 1.2.3~canary.20260831T120000Z-1
 
-The ``~`` ranks the nightly below the corresponding stable in dpkg's version
-ordering. No digit cap on any component: the repo's CalVer line (v2026.9.x)
-is a valid major.
+The ``~`` ranks the canary below the corresponding stable in dpkg's version
+ordering.
 
 ``--channel`` derives the release channel from the SAME tag regex: a tag with
 a nightly timestamp is ``nightly``, everything else is ``stable``. This is the
@@ -23,13 +22,9 @@ from __future__ import annotations
 import re
 import sys
 
-# The canary timestamp shape MUST match the canonical _CANARY_TAG_RE in
-# hermes_cli/update_channel.py (exactly 8 or 14 digits, 20-prefixed) and
-# channel_for_tag in scripts/releases/r2.py. Cross-referenced by
-# tests/scripts/test_termux_deb_version.py::test_canary_tag_shape_matches_canonical.
 _TAG_RE = re.compile(
-    r"^v(?P<major>0|[1-9]\d*)\.(?P<minor>\d+)\.(?P<patch>\d+)"
-    r"(?:-canary\.(?P<ts>20\d{6}(?:\d{6})?))?$"
+    r"^v(?P<major>0|[1-9]\d{0,2})\.(?P<minor>0|[1-9]\d*)\.(?P<patch>0|[1-9]\d*)"
+    r"(?:\+canary\.(?P<ts>20\d{6}T\d{6}Z))?$"
 )
 
 
@@ -38,7 +33,7 @@ def _match_tag(tag: str) -> re.Match[str]:
     if m is None:
         raise ValueError(
             f"malformed release tag {tag!r}: expected v<MAJOR>.<MINOR>.<PATCH> "
-            "or v<MAJOR>.<MINOR>.<PATCH>-canary.<timestamp>"
+            "or v<MAJOR>.<MINOR>.<PATCH>+canary.<UTC timestamp>"
         )
     return m
 
@@ -61,7 +56,7 @@ def channel_for_tag(tag: str) -> str:
     malformed-tag rejection is identical.
     """
     m = _match_tag(tag)
-    return "canary" if m.group("ts") is not None else "stable"
+    return "canary" if m.group("ts") else "stable"
 
 
 def main(argv: list[str]) -> int:

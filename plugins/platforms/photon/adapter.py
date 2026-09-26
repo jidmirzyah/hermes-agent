@@ -284,7 +284,8 @@ def _reinstall_sidecar_deps() -> None:
         if npm is None:
             env = pm.ensure("npm").env
             installed = pm.installed_package("npm")
-            assert installed is not None and installed.binary is not None
+            if installed is None or installed.binary is None:
+                raise pm.InstallError("npm", "ensured but no selected binary was recorded")
             npm = str(installed.binary)
     except pm.InstallError as exc:
         logger.warning("[photon] cannot prepare sidecar dependencies: %s", exc)
@@ -984,7 +985,8 @@ class PhotonAdapter(BasePlatformAdapter):
             try:
                 await asyncio.to_thread(pm.ensure, "node")
                 installed = pm.installed_package("node")
-                assert installed is not None and installed.binary is not None
+                if installed is None or installed.binary is None:
+                    raise pm.InstallError("node", "ensured but no selected binary was recorded")
                 self._node_bin = str(installed.binary)
             except pm.InstallError as exc:
                 raise PhotonSidecarStartupError(str(exc), code="SIDECAR_NODE_MISSING", retryable=False) from exc

@@ -15,8 +15,8 @@ from pm.store import current_target
 from tests.pm._fixtures import build_worker, client, isolated_python  # noqa: F401
 
 
-@pytest.mark.parametrize("extras", [[], ["dev"]], ids=["runtime", "tests"])
-def test_development_setup_keeps_test_groups_out_of_the_runtime(tmp_path, monkeypatch, extras, build_worker):
+@pytest.mark.parametrize("test_environment", [False, True], ids=["runtime", "tests"])
+def test_development_setup_keeps_test_groups_out_of_the_runtime(tmp_path, monkeypatch, test_environment, build_worker):
     from types import SimpleNamespace
     import shutil
 
@@ -30,11 +30,12 @@ def test_development_setup_keeps_test_groups_out_of_the_runtime(tmp_path, monkey
     wheels = tmp_path / "wheels"
     wheels.mkdir()
     _wheel(wheels, "test_only_dep", "1.0")
+    _wheel(wheels, "dev_only_dep", "1.0")
     (core / "pyproject.toml").write_text(
         '[project]\nname="ci-test-environment"\nversion="1"\nrequires-python=">=3.11"\n'
-        '[project.optional-dependencies]\ndev=[]\n'
-        '[dependency-groups]\ntest=["test-only-dep==1.0"]\n'
-        '[tool.uv]\npackage=false\nno-index=true\n'
+        '[project.optional-dependencies]\nall=[]\n'
+        '[dependency-groups]\ndev=["dev-only-dep==1.0"]\ntest=["test-only-dep==1.0"]\n'
+        '[tool.uv]\npackage=false\nno-index=true\ndefault-groups=[]\n'
         f'find-links=[{json.dumps(wheels.as_posix())}]\n', encoding="utf-8",
     )
     lock_project(core, python=Path(sys.executable), offline=True, explicit=True)
@@ -45,7 +46,7 @@ def test_development_setup_keeps_test_groups_out_of_the_runtime(tmp_path, monkey
     for name, file in files.items():
         monkeypatch.setenv(name, str(file))
 
-    setup_toolchain.dependencies(SimpleNamespace(extras=extras, home=home))
+    setup_toolchain.dependencies(SimpleNamespace(extras=[], home=home, test_environment=test_environment))
 
     outputs = dict(line.split("=", 1) for line in files["GITHUB_OUTPUT"].read_text(encoding="utf-8").splitlines())
     result = subprocess.run(
@@ -53,11 +54,30 @@ def test_development_setup_keeps_test_groups_out_of_the_runtime(tmp_path, monkey
         cwd=tmp_path, capture_output=True, text=True, timeout=30,
     )
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == str("dev" in extras)
+    assert result.stdout.strip() == str(test_environment)
+    probe = subprocess.run(
+        [outputs["python-path"], "-I", "-c",
+         "import importlib.util; print(importlib.util.find_spec('dev_only_dep') is not None)"],
+        cwd=tmp_path, capture_output=True, text=True, timeout=30,
+    )
+    assert probe.returncode == 0, probe.stderr
+    assert probe.stdout.strip() == str(test_environment)
     assert Path(outputs["venv"]).is_relative_to(home)
     assert not (core / ".venv").exists()
     from pm.environments import runtime_facts_path
-    assert runtime_facts_path(core).exists() == ("dev" not in extras)
+    assert runtime_facts_path(core).exists() != test_environment
+    if not test_environment:
+        from pm import build_environment
+
+        bundle_python = build_environment(source=core, out=tmp_path / "bundle-env",
+                                          all_extras=True, no_install_project=True, explicit=True)
+        bundle = subprocess.run(
+            [bundle_python, "-I", "-c",
+             "import importlib.util; assert importlib.util.find_spec('dev_only_dep') is None; "
+             "assert importlib.util.find_spec('test_only_dep') is None"],
+            cwd=tmp_path, capture_output=True, text=True, timeout=30,
+        )
+        assert bundle.returncode == 0, bundle.stderr
 
 
 @pytest.mark.parametrize("toolchain,names", [

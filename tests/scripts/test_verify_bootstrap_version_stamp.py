@@ -54,16 +54,21 @@ _SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "verify-bootstrap-ve
 
 
 def _install_repo(tmp_path: Path) -> Path:
-    """A minimal 'installed checkout': git repo + the shipped-version field."""
+    """A minimal 'installed checkout': git repo + the source identity stamp."""
     repo = tmp_path / "install"
     repo.mkdir()
     _git(repo, "init", "-b", "main")
     _git(repo, "config", "user.email", "ci@example.com")
     _git(repo, "config", "user.name", "ci")
     (repo / "hermes_cli").mkdir()
-    (repo / "hermes_cli" / "__init__.py").write_text('__version__ = "0.1.2"\n', encoding="utf-8")
+    (repo / "hermes_cli" / "__init__.py").write_text(
+        '"""Hermes CLI."""\n', encoding="utf-8")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-m", "seed")
+    (repo / "install-stamp.json").write_text(json.dumps({
+        "schemaVersion": 2, "commit": _git(repo, "rev-parse", "HEAD"),
+        "baseVersion": "0.1.2", "updateMechanism": "self",
+    }), encoding="utf-8")
     return repo
 
 
@@ -77,7 +82,12 @@ def _install_repo(tmp_path: Path) -> Path:
     ({"completedAt": "not-a-time"}, [], "ISO-8601"),
     ({"completedAt": "2026-08-30T12:00:00+01:00"}, [], "not UTC"),
     ({"missing": "stamp"}, [], "cannot read stamp"),
-    ({"missing": "version"}, [], "no __version__"),
+    ({"missing": "version"}, [], "no source identity stamp"),
+    ({"canonicalCommit": "c" * 40}, [], "canonical"),
+    # A checkout with no reachable release tag honestly stamps a null base.
+    ({"canonicalBase": None}, [], None),
+    # The protocol lane never runs the products stage that writes the stamp.
+    ({"missing": "version"}, ["--no-source-stamp"], None),
 ])
 def test_verifier_cli(tmp_path, changes, expect, error):
     repo = _install_repo(tmp_path)
@@ -87,9 +97,14 @@ def test_verifier_cli(tmp_path, changes, expect, error):
     if changes.get("missing") != "stamp":
         path.write_text(json.dumps(stamp), encoding="utf-8")
     if changes.get("missing") == "version":
-        (repo / "hermes_cli/__init__.py").unlink()
+        (repo / "install-stamp.json").unlink()
+    if "canonicalCommit" in changes or "canonicalBase" in changes:
+        canonical = json.loads((repo / "install-stamp.json").read_text(encoding="utf-8"))
+        canonical["commit"] = changes.get("canonicalCommit", canonical["commit"])
+        canonical["baseVersion"] = changes.get("canonicalBase", canonical["baseVersion"])
+        (repo / "install-stamp.json").write_text(json.dumps(canonical), encoding="utf-8")
     if not error:
-        expect = ["--expect-commit", stamp["pinnedCommit"], "--expect-branch", "main"]
+        expect = ["--expect-commit", stamp["pinnedCommit"], "--expect-branch", "main", *expect]
     env = dict(os.environ)
     if os.name == "nt":
         env.setdefault("SystemRoot", r"C:\Windows")

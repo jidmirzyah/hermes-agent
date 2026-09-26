@@ -67,15 +67,18 @@ test('earlier PM user-bin launchers are accepted only for the reported source tr
 // The .cmd rung goes through cmd.exe with a fixed argv; a launcher path that
 // cmd.exe would re-parse (quote, %var%, &, |, redirection) is refused instead of
 // being handed to the shell. Windows-only: POSIX launchers never touch a shell.
-test.skipIf(process.platform !== 'win32')('a .cmd launcher path with cmd metacharacters is refused, not executed', (): void => {
-  const root: string = fs.mkdtempSync(path.join(os.tmpdir(), 'cmd-meta-launcher-'))
+test.skipIf(process.platform !== 'win32')(
+  'a .cmd launcher path with cmd metacharacters is refused, not executed',
+  (): void => {
+    const root: string = fs.mkdtempSync(path.join(os.tmpdir(), 'cmd-meta-launcher-'))
 
-  try {
-    const launcher: string = path.join(root, 'a&b', 'hermes.cmd')
-    fs.mkdirSync(path.dirname(launcher))
-    fs.writeFileSync(launcher, `@echo off\r\necho Install directory: ${root}\r\n`)
-    assert.equal(launcherTargetsInstallation(launcher, root), false)
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true })
+    try {
+      const launcher: string = path.join(root, 'a&b', 'hermes.cmd')
+      fs.mkdirSync(path.dirname(launcher))
+      fs.writeFileSync(launcher, `@echo off\r\necho Install directory: ${root}\r\n`)
+      assert.equal(launcherTargetsInstallation(launcher, root), false)
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true })
+    }
   }
-})
+)

@@ -139,6 +139,10 @@ $ErrorActionPreference = 'Stop'
 $vs = Join-Path $Root 'VS with spaces'
 $devDir = Join-Path $vs 'Common7\Tools'
 New-Item -ItemType Directory -Force $devDir | Out-Null
+# The MSVC linker pin comes from VsDevCmd's VCToolsInstallDir, never from PATH lookup.
+$msvcBin = Join-Path $vs 'VC\Tools\MSVC\14.44\bin\HostARM64\ARM64'
+New-Item -ItemType Directory -Force $msvcBin | Out-Null
+[IO.File]::WriteAllText((Join-Path $msvcBin 'link.exe'), 'fixture')
 [IO.File]::WriteAllText((Join-Path $devDir 'VsDevCmd.bat'), @"
 @echo off
 set "PATH=%~dp0;%PATH%"
@@ -147,6 +151,7 @@ set "LIB=fixture SDK lib"
 set "VSCMD_ARG_HOST_ARCH=arm64"
 set "VSCMD_ARG_TGT_ARCH=arm64"
 set "VSINSTALLDIR=$vs\"
+set "VCToolsInstallDir=$vs\VC\Tools\MSVC\14.44\"
 "@)
 $rustcPath = Join-Path $Root 'rustc.cmd'
 [IO.File]::WriteAllText($rustcPath, "@echo off`r`necho host: aarch64-pc-windows-msvc`r`n")
@@ -165,9 +170,6 @@ function Get-Command {
     param([string]$Name)
     switch ($Name) {
         'cl.exe' { return [pscustomobject]@{Source = (Join-Path $vs 'cl.exe')} }
-        # The MSVC linker pin (CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_LINKER) resolves link.exe;
-        # a path under \MSVC\ is what the helper accepts.
-        'link.exe' { return [pscustomobject]@{Source = (Join-Path $vs 'VC\Tools\MSVC\14.44\bin\HostARM64\ARM64\link.exe')} }
         'rustup.exe' { return [pscustomobject]@{Source = (Join-Path $Root 'rustup.exe')} }
         'rustc.exe' { return [pscustomobject]@{Source = $rustcPath} }
         'vcpkg.exe' { return $null }
@@ -300,6 +302,17 @@ Invoke-HermesBuildCommand $command @()
 $failed = $false
 try { Invoke-HermesBuildCommand (Join-Path $Root 'absent.exe') @() } catch { $failed = $true }
 if (-not $failed) { throw 'missing executable was accepted after a successful command' }
+$a = Join-Path $Root 'cmd'
+$b = Join-Path $Root 'bin'
+New-Item -ItemType Directory -Force $a, $b | Out-Null
+Set-Content -Path (Join-Path $a 'git.exe') -Value 'first' -Encoding ascii
+Set-Content -Path (Join-Path $b 'git.exe') -Value 'second' -Encoding ascii
+$env:PATH = "$a;$b;$env:PATH"
+$resolved = @(Get-Command git -CommandType Application -ErrorAction Stop | Select-Object -First 1)[0].Source
+if ($resolved -ne (Join-Path $a 'git.exe')) { throw "resolved every git.exe: $resolved" }
+# The call operator must receive that one path, not both paths joined by a space.
+$executable = $resolved
+if ($executable -isnot [string] -or $executable.Contains(' ')) { throw "joined path leaked: $executable" }
 Write-Output 'PASS'
 ''', encoding="utf-8")
     env = dict(os.environ)

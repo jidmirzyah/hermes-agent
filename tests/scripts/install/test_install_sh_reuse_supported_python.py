@@ -57,9 +57,11 @@ def test_supported_base_python_is_reused_offline(tmp_path: Path, activated: bool
         env["VIRTUAL_ENV"] = str(active)
         env["PATH"] = f"{active / 'bin'}{os.pathsep}{bin_dir}"
     # Source the real helper, then inspect the selected interpreter, not argv.
-    script = ('source "$1" --manifest; INSTALL_DIR="$2"; bootstrap_python; '
+    # UV_CMD hands discovery the host uv as-is: which uv qualifies is
+    # ensure_uv's contract (test_install_sh_repository_stage.py), not this one.
+    script = ('source "$1" --manifest; INSTALL_DIR="$2"; UV_CMD="$3"; bootstrap_python; '
               '"$boot_py" -I -c "import sys; print(sys.prefix == sys.base_prefix)"')
-    result = subprocess.run([bash, "-c", script, "test", str(INSTALL_SH), str(core)],
+    result = subprocess.run([bash, "-c", script, "test", str(INSTALL_SH), str(core), str(bin_dir / "uv")],
                             env=env, cwd=core, capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
     assert result.stdout.strip() == "True", result.stdout + result.stderr
@@ -81,6 +83,9 @@ def test_bootstrap_failure_has_no_success_frame(tmp_path: Path, failure: str) ->
     uv = bin_dir / "uv"
     uv.write_text(
         f"#!{bash}\n"
+        # New enough for the installer's pin check, so the failure under test
+        # is the Python one, not a rejected uv.
+        'if [ "$1" = --version ]; then echo "uv 99.0.0"; exit 0; fi\n'
         'if [ "$1 $2" = "python install" ]; then\n'
         f"  : > {shlex.quote(str(attempted))}\n"
         f"  exit {9 if failure == 'install' else 0}\nfi\n"

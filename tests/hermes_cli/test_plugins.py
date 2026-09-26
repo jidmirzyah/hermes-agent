@@ -585,7 +585,7 @@ class TestPluginLoading:
         bundled = tmp_path / "bundled"
         chronos = bundled / "cron_providers" / "chronos"
         chronos.mkdir(parents=True)
-        (chronos / "plugin.yaml").write_text(yaml.dump({"name": "chronos"}), encoding="utf-8")
+        (chronos / "plugin.yaml").write_text(yaml.safe_dump({"name": "chronos"}), encoding="utf-8")
         (chronos / "__init__.py").write_text(
             "def register(ctx):\n    ctx.register_cron_scheduler(object())\n", encoding="utf-8")
         hermes_home = tmp_path / "hermes_test"
@@ -606,7 +606,7 @@ class TestPluginLoading:
         hermes_home = tmp_path / "hermes_test"
         plugin_dir = hermes_home / "plugins" / "mycron"
         plugin_dir.mkdir(parents=True)
-        (plugin_dir / "plugin.yaml").write_text(yaml.dump({"name": "mycron"}), encoding="utf-8")
+        (plugin_dir / "plugin.yaml").write_text(yaml.safe_dump({"name": "mycron"}), encoding="utf-8")
         (plugin_dir / "__init__.py").write_text(
             "def register(ctx):\n    ctx.register_cron_scheduler(object())\n", encoding="utf-8")
         (hermes_home / "config.yaml").write_text(yaml.safe_dump({"plugins": {"enabled": ["mycron"]}}))

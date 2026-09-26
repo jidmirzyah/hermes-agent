@@ -13,13 +13,14 @@ import unicodedata
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable, ClassVar, Dict, Optional, Any, Tuple, List
 
-import aiohttp
-
+aiohttp: Any = None
 try:
+    import aiohttp as _aiohttp
     from slack_bolt.async_app import AsyncApp
     from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
     from slack_sdk.web.async_client import AsyncWebClient
 
+    aiohttp = _aiohttp
     SLACK_AVAILABLE = True
 except ImportError:
     SLACK_AVAILABLE = False
@@ -59,11 +60,9 @@ except ImportError:  # pragma: no cover - plugin loaded outside package context
 logger = logging.getLogger(__name__)
 
 # User-Agent prefix (``HermesAgent/<version>``) for platform-partner attribution of API calls.
-try:
-    from hermes_cli import __version__ as _HERMES_VERSION
-except Exception:
-    _HERMES_VERSION = "unknown"
-_HERMES_SLACK_USER_AGENT_PREFIX = f"HermesAgent/{_HERMES_VERSION}"
+from hermes_cli.version_info import get_version_info
+
+_HERMES_SLACK_USER_AGENT_PREFIX = f"HermesAgent/{get_version_info().base_version}"
 
 _SLACK_ERROR_BODY_LIMIT_BYTES = 8 * 1024
 _BOOL_WORDS = frozenset({"1", "0", "true", "false", "yes", "no", "on", "off"})

@@ -107,7 +107,7 @@ def _verify_cosign(checksums_path: str, sig_path: str, cert_path: str) -> bool |
     return True
 
 
-def _verify_release_provenance(directory: Path, log) -> tuple[bool, str]:
+def verify_release_provenance(directory: Path, log) -> tuple[bool, str]:
     """Verify PM-acquired checksum provenance; this function never downloads.
 
     Missing/broken cosign is optional; an explicit rejection is fatal.

@@ -26,7 +26,7 @@ import base64
 import json
 from unittest.mock import MagicMock, patch
 
-from hermes_cli import __version__
+from hermes_cli.version_info import get_version_info
 
 
 # ---------------------------------------------------------------------------
@@ -69,7 +69,7 @@ class TestCodexCloudflareHeaders:
     def test_user_agent_advertises_hermes_version(self):
         from agent.auxiliary_client import _codex_cloudflare_headers
         headers = _codex_cloudflare_headers(_make_codex_jwt())
-        assert headers["User-Agent"] == f"HermesAgent/{__version__}"
+        assert headers["User-Agent"] == f"HermesAgent/{get_version_info().base_version}"
         assert headers["originator"] == "hermes-agent"
 
 
@@ -171,7 +171,7 @@ class TestPrimaryClientWiring:
             headers = agent._client_kwargs.get("default_headers") or {}
             assert headers.get("originator") == "hermes-agent"
             assert headers.get("ChatGPT-Account-ID") == "acct-rotation"
-            assert headers.get("User-Agent") == f"HermesAgent/{__version__}"
+            assert headers.get("User-Agent") == f"HermesAgent/{get_version_info().base_version}"
 
     def test_apply_client_headers_clears_codex_headers_off_chatgpt(self):
         """Switching AWAY from chatgpt.com must drop the codex headers."""
@@ -227,7 +227,7 @@ class TestAuxiliaryClientWiring:
             headers = mock_openai.call_args.kwargs.get("default_headers") or {}
             assert headers.get("originator") == "hermes-agent"
             assert headers.get("ChatGPT-Account-ID") == "acct-aux-try-codex"
-            assert headers.get("User-Agent") == f"HermesAgent/{__version__}"
+            assert headers.get("User-Agent") == f"HermesAgent/{get_version_info().base_version}"
 
     def test_resolve_provider_client_raw_codex_passes_codex_headers(self, monkeypatch):
         """The ``raw_codex=True`` branch (used by the main agent loop for direct
@@ -247,4 +247,4 @@ class TestAuxiliaryClientWiring:
             headers = mock_openai.call_args.kwargs.get("default_headers") or {}
             assert headers.get("originator") == "hermes-agent"
             assert headers.get("ChatGPT-Account-ID") == "acct-aux-raw-codex"
-            assert headers.get("User-Agent") == f"HermesAgent/{__version__}"
+            assert headers.get("User-Agent") == f"HermesAgent/{get_version_info().base_version}"

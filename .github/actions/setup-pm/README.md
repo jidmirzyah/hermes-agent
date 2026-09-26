@@ -10,17 +10,19 @@ not resolve a version range, install another setup action, or modify the lock.
 - uses: ./.github/actions/setup-pm
   with:
     toolchain: all
-    extras: '["dev"]'
+    extras: '[]'
+    test-environment: 'true'
 - run: python --version && node --version && npm --version
 ```
 
 `toolchain` defaults to `python` (Python and PM's private installer). `node` installs Node and npm;
 `all` installs both pairs. There are no version overrides. `extras` is a JSON
 array because GitHub action inputs are strings. Omit it for tools only; `[]`
-installs the core Python dependencies, and `["dev"]` adds the dev extra. PM
-checks `uv.lock`, installs the requested dependencies, and validates the environment.
-The dev extra uses an independent test environment including the test dependency
-group; only non-test installs publish an application selection. It does not enable plugins.
+installs the core Python dependencies. Set `test-environment: 'true'` to build an
+independent interpreter with the `dev` and `test` dependency groups; any `extras`
+then select runtime features in that interpreter. PM checks `uv.lock`, installs
+the requested dependencies, and validates the environment. Only non-test installs
+publish an application selection. It does not enable plugins.
 
 Subsequent steps get `python`, `python3`, `node`, `npm` and `npx`
 for the selected toolchain on PATH. The pinned npm precedes Node's bundled npm.
@@ -51,7 +53,7 @@ The official, SHA-pinned `actions/cache` transports three independent caches:
 All restores use the exact primary key, without fallback prefixes, matching
 setup-uv and setup-node's npm behavior. Successful jobs save at teardown;
 exact hits are not saved again. Only dependency-carrying callers
-(`extras` set) auto-save the uv cache: a tool-only job never runs a
+(`extras` set or `test-environment: 'true'`) auto-save the uv cache: a tool-only job never runs a
 dependency operation, so letting it save would freeze an empty cache under
 the production key, where an immutable exact hit blocks real saves forever.
 PM re-verifies restored tools before use.

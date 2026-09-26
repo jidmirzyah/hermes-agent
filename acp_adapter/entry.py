@@ -12,10 +12,10 @@ Usage::
 # on Windows.  No-op on POSIX.  See hermes_bootstrap.py for full rationale.
 try:
     import hermes_bootstrap  # noqa: F401
-except ModuleNotFoundError:
-    # Partial ``hermes update`` (git-reset landed, ``uv pip install -e .`` did not):
-    # UTF-8 stdio setup is skipped on Windows; POSIX is unaffected.
-    pass
+except ModuleNotFoundError as exc:
+    # Partial ``hermes update`` (git-reset landed, ``uv pip install -e .`` did not).
+    if exc.name != "hermes_bootstrap":
+        raise  # the bootstrap exists but cannot load: skipping it would skip PM activation
 else:
     # Stop a ``utils/``/``proxy/``/``ui/`` package in the launch cwd from shadowing Hermes modules.
     hermes_bootstrap.harden_import_path()
@@ -98,9 +98,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def _print_version() -> None:
-    from hermes_cli import __version__ as hermes_version
+    from hermes_cli.version_info import get_version_info
 
-    print(hermes_version)
+    print(get_version_info().derived_version)
 
 
 def _run_check() -> None:
@@ -174,6 +174,13 @@ def main(argv: list[str] | None = None) -> None:
     project_root = str(Path(__file__).resolve().parent.parent)
     if project_root not in sys.path:
         sys.path.insert(0, project_root)
+
+    # One TLS authority: trust the OS store before any outbound call (bare
+    # requests/urllib included) resolves a CA bundle — see agent/ssl_verify.py.
+    # This console script bypasses hermes_cli.main, which does the same.
+    from agent.ssl_verify import install_truststore
+
+    install_truststore()
 
     import acp
     from .server import HermesACPAgent

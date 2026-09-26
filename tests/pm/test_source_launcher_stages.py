@@ -42,7 +42,7 @@ function Invoke-FixtureUv {
     $call = $args -join ' '
     Add-Content -LiteralPath $env:PROBE_UV_CALLS -Encoding UTF8 -Value $call
     switch -Exact ($call) {
-        "python install --no-bin $env:PROBE_PY_VERSION" {
+        "python install --no-bin --no-registry $env:PROBE_PY_VERSION" {
             if (-not (Test-Path -LiteralPath $env:PROBE_PYTHON -PathType Leaf)) { throw 'missing fixture Python' }
         }
         "python find --managed-python --no-project $env:PROBE_PY_VERSION" {
@@ -78,7 +78,7 @@ exit 0
     assert result.returncode == 0, result.stdout + result.stderr
     assert b'REACHED_PATH_PUBLICATION' in result.stdout
     assert calls.read_text(encoding='utf-8-sig').splitlines() == [
-        f'python install --no-bin {py_version}',
+        f'python install --no-bin --no-registry {py_version}',
         f'python find --managed-python --no-project {py_version}',
     ]
     for name in ('hermes', 'hermes-acp'):

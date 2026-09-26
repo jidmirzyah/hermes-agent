@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
+import urllib.error
 import urllib.request
 
 from hermes_constants import get_hermes_home
@@ -100,28 +101,65 @@ def _github_compare_behind(current_rev: str, target_rev: str, repository: str = 
 
 
 def _request(url: str, accept: str = "application/vnd.github+json") -> str:
-    req = urllib.request.Request(url, headers={"Accept": accept, "User-Agent": "hermes-update-check"})
+    """GET an api.github.com resource with the credential ladder in hermes_cli.github_api.
+
+    A token GitHub rejects (401) drops this request to anonymous rather than
+    failing the check on a stale credential.
+    """
+    from hermes_cli.github_api import github_token
+
+    token = github_token()
+    try:
+        return _request_with(url, accept, token)
+    except urllib.error.HTTPError as exc:
+        if token is None or exc.code != 401:
+            raise
+        logger.debug("GitHub rejected the configured token; retrying anonymously")
+        return _request_with(url, accept, None)
+
+
+def _request_with(url: str, accept: str, token: str | None) -> str:
+    headers = {"Accept": accept, "User-Agent": "hermes-update-check"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(req, timeout=10) as response:
         return response.read(2 * 1024 * 1024).decode("utf-8-sig").strip()
 
 
-def _branch_tip(repository: str | None, branch: str, root: Path, git: str, remote: str = "origin") -> tuple[str | None, bool]:
+def _branch_tip(repository: str | None, branch: str, root: Path, git: str,
+                remote: str = "origin") -> tuple[str | None, bool, str | None]:
+    """``(sha, missing, failure)``: ``missing`` only on a confirmed empty advertisement;
+    ``failure`` names why no tip could be read, for the user-facing message."""
     # A successful empty ref advertisement alone proves a branch was deleted.
     # GitHub 404 can also mean a private repository: it must not heal a branch.
+    failure = None
     if repository:
-        sha = _quiet(lambda: _request(
-            f"https://api.github.com/repos/{repository}/commits/{quote(branch, safe='')}",
-            "application/vnd.github.sha"))
+        from hermes_cli.github_api import describe_github_failure, github_token
+        try:
+            sha = _request(f"https://api.github.com/repos/{repository}/commits/{quote(branch, safe='')}",
+                           "application/vnd.github.sha")
+        except Exception as exc:
+            sha = None
+            failure = describe_github_failure(exc, authenticated=github_token() is not None)
         if _is_full_sha(sha):
-            return sha, False
+            return sha, False, None
+        if failure is None:
+            failure = "api.github.com returned no commit for the branch."
         if branch == "main" and remote == "origin":
-            return None, False
+            return None, False, failure
     result = _git_run(["ls-remote", "--exit-code", "--heads", remote, f"refs/heads/{branch}"],
                       cwd=root, git=git, timeout=10)
     if result is None:
-        return None, False
+        return None, False, failure or f"`git ls-remote {remote}` could not run."
     sha = result.stdout.split()[0] if result.returncode == 0 and result.stdout else None
-    return (sha if _is_full_sha(sha) else None), result.returncode == 2
+    if _is_full_sha(sha):
+        return sha, False, None
+    if result.returncode == 2:
+        return None, True, None
+    detail = (result.stderr or "").strip().splitlines()
+    return None, False, failure or (f"`git ls-remote {remote}` failed: {detail[-1]}" if detail
+                                    else f"`git ls-remote {remote}` returned no tip.")
 
 
 def _commits(payload: dict | None) -> list[dict]:
@@ -162,7 +200,7 @@ def check_for_updates(*, install_root: Path | None = None, home: Path | None = N
     result = {"supported": False, "hermesRoot": str(root), "behind": None, "commits": []}
     if stamp.get("source") == "commit-build":
         return {**result, "reason": "commit-build", "message": COMMIT_BUILD_UPDATE_MESSAGE}
-    if stamp.get("payload") in {"bundled", "light"} or (install_root is None and detect_install_method(root) in {"docker", "apt"}):
+    if stamp.get("payload") in {"bundled", "light", "runtime"} or (install_root is None and detect_install_method(root) in {"docker", "apt"}):
         return {**result, "reason": "not-a-git-checkout"}
     if not embedded and not (root / ".git").exists():
         return {**result, "reason": "not-a-git-checkout",
@@ -235,7 +273,7 @@ def check_for_updates(*, install_root: Path | None = None, home: Path | None = N
         # Forks must keep their own origin, including its authentication.
         remote = (f"https://github.com/{OFFICIAL_REPOSITORY}.git"
                   if embedded or (official_ssh and selected_branch != "main") else "origin")
-        target, missing = _branch_tip(repository, selected_branch, root, git, remote)
+        target, missing, failure = _branch_tip(repository, selected_branch, root, git, remote)
         if missing and selected_branch != "main":
             result["branch"] = "main"
             if branch_config_path and not branch and configured_branch == selected_branch:
@@ -244,9 +282,11 @@ def check_for_updates(*, install_root: Path | None = None, home: Path | None = N
                 if current_config == desktop_config:
                     from utils import atomic_json_write
                     atomic_json_write(branch_config_path, {**desktop_config, "branch": "main"})
-            target, _ = _branch_tip(repository, "main", root, git, remote if embedded else "origin")
+            target, _, failure = _branch_tip(repository, "main", root, git, remote if embedded else "origin")
         if target is None:
-            result.update(error="fetch-failed", message="Could not resolve the remote branch tip.")
+            result.update(error="fetch-failed",
+                          message=f"Could not resolve the remote branch tip: {failure}" if failure
+                          else "Could not resolve the remote branch tip.")
         else:
             behind = UPDATE_AVAILABLE_NO_COUNT
             if head == target or (not embedded and _git_ok(

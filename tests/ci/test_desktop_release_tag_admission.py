@@ -6,13 +6,14 @@ unreviewed commit must never reach the signing build. Two layers are tested:
 
 * Structure — the workflow declares the admitted SHA as a job output and
   every privileged job checks out THAT, not the (moveable) tag ref.
-* Behavior — the admission script is executed, verbatim from the workflow
-  YAML, inside real temp git repositories: a tag on origin/main passes and
-  exports the full SHA; a tag-shaped ref NOT on main is refused.
+* Behavior — the production admission command runs inside real temp git
+  repositories: an annotated claim on origin/main passes and exports the full
+  SHA; a claim for a commit NOT on main is refused.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -30,13 +31,6 @@ def _workflow() -> dict:
     yaml = pytest.importorskip("hermes_yaml")
     return yaml.safe_load(_WORKFLOW.read_text(encoding="utf-8"))
 
-
-def _admission_script() -> str:
-    """The admission run script, verbatim — the single source of truth."""
-    steps = _workflow()["jobs"]["validate"]["steps"]
-    scripts = [s for s in steps if isinstance(s, dict) and s.get("id") == "admission"]
-    assert len(scripts) == 1, "expected exactly one admission step in the validate job"
-    return scripts[0]["run"]
 
 
 # ---------------------------------------------------------------------------
@@ -66,10 +60,12 @@ def test_signing_jobs_pin_source_and_controller_revisions_not_mutable_tags():
                 continue
             ref = step.get("with", {}).get("ref")
             expected = "${{ needs.validate.outputs.sha }}"
-            if name in {"publish-channel"} or step.get("if") == "needs.validate.outputs.channel-build != ''":
+            if (name in {"publish-channel"}
+                    or step.get("if") == "needs.validate.outputs.channel-build != ''"
+                    or step.get("name") == "Return to the trusted receipt controller"):
                 expected = "${{ github.sha }}"
             elif name == "validate":
-                expected = "${{ (inputs.build_commit != '' || inputs.channel != '') && github.sha || inputs.tag }}"
+                expected = "${{ (inputs.build_commit != '' || inputs.channel != '' || inputs.release-phase != '') && github.sha || inputs.tag }}"
             elif name == "assemble-win32-bundle":
                 expected = "${{ needs.validate.outputs.channel-build != '' && github.sha || needs.validate.outputs.sha }}"
             assert ref == expected, (
@@ -162,23 +158,22 @@ def _seed_repo(root: Path) -> tuple[Path, Path]:
     return origin, clone
 
 
-def _run_admission(clone: Path, tag: str) -> subprocess.CompletedProcess:
+def _run_admission(clone: Path, tag: str, claim_tag: str) -> subprocess.CompletedProcess:
     gh_output = clone / "github_output.txt"
     gh_output.write_text("", encoding="utf-8")
     env = _child_env(
         TAG=tag,
+        RELEASE_TAG=tag,
+        RELEASE_CLAIM_TAG=claim_tag,
+        RELEASE_CLAIM_OBJECT=_git("rev-parse", f"refs/tags/{claim_tag}", cwd=clone),
         GITHUB_OUTPUT=str(gh_output),
-        RELEASE_PHASE="" if "-canary." in tag else "candidate",
-        GITHUB_REF=f"refs/tags/{tag}",
+        RELEASE_PHASE="candidate",
+        GITHUB_REF=f"refs/tags/{claim_tag}",
         GITHUB_SHA=_git("rev-parse", "HEAD", cwd=clone),
-        # checkout@v6 runs run-steps with `bash -e -o pipefail`; -e/-o are on
-        # the command line below, so nothing else is needed from the env.
+        PYTHONPATH=str(_REPO),
     )
-    script = _admission_script()
-    script_file = clone / "admission.sh"
-    script_file.write_text(script, encoding="utf-8")
     return subprocess.run(
-        [_BASH, "-e", "-o", "pipefail", str(script_file)],
+        [sys.executable, "-m", "scripts.releases.stable", "verify"],
         cwd=clone,
         env=env,
         capture_output=True,
@@ -187,11 +182,24 @@ def _run_admission(clone: Path, tag: str) -> subprocess.CompletedProcess:
     )
 
 
-def test_tag_on_origin_main_is_admitted_and_exports_the_full_sha(tmp_path: Path):
-    _origin, clone = _seed_repo(tmp_path)
-    _git("tag", "v0.1.2", cwd=clone)
+def _claim_message(clone: Path) -> str:
+    return json.dumps({
+        "schema": 1,
+        "version": "0.1.2",
+        "commit": _git("rev-parse", "HEAD", cwd=clone),
+        "autopublish": False,
+        "claimEpoch": 1_790_000_000,
+    }, sort_keys=True, separators=(",", ":"))
 
-    proc = _run_admission(clone, "v0.1.2")
+
+def test_claim_on_origin_main_is_admitted_and_exports_the_full_sha(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    _origin, clone = _seed_repo(tmp_path)
+    monkeypatch.setenv("GIT_COMMITTER_DATE", "@1790000000 +0000")
+    _git("tag", "-a", "v0.1.2-rc", "-m", _claim_message(clone), cwd=clone)
+    _git("push", "origin", "refs/tags/v0.1.2-rc", cwd=clone)
+
+    proc = _run_admission(clone, "v0.1.2", "v0.1.2-rc")
     assert proc.returncode == 0, proc.stdout + proc.stderr
 
     gh_output = (clone / "github_output.txt").read_text(encoding="utf-8")
@@ -199,27 +207,57 @@ def test_tag_on_origin_main_is_admitted_and_exports_the_full_sha(tmp_path: Path)
     assert f"sha={expected}" in gh_output
 
 
-def test_tag_not_on_origin_main_is_refused(tmp_path: Path):
+def test_claim_not_on_origin_main_is_refused(tmp_path: Path):
     _origin, clone = _seed_repo(tmp_path)
     # A commit that exists ONLY in the clone — never pushed, never reviewed.
     (clone / "rogue.txt").write_text("unreviewed\n", encoding="utf-8")
     _git("add", "-A", cwd=clone)
     _git("commit", "-m", "rogue", cwd=clone)
-    _git("tag", "v0.1.3-canary.20260830120000", cwd=clone)
+    _git("tag", "-a", "v0.1.2-rc", "-m", _claim_message(clone), cwd=clone)
+    _git("push", "origin", "refs/tags/v0.1.2-rc", cwd=clone)
 
-    proc = _run_admission(clone, "v0.1.3-canary.20260830120000")
+    proc = _run_admission(clone, "v0.1.2", "v0.1.2-rc")
     assert proc.returncode != 0, "a tag off origin/main must not be admitted"
-    assert "not an ancestor of origin/main" in proc.stdout + proc.stderr
+    assert "is not on main" in proc.stdout + proc.stderr
     # And nothing was exported for the signing jobs to consume.
     assert "sha=" not in (clone / "github_output.txt").read_text(encoding="utf-8")
 
 
-def test_malformed_tag_is_refused_before_any_git_work(tmp_path: Path):
+def test_malformed_claim_is_refused(tmp_path: Path):
     _origin, clone = _seed_repo(tmp_path)
-    proc = _run_admission(clone, "v0.1.2-rc1")
+    _git("tag", "-a", "v0.1.2-rc1", "-m", "bad claim", cwd=clone)
+    _git("push", "origin", "refs/tags/v0.1.2-rc1", cwd=clone)
+    proc = _run_admission(clone, "v0.1.2", "v0.1.2-rc1")
     assert proc.returncode != 0
-    # Refused at the shape/lockstep legs — either message is a valid refusal.
-    assert (
-        "not a release tag" in proc.stdout + proc.stderr
-        or "does not match pyproject.toml version" in proc.stdout + proc.stderr
-    )
+    assert "is not a claim tag" in proc.stdout + proc.stderr
+
+
+def _require_step(job: str, name_prefix: str) -> dict:
+    steps = _workflow()["jobs"][job]["steps"]
+    (step,) = [s for s in steps if isinstance(s, dict) and s.get("name", "").startswith(name_prefix)]
+    return step
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+def test_downloadable_windows_builds_refuse_to_ship_unsigned(tmp_path: Path):
+    """The Windows signer only warns without AZURE_SIGN_*; every lane whose
+    artifacts are downloadable must therefore fail before building, under
+    the same gate the macOS leg uses for its signing credentials."""
+    step = _require_step("build-win32-release", "Require Azure signing")
+    assert step["if"] == _require_step("build-darwin-release", "Require signing credentials")["if"]
+    assert "build-commit" not in step["if"] and "release-phase == 'candidate'" in step["if"]
+    names = list(step["env"])
+    assert {"AZURE_SIGN_ENDPOINT", "AZURE_SIGN_ACCOUNT", "AZURE_SIGN_PROFILE", "AZURE_CLIENT_ID"} <= set(names)
+
+    def run(**values: str) -> subprocess.CompletedProcess:
+        env = {"PATH": os.environ["PATH"], "RUNNER_TEMP": str(tmp_path)}
+        env.update({name: "" for name in names})
+        env.update(values)
+        return subprocess.run(["bash", "-euo", "pipefail", "-c", step["run"]], env=env,
+                              capture_output=True, text=True, timeout=60)
+
+    proc = run()
+    assert proc.returncode != 0 and "::error::" in proc.stdout and "AZURE_SIGN_ENDPOINT" in proc.stdout
+    assert run(**{name: "x" for name in names}).returncode == 0
+    partial = run(**{name: "x" for name in names if name != "AZURE_CLIENT_ID"})
+    assert partial.returncode != 0 and "AZURE_CLIENT_ID" in partial.stdout

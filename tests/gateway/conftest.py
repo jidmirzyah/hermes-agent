@@ -570,8 +570,8 @@ def pytest_configure(config):
     # Concurrent subprocesses all hit pytest_configure simultaneously;
     # without a lock they'd all find no cache and all run the scan.
     #
-    # NOTE: filelock is NOT in CI's dependency closure (`uv sync --extra all
-    # --extra dev ...` does not pull it), so on CI the _NoLock fallback is
+    # NOTE: filelock is NOT in CI's app and dev/test dependency closure,
+    # so on CI the _NoLock fallback is
     # what actually runs. Correctness therefore cannot depend on the lock:
     # the cache write must be atomic and the read must tolerate a
     # not-yet-visible cache. Before the atomic-write fix, a reader could

@@ -35,11 +35,11 @@ def releases(tmp_path, monkeypatch, request):
         git(origin, "add", ".")
         git(origin, "commit", "-m", label)
         commits.append(git(origin, "rev-parse", "HEAD"))
-    tags = {"stable": "v1.2.3", "canary": "v1.2.4-canary.20260911125822"}
+    tags = {"stable": "v1.2.3", "canary": "v1.2.3+canary.20260911T125822Z"}
     git(origin, "tag", "-a", tags["stable"], commits[1], "-m", "stable")
     git(origin, "tag", "-a", tags["canary"], commits[2], "-m", "canary")
     git(origin, "tag", "v99.0.0", commits[3])
-    git(origin, "tag", "v99.0.1-canary.20260912125822", commits[3])
+    git(origin, "tag", "v99.0.1+canary.20260912T125822Z", commits[3])
     checkout = tmp_path / "checkout"
     git(tmp_path, "clone", str(origin), str(checkout))
     git(checkout, "config", "user.name", "Release Fixture")
@@ -236,7 +236,7 @@ def test_missing_pointers_fall_back_only_to_published_releases(releases, channel
     published = releases.responses[f"/repos/NousResearch/hermes-agent/releases/tags/{releases.tags[channel]}"]
     releases.responses["/repos/NousResearch/hermes-agent/releases/latest"] = published
     releases.responses["/repos/NousResearch/hermes-agent/releases?per_page=100&page=1"] = [
-        {"tag_name": "v99.0.1-canary.20260912125822", "draft": True, "prerelease": True},
+        {"tag_name": "v99.0.1+canary.20260912T125822Z", "draft": True, "prerelease": True},
         published,
     ]
     assert resolve_source_release(channel, ["git"], releases.root) == (

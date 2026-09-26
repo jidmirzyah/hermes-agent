@@ -13,23 +13,15 @@ import pytest
 
 from gateway import shutdown_forensics as sf
 
-
 # ---------------------------------------------------------------------------
 # _signal_name
 # ---------------------------------------------------------------------------
-
-
 
 # ---------------------------------------------------------------------------
 # snapshot_shutdown_context
 # ---------------------------------------------------------------------------
 
 class TestSnapshotShutdownContext:
-
-
-
-
-
 
     def test_detects_takeover_marker_for_self(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
@@ -41,7 +33,6 @@ class TestSnapshotShutdownContext:
         ctx = sf.snapshot_shutdown_context(signal.SIGTERM)
         assert "takeover_marker" in ctx
         assert ctx["takeover_marker_for_self"] is True
-
 
 # ---------------------------------------------------------------------------
 # format_context_for_log / context_as_json
@@ -57,13 +48,11 @@ class TestFormatters:
         assert decoded["signal"] == "SIGTERM"
         assert "weird" in decoded
 
-
 # ---------------------------------------------------------------------------
 # persisted snapshots must never include process argv (#112459)
 # ---------------------------------------------------------------------------
 
 _ARGV_CANARY = "lin_api_CANARY_SHUTDOWN_FORENSICS_9f3a2c"
-
 
 @pytest.fixture
 def child_with_secret_argv():
@@ -76,7 +65,6 @@ def child_with_secret_argv():
     finally:
         proc.kill()
         proc.wait()
-
 
 class TestArgvFreePersistence:
 
@@ -94,7 +82,6 @@ class TestArgvFreePersistence:
         line = sf.format_context_for_log(ctx)
         assert _ARGV_CANARY not in line and _ARGV_CANARY not in sf.context_as_json(ctx)
         assert f"parent_pid={child_with_secret_argv.pid}" in line
-
 
 # ---------------------------------------------------------------------------
 # spawn_async_diagnostic
@@ -164,7 +151,6 @@ class TestSpawnAsyncDiagnostic:
         assert _ARGV_CANARY not in contents
         assert (log_path.stat().st_mode & 0o777) == 0o600
 
-
 # ---------------------------------------------------------------------------
 # parse_systemd_duration_to_us
 # ---------------------------------------------------------------------------
@@ -176,8 +162,6 @@ class TestParseSystemdDuration:
     def test_minutes(self):
         assert sf.parse_systemd_duration_to_us("3min") == 180 * 1_000_000
 
-
 # ---------------------------------------------------------------------------
 # check_systemd_timing_alignment
 # ---------------------------------------------------------------------------
-

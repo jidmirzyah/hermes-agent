@@ -271,7 +271,7 @@ class TestCrashDurability:
         assert real.read_text(encoding="utf-8") == link.read_text(encoding="utf-8")
         assert "grok-4.3" in real.read_text(encoding="utf-8")
 
-    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
+    @pytest.mark.platforms("posix")  # POSIX permission bits
     def test_existing_file_mode_is_preserved(self, trap_config: Path):
         """Managed (NixOS 0640) and container installs widen config.yaml
         deliberately; the migration must not silently tighten it to 0600."""

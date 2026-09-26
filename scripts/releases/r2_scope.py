@@ -6,15 +6,13 @@ import os
 import re
 
 # A lease is the workflow run id alone: "re-run failed jobs" must re-enter the
-# SAME namespace (succeeded jobs are skipped and their outputs persist). The
-# legacy <run-id>-<attempt> shape stays readable for allocations minted before
-# the one-dispatch collapse.
-_RUN_LEASE = r"[1-9][0-9]{0,19}(?:-[1-9][0-9]{0,5})?"
+# SAME namespace because succeeded jobs are skipped and their outputs persist.
+_RUN_LEASE = r"[1-9][0-9]{0,19}"
 
 
 def require_run(value: str) -> str:
     if not isinstance(value, str) or not re.fullmatch(_RUN_LEASE, value):
-        raise ValueError("Disposable R2 run must be <run-id> or legacy <run-id>-<attempt>")
+        raise ValueError("Disposable R2 run must be <run-id>")
     return value
 
 

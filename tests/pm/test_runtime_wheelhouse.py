@@ -87,7 +87,7 @@ import importlib.metadata, importlib.util, json, sys
 sys.path.insert(0, sys.argv[1])
 from packaging.utils import canonicalize_name
 from ruamel.yaml import YAML
-import packaging, tomli_w, _ruamel_yaml
+import packaging, tomli_w
 assert YAML(typ='safe').load('isolated: true') == {'isolated': True}
 assert importlib.util.find_spec('openai') is None
 assert importlib.util.find_spec('yaml') is None
@@ -120,7 +120,7 @@ print(json.dumps({canonicalize_name(d.metadata['Name']): d.version
 
 
 @pytest.mark.platforms("linux")
-def test_offline_wheelhouse_rejects_missing_transitive_wheel(
+def test_offline_wheelhouse_rejects_missing_locked_wheel(
     tmp_path, isolated_builder, locked_wheelhouse, capfd, monkeypatch,
 ):
     from pm.package import InstallError
@@ -128,13 +128,14 @@ def test_offline_wheelhouse_rejects_missing_transitive_wheel(
     wheelhouse, _ = locked_wheelhouse
     incomplete = tmp_path / "incomplete wheelhouse"
     shutil.copytree(wheelhouse, incomplete)
-    native_wheel, = incomplete.glob("ruamel_yaml_clib-*.whl")
-    native_wheel.unlink()
+    yaml_wheel = next(path for path in incomplete.glob("*.whl")
+                      if parse_wheel_filename(path.name)[0] == "ruamel-yaml")
+    yaml_wheel.unlink()
     destination = tmp_path / "pm-runtime"
     monkeypatch.setattr("pm._uv._toolchain", lambda **kwargs: (isolated_builder, Path(sys.executable)))
     with pytest.raises(InstallError, match="pip exited"):
         from pm import stage_manager_runtime
         stage_manager_runtime(python=Path(sys.executable), destination=destination,
                               wheelhouse=incomplete, offline=True)
-    assert "ruamel-yaml-clib" in capfd.readouterr().err
+    assert "ruamel-yaml" in capfd.readouterr().err
     assert not destination.exists()

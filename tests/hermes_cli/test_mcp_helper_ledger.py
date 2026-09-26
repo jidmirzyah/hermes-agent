@@ -24,9 +24,7 @@ import pytest
 
 from hermes_cli import process_identity as pi
 
-pytestmark = pytest.mark.skipif(
-    sys.platform == "win32", reason="uses POSIX sleep children"
-)
+pytestmark = pytest.mark.platforms("posix")  # uses POSIX sleep children
 
 
 @pytest.fixture

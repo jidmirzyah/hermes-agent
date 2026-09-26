@@ -73,18 +73,33 @@ _CA_CONTEXTS: dict[str | None, ssl.SSLContext] = {}
 _CA_CONTEXTS_LOCK = threading.Lock()
 
 
+def _stdlib_ssl_context_class() -> type[ssl.SSLContext]:
+    """The un-injected stdlib ``ssl.SSLContext``.
+
+    An explicit bundle must REPLACE OS trust, and truststore's context falls
+    back to the OS verifier whenever the loaded bundle rejects a chain — so
+    the bundle context has to be built from the stdlib class. Once injected
+    (here, or by pm.launch/pm.worker before this module loads) the only
+    handle on it is truststore's own saved reference; when nothing is
+    injected — truststore absent or not installed — ``ssl.SSLContext`` is
+    already the stdlib class and truststore must not be imported at all.
+    """
+    if ssl.SSLContext.__module__ == "ssl":
+        return ssl.SSLContext
+    from truststore._ssl_constants import _original_SSLContext
+
+    return _original_SSLContext
+
+
 def _shared_context(ca_path: str | None) -> ssl.SSLContext:
     """A stable context identity lets clients reuse the existing transport pool."""
     with _CA_CONTEXTS_LOCK:
         ctx = _CA_CONTEXTS.get(ca_path)
         if ctx is None:
             if ca_path is not None:
-                from truststore._ssl_constants import _original_SSLContext
-
-                # An explicit bundle replaces OS trust, not augments it.
                 # PROTOCOL_TLS_CLIENT sets hostname checking and CERT_REQUIRED;
                 # assigning the original class's properties after injection recurses.
-                ctx = _original_SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+                ctx = _stdlib_ssl_context_class()(ssl.PROTOCOL_TLS_CLIENT)
                 ctx.load_verify_locations(cafile=ca_path)
             else:
                 ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)

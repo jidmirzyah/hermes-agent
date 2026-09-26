@@ -50,7 +50,7 @@ completion result cannot report success. Correlated PM failures remain in the
 update receipt, and interrupted restarts retain their fleet obligation.
 Dependency or build failures never retry through pip or a source re-download.
 Use `hermes pm repair` for damaged dependency files. See the developer
-[source completion ownership note](https://github.com/NousResearch/hermes-agent/blob/main/docs/source-update-completion.md).
+[source completion ownership note](../developer-guide/source-update-completion.md).
 
 ## Source installs and packaged builds
 
@@ -217,13 +217,14 @@ interpreter or redirect an installed desktop app to this checkout.
 
 Use an ordinary terminal outside the packaged Hermes app. Leave any existing
 Python virtual environment first. On Windows, use native PowerShell with Git.
-For ARM64, setup checks Visual Studio C++ tools, Clang, native Rust, and static
-OpenSSL development libraries before PM runs. It reuses existing installations
-and installs missing prerequisites. Missing Visual Studio components require
-an Administrator PowerShell. OpenSSL uses vcpkg's `arm64-windows-static-md`
-triplet. A damaged shared installation produces a repair error, not automatic
-deletion. Compiler and OpenSSL environment variables apply only to the setup
-process when you enter through `activate.ps1`.
+On ARM64, PM prepares Visual Studio C++ tools, Clang, native Rust, and static
+OpenSSL development libraries before every dependency build from a checkout:
+setup, `activate.ps1`, `install.ps1`, `hermes update`, and repair alike. It
+reuses existing installations and installs missing prerequisites. Missing
+Visual Studio components require an Administrator PowerShell. OpenSSL uses
+vcpkg's `arm64-windows-static-md` triplet. A damaged shared installation
+produces a repair error, not automatic deletion. Compiler and OpenSSL
+environment variables apply only to PM's dependency build, never to your shell.
 
 Other platforms still require the native compiler tools and libraries needed
 by dependencies without compatible wheels.
@@ -319,16 +320,24 @@ The leading dot and space in PowerShell are required. Executing
 The POSIX script uses Bash syntax. Use Bash for this recipe rather than `sh`,
 fish, or assuming that a Zsh startup file has Bash semantics.
 
-Each activation invokes PM's install/sync path. PM reuses current tools and
-dependency generations; missing or stale inputs can require downloads and a
-rebuild. A setup failure returns an error before changing the activated shell
+Each activation invokes PM's install/sync path and trusts the recorded tool
+digest instead of re-hashing every entry. PM still installs a missing tool and
+rebuilds a stale dependency generation; a deliberate install keeps the byte
+check. Run `python -m pm.cli install` or `hermes update` to re-check realized
+bytes. A setup failure returns an error before changing the activated shell
 environment, including when re-sourcing an already active environment.
 
 After sync, activation prepends installed PM tools to `PATH` and sets
-`PYTHONPATH` to this checkout and its selected dependency tree. It does not
-change an OS-wide PATH or activate a conventional venv prompt.
+`PYTHONPATH` to this checkout and its selected dependency tree. It also
+defines `hermes` as a shell function for this worktree. The function runs
+this checkout's CLI and hides the installed command, including an MSIX alias.
+It runs only while the shell is inside this worktree and refuses outside it,
+so a sibling worktree does not inherit the command. The prompt gains a prefix
+naming the branch, and drops it outside the tree. It does not
+change an OS-wide PATH or install a conventional venv prompt.
 Start in a clean shell rather than nesting this inside another venv.
-`deactivate` restores the environment values captured by the activation script.
+`deactivate` restores the environment values captured by the activation script,
+and removes the function and the prompt prefix.
 It does not uninstall packages or stop processes that you started.
 
 Verify the interpreter and source before doing work:
@@ -338,7 +347,7 @@ python -c "import sys, pm; print(sys.executable); print(pm.__file__)"
 python -c "import httpx; print(httpx.__file__)"
 node --version
 npm --version
-python hermes --version
+hermes --version
 ```
 
 `python` must resolve to the PM store interpreter. `pm.__file__` must point
@@ -348,13 +357,14 @@ attention, even if `source ./activate` itself returned successfully.
 
 ### Work on this source tree
 
-Use checkout-qualified commands so a global `hermes` command or MSIX alias
-cannot run a different installation:
+`hermes` is this worktree's CLI while the shell is inside it. Outside the
+worktree the function refuses, so it cannot run another checkout's tree or
+fall through to an installed command:
 
 ```bash
-python hermes setup
-python hermes
-python hermes --tui
+hermes setup
+hermes
+hermes --tui
 python -m pm.cli status
 ```
 
@@ -394,13 +404,14 @@ Managed tool names and Python extra names are different interfaces:
 
 ```bash
 python -m pm.cli install chromium
-python -c "from pm import sync_venv; sync_venv(['dev'], explicit=True)"
+python -c "from pm import sync_venv; sync_venv(['anthropic'], explicit=True)"
 ```
 
-The first command installs a tool. The second adds the declared `dev` extra
+The first command installs a tool. The second adds a declared runtime extra
 to this installation's existing Python selection. Extras accumulate through PM
-sync. `pm install dev` is not a supported command: `dev` is an extra, not a tool.
-After changing extras, reactivate before starting another Python process.
+sync. The `dev` and `test` dependency groups belong only to the separate test
+environment, not the selected application venv. After changing extras, reactivate
+before starting another Python process.
 
 For a new project dependency, edit `pyproject.toml` and regenerate `uv.lock`:
 
@@ -415,25 +426,27 @@ workspaces, and do not install packages directly into a selected generation.
 
 ### Test and editor environments
 
-PM's `dev` extra does not make a bare store Python suitable for the canonical
-test runner. The runner clears `PYTHONPATH` and needs an interpreter with pytest
-installed in its own environment. Use the contributor guide's
-[independent test environment](../developer-guide/contributing.md#manual-development-and-test-environment)
-with this command from the prepared checkout:
+`source ./activate` (or `. .\activate.ps1` in PowerShell) and both direct
+`setup-hermes` scripts prepare an isolated test interpreter from the locked
+`dev` and `test` dependency groups. `scripts/run_tests.sh` uses that interpreter,
+re-activating if the checkout or its dependency inputs changed. The application
+venv, installers, and bundles select neither group. The developer default
+covers `[all]`; to change test coverage, pass `--test-extras=anthropic` to POSIX
+activation or `-TestExtras anthropic` to PowerShell;
+those arguments select runtime extras *in the test interpreter only*.
+
+In an isolated environment where activation is unavailable (for example, a Nix
+dev shell), a caller can explicitly supply `HERMES_PYTHON` with pytest, or build
+an independent disposable environment:
 
 ```bash
-python -m pm.build_env --source . --out .venv --extra dev --group test
+python -m pm.build_env --source . --out .venv --group dev --group test
 ```
 
 The output must not exist. To regenerate it, stop its processes and intentionally
-remove only that disposable environment first. PM never deletes an existing
-output. Then run `scripts/run_tests.sh` (through Bash on Windows). The `test`
-dependency group includes native launcher tests and does not enter a packaged runtime.
-
-The runner checks repository `.venv`, repository `venv`, and the standard
-source-install venv before using `HERMES_PYTHON` as a fallback. Read its startup
-message to confirm which interpreter it selected. A worktree without a local
-venv can use the independent test interpreter through that variable.
+remove only that disposable environment first. Then run `scripts/run_tests.sh`
+(through Bash on Windows). The test dependency group includes native launcher
+tests and never enters a packaged runtime.
 
 For editor debugging, select that independent interpreter, set the working
 directory to this checkout, and launch `hermes` as the script. Keep its
@@ -485,7 +498,8 @@ hermes pm install chromium
 
 | Command | Effect |
 |---|---|
-| `pm install [names...]` | Install named packages. With no names, provision required tools plus Python and sync the `all` extra. |
+| `pm install [names...]` | Install named packages. With no names, provision required tools plus Python, put those tools on PATH, and then sync the `all` extra. |
+| `pm install --tools-only` | Install that tool closure and put it on PATH, then stop. The venv sync does not run. |
 | `pm env [names...]` | Print the composed environment of installed packages as JSON. It does not install missing packages. |
 | `pm doctor` | Check installed tool identities, files, and digests against the lock. |
 | `pm repair` | Rebuild the recorded Python dependency set in a new generation, validate it, then select it. Does not update pins, features, or plugin configuration. |

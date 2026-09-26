@@ -16,9 +16,9 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Request
 
-from hermes_cli import __version__
 from hermes_cli.config import format_docker_update_message, recommended_update_command_for_method
 from hermes_cli.update_contract import COMMIT_BUILD_UPDATE_MESSAGE, is_commit_build
+from hermes_cli.version_info import get_version_info
 from hermes_cli.web_deps import LateState, late
 from hermes_cli.web_server_gateway import _ACTION_LOG_FILES
 from hermes_cli.web_routers._common import http_failure
@@ -271,25 +271,27 @@ async def check_hermes_update(force: bool = False, profile: Optional[str] = None
     [{sha, summary, author, at}] (additive; existing consumers ignore it).
     """
     if is_commit_build(_server_path("PROJECT_ROOT")):
-        from hermes_cli.steward import read_install_stamp
-
-        stamp = read_install_stamp(_server_path("PROJECT_ROOT"))
         return {
-            "install_method": "desktop-app", "current_version": stamp.get("displayVersion") or __version__,
+            "install_method": "desktop-app",
+            "current_version": get_version_info().derived_version,
             "behind": None, "update_available": False, "can_apply": False,
             "update_command": "", "message": COMMIT_BUILD_UPDATE_MESSAGE,
         }
 
     if _dashboard_local_update_managed_externally():
         return {
-            "install_method": "managed-runtime", "current_version": __version__, "behind": None,
+            "install_method": "managed-runtime",
+            "current_version": get_version_info().derived_version,
+            "behind": None,
             "update_available": False, "can_apply": False,
             "update_command": "managed outside dashboard", "message": _MANAGED_EXTERNALLY_MESSAGE,
         }
 
     install_method = detect_install_method(_server_path("PROJECT_ROOT"))
     payload: Dict[str, Any] = {
-        "install_method": install_method, "current_version": __version__, "behind": None,
+        "install_method": install_method,
+        "current_version": get_version_info().derived_version,
+        "behind": None,
         "update_available": False, "can_apply": install_method == "git",
         "update_command": recommended_update_command_for_method(install_method), "message": None,
     }

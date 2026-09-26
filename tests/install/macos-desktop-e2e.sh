@@ -390,23 +390,19 @@ PYEOF
   ls -la "$INSTALL_DIR/venv" > "$ildest/venv-ls.txt" 2>/dev/null || true
   ok "collected install-side logs to $ildest"
 
-  # A pre-handoff release cannot complete inside `hermes update`: its update
-  # path reaches no retired-hook seam, so the update ends with the tree at HEAD
-  # and no published launcher. The NEXT ordinary startup completes it
-  # (hermes_bootstrap -> prepare_launch -> sync PM, publish launchers, re-exec).
-  # Drive that startup here, WITHOUT the lazy-install ban, and only when the
-  # launcher is missing -- so a healthy update is still judged by the strict
-  # check below, and `--version` probes keep their ban. A probe must never
-  # complete an unfinished update; a real startup is exactly how a user does it.
-  if ! source_hermes "$INSTALL_DIR" >/dev/null 2>&1; then
-    step "next ordinary startup after the update (completes a pre-handoff release)"
-    local startup_hermes startup_rc=0
-    startup_hermes="$(source_hermes_for_startup "$INSTALL_DIR")" \
-      || fail "no installed command to start after the update"
-    "$startup_hermes" status > "$LOG_DIR/post-update-startup.log" 2>&1 || startup_rc=$?
-    log_group "post-update startup" "$LOG_DIR/post-update-startup.log"
-    ok "first startup after the update ran (exit $startup_rc); the check below asserts the launcher it must have published"
-  fi
+  # The update may publish a launcher before its installed dependency inputs
+  # are current. The next non-metadata startup then owns source completion,
+  # including rebuilding the packaged desktop app. Launching that app directly
+  # first lets its backend replace the live bundle and kills Playwright's
+  # renderer target. Always drive the ordinary CLI startup before inspecting or
+  # launching the app; launcher presence alone does not prove completion.
+  step "next ordinary startup after the update (completes deferred source-update work)"
+  local startup_hermes startup_rc=0
+  startup_hermes="$(source_hermes_for_startup "$INSTALL_DIR")" \
+    || fail "no installed command to start after the update"
+  source_build_env "$startup_hermes" status > "$LOG_DIR/post-update-startup.log" 2>&1 || startup_rc=$?
+  log_group "post-update startup" "$LOG_DIR/post-update-startup.log"
+  ok "post-update startup ran (exit $startup_rc); the read-only checks below assert completion"
 
   local command
   command="$(source_hermes "$INSTALL_DIR")" || fail "no installed command after update"

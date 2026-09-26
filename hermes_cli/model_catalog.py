@@ -17,7 +17,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from hermes_cli import __version__ as _HERMES_VERSION
+from hermes_cli.version_info import get_version_info
 from utils import atomic_json_write
 
 logger = logging.getLogger(__name__)
@@ -35,7 +35,7 @@ DEFAULT_TTL_HOURS = DEFAULT_TTL_MINUTES / 60.0
 DEFAULT_FETCH_TIMEOUT = 8.0
 SUPPORTED_SCHEMA_VERSION = 1
 
-_HERMES_USER_AGENT = f"hermes-cli/{_HERMES_VERSION}"
+_HERMES_USER_AGENT = f"hermes-cli/{get_version_info().base_version}"
 
 # In-process cache, invalidated against the disk file's path + mtime and TTL. The path matters:
 # under a multiplexed gateway each profile has its own ``<home>/cache/model_catalog.json``, and

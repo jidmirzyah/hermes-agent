@@ -15,14 +15,17 @@
 
 set -e
 
-# Activation needs only provisioning, not user-facing installation side effects.
+# Setup and activation prepare the isolated test environment. Installers call
+# pm.cli directly and never select it.
 runtime_only=false
-case "${1:-}" in
-    --runtime-only) runtime_only=true ;;
-    '') ;;
-    *) printf 'Unknown setup option: %s\n' "$1" >&2; exit 2 ;;
-esac
-
+test_environment="--test-environment"
+for option in "$@"; do
+    case "$option" in
+        --runtime-only) runtime_only=true ;;
+        --test-environment|--test-environment=*) test_environment="$option" ;;
+        *) printf 'Unknown setup option: %s\n' "$option" >&2; exit 2 ;;
+    esac
+done
 # Colors
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
@@ -135,9 +138,16 @@ else
     *.zip) unzip -q "$archive" -d "$tmp/tree" ;;
     *) tar -xzf "$archive" -C "$tmp/tree" ;;
   esac
-  # flatten a single wrapping dir (uv tarballs ship uv-<triple>/uv)
-  inner="$(find "$tmp/tree" -mindepth 1 -maxdepth 1)"
-  if [ "$(printf '%s\n' "$inner" | wc -l)" = 1 ] && [ -d "$inner" ]; then
+  # flatten a single wrapping dir (uv tarballs ship uv-<triple>/uv).
+  # BSD find lacks GNU's -mindepth/-maxdepth flags, so enumerate children in
+  # the shell; the two dot globs include hidden entries without matching . or ..
+  inner= inner_count=0
+  for child in "$tmp/tree"/* "$tmp/tree"/.[!.]* "$tmp/tree"/..?*; do
+    [ -e "$child" ] || [ -L "$child" ] || continue
+    inner="$child"
+    inner_count=$((inner_count + 1))
+  done
+  if [ "$inner_count" = 1 ] && [ -d "$inner" ]; then
     mv "$inner" "$tmp/entry"
   else
     mv "$tmp/tree" "$tmp/entry"
@@ -154,10 +164,14 @@ fi
 echo -e "${CYAN}→${NC} Installing python + tools + dependencies via pm (hash-verified via uv.lock)..."
 echo -e "${CYAN}→${NC} (first run on a fresh checkout can take 1-5 minutes)"
 # PM can replace its uv entry only after the bootstrap uv has exited.
-"$uv" python install --no-bin "$py_version"
+"$uv" python install --no-bin --no-registry "$py_version"
 boot_py="$("$uv" python find --managed-python "$py_version")"
 boot_py="${boot_py%$'\r'}"
-if ! "$boot_py" -m pm.cli install; then
+# Activation trusts the recorded tool digest; a direct setup re-checks it
+# (setup-hermes.ps1 draws the same line).
+pm_args=("$test_environment")
+[ "$runtime_only" = true ] && pm_args+=(--trust-recorded)
+if ! "$boot_py" -m pm.cli install "${pm_args[@]}"; then
     echo -e "${RED}✗${NC} pm install failed — see output above."
     exit 1
 fi

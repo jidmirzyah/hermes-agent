@@ -173,7 +173,7 @@ def test_packaging_preserves_keychain_home_without_retargeting_build_state(tmp_p
 def test_prepare_tools_uses_pm_native_pins_and_separate_cache(tmp_path, monkeypatch):
     import pm
     from scripts.bundles import desktop_toolchain
-    from scripts.build import windows_deps
+    from pm import native_build
 
     source, work, cache = (tmp_path / name for name in ("source", "work", "cache"))
     env = desktop_toolchain.bootstrap_environment(source, work, cache, os.environ)
@@ -195,7 +195,7 @@ def test_prepare_tools_uses_pm_native_pins_and_separate_cache(tmp_path, monkeypa
     monkeypatch.setattr(pm, "ensure", ensure)
     monkeypatch.setattr(pm, "installed_package", lambda name: SimpleNamespace(binary=bins[name]))
     monkeypatch.setattr(pm, "env_for", lambda *names, base_env: {**base_env, "PATH": "pm-tools"})
-    monkeypatch.setattr(windows_deps, "prepare_windows_environment", native)
+    monkeypatch.setattr(native_build, "prepare_windows_environment", native)
     monkeypatch.setattr(desktop_toolchain, "native_cache_path", lambda cache, env: cache / "python/runtime/native-identity",
                         raising=False)
     before = dict(os.environ)

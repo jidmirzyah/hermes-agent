@@ -41,6 +41,7 @@ vi.mock('@/store/notifications', () => ({
 
 const { localModelsKey, localModelsOwner, watchLocalRuntimeJobs } = await import('./local-runtime-jobs')
 const { getLocalModelsJobs } = await import('@/hermes')
+const { $connection } = await import('@/store/session')
 const { notify, notifyError } = await import('@/store/notifications')
 
 function job(overrides: Partial<LocalRuntimeJob>): LocalRuntimeJob {
@@ -93,6 +94,31 @@ describe('local runtime jobs store — pause/settle contract', () => {
     await pollTick()
 
     expect(notifyError).toHaveBeenCalledTimes(1)
+    expect(notify).not.toHaveBeenCalled()
+  })
+
+  it('a settle landing after the primary connection moved is bookkept silently, not thrown', async () => {
+    const owner: LocalModelsOwner = localModelsOwner()
+    const key: QueryKey = localModelsKey(owner, 'jobs')
+    backend.jobs = [job({ done_bytes: 10 })]
+    await pollTick()
+
+    // The response was fetched for the old endpoint but its observer
+    // notification fires after the connection re-homed (TanStack notifies in
+    // a microtask). Published straight into the cache to hit exactly that
+    // window; the poll itself would already reject the stale scope.
+    ;($connection as { set: (value: unknown) => void }).set({ baseUrl: 'http://moved.example' })
+    queryClient.setQueryData(key, [job({ done_bytes: 100, status: 'done' })])
+    await settle(0)
+
+    expect(notify).not.toHaveBeenCalled()
+    expect(notifyError).not.toHaveBeenCalled()
+
+    // Bookkeeping kept going: the job is remembered as settled, so coming
+    // back to this endpoint does not re-announce it.
+    ;($connection as { set: (value: unknown) => void }).set(null)
+    queryClient.setQueryData(key, [job({ done_bytes: 100, status: 'done' })])
+    await settle(0)
     expect(notify).not.toHaveBeenCalled()
   })
 

@@ -23,9 +23,7 @@ import pytest
 
 from agent.shell_hooks import ShellHookSpec, _spawn
 
-pytestmark = pytest.mark.skipif(
-    sys.platform == "win32", reason="POSIX process-group semantics"
-)
+pytestmark = pytest.mark.platforms("posix")  # POSIX process-group semantics
 
 
 def _spec(command: str, timeout: int = 2) -> ShellHookSpec:

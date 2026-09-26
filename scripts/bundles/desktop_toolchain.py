@@ -100,7 +100,7 @@ def prepare_tools(source: Path, work: Path, cache: Path,
         raise ValueError("desktop tools require the isolated preparation worker")
     prepared = dict(env)
     if pm.current_target() == "win32-arm64":
-        from scripts.build.windows_deps import prepare_windows_environment
+        from pm.native_build import prepare_windows_environment
 
         prepared = prepare_windows_environment(source=source, state=cache / "native/prerequisites", env=prepared)
     if pm.current_target().startswith("darwin"):

@@ -193,7 +193,7 @@ class TestWinPtyBridgeUnavailable:
         proc.release_write.set()
         assert any("thread leaked" in r.getMessage() for r in caplog.records)
 
-    @pytest.mark.skipif(sys.platform.startswith("win"), reason="non-Windows only")
+    @pytest.mark.platforms("posix")  # non-Windows only
     def test_spawn_raises_unavailable_off_windows(self):
         with pytest.raises(PtyUnavailableError):
             WinPtyBridge.spawn(["true"])

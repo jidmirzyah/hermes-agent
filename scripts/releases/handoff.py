@@ -10,7 +10,7 @@ import tempfile
 from pathlib import Path, PurePosixPath
 
 from scripts.releases import r2
-from scripts.releases.semver import is_valid_version
+from scripts.releases.semver import is_release_version
 
 
 class MissingReceipt(ValueError):
@@ -18,7 +18,7 @@ class MissingReceipt(ValueError):
 
 
 def validate_identity(tag: str, commit: str, name: str) -> None:
-    if (not isinstance(tag, str) or not tag.startswith("v") or not is_valid_version(tag[1:])
+    if (not isinstance(tag, str) or not tag.startswith("v") or not is_release_version(tag[1:])
             or not re.fullmatch(r"[a-f0-9]{40}", commit or "")
             or not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", name or "")):
         raise ValueError("Invalid release handoff identity")

@@ -151,9 +151,7 @@ def test_record_paths_key_on_install_root(tmp_path, monkeypatch):
     assert a.name == b.name  # the profile filename is the shared part
 
 
-@pytest.mark.skipif(
-    os.name == "nt", reason="requires symlink privilege on Windows"
-)
+@pytest.mark.platforms("posix")  # requires symlink privilege on Windows
 def test_symlinked_root_canonicalizes(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
     real = tmp_path / "real-install"

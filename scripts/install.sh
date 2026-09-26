@@ -109,18 +109,40 @@ uv_bootstrap_target() {
     esac
 }
 
+# version_at_least HAVE WANT: dotted numeric comparison; a pre-release or
+# build suffix on a component is ignored ("0.12.3-rc1" reads as 0.12.3).
+version_at_least() {
+    local have="$1" want="$2" h w
+    while [ -n "$want" ]; do
+        h="${have%%.*}"; h="${h%%[!0-9]*}"
+        w="${want%%.*}"; w="${w%%[!0-9]*}"
+        [ "${h:-0}" -gt "${w:-0}" ] && return 0
+        [ "${h:-0}" -lt "${w:-0}" ] && return 1
+        case "$have" in *.*) have="${have#*.}" ;; *) have="" ;; esac
+        case "$want" in *.*) want="${want#*.}" ;; *) want="" ;; esac
+    done
+    return 0
+}
+
 # Provision uv for this host from the pinned pm/lock.json artifact. Stages
 # the EXACT artifact pm itself uses into the same store slot
-# (~/.hermes/tools/uv-<version>-<target>/), sha256-verified, so the byte
-# authority is pm/lock.json - no astral-latest, no curl|sh.
+# (<store>/uv-<version>-<target>/, the store pm's store_root() resolves),
+# sha256-verified, so the byte authority is pm/lock.json - no astral-latest,
+# no curl|sh.
 UV_CMD=""
 ensure_uv() {
     [ -n "$UV_CMD" ] && return 0
-    if command -v uv >/dev/null 2>&1; then
-        # Developer shortcut: an existing uv on PATH is fine to use; this
-        # branch fetches nothing.
-        UV_CMD="uv"
-        return 0
+    local _path_uv _path_version
+    if _path_uv="$(command -v uv 2>/dev/null)"; then
+        # Developer shortcut: a uv on PATH fetches nothing, but only one at
+        # least as new as the pin -- the bootstrap passes flags older uv
+        # lacks (`python install --no-bin` arrived in 0.7).
+        _path_version="$("$_path_uv" --version 2>/dev/null | awk '{print $2}')"
+        if [ -n "$_path_version" ] && version_at_least "$_path_version" "$UV_PIN_VERSION"; then
+            UV_CMD="$_path_uv"
+            return 0
+        fi
+        log "uv on PATH (${_path_version:-does not run}) is older than the pinned $UV_PIN_VERSION; staging the pin"
     fi
     local _target
     if ! _target="$(uv_bootstrap_target)"; then
@@ -129,7 +151,7 @@ ensure_uv() {
     if ! uv_bootstrap_pin "$_target"; then
         fail "no pinned uv artifact for $_target; install uv manually: https://docs.astral.sh/uv/"
     fi
-    local _store="${HERMES_RUNTIME_DIR:-$HOME/.hermes/tools}"
+    local _store="${HERMES_RUNTIME_DIR:-$HERMES_HOME/tools}"
     local _entry="$_store/uv-$UV_PIN_VERSION-$_target"
     UV_CMD="$_entry/uv"
     if [ ! -x "$UV_CMD" ]; then
@@ -190,6 +212,12 @@ ensure_uv() {
 }
 
 check_platform() {
+    # Termux is Linux by uname, but this installer builds a glibc source
+    # install the phone cannot run (no Android wheels in the lock). The
+    # signed APT package is the only supported shape there.
+    if [ -n "${TERMUX_VERSION:-}" ] || case "${PREFIX:-}" in *com.termux/files/usr*) true ;; *) false ;; esac; then
+        fail "Termux is installed from its APT repository, not install.sh: pkg install hermes-agent (setup: https://hermes-agent.nousresearch.com/docs/getting-started/termux)"
+    fi
     case "$(uname -s 2>/dev/null)" in
         Linux*) : ;;
         Darwin*) : ;;
@@ -285,25 +313,51 @@ stage_prerequisites() {
 }
 
 stage_repository() {
+    # An interrupted clone from an older installer can leave a .git with no
+    # initial commit, where stash/checkout abort ("You do not have the
+    # initial commit yet", #40998). Move it aside -- never delete it, it may
+    # hold something the user wants -- and clone fresh below.
+    if [ -d "$INSTALL_DIR/.git" ] && ! git -C "$INSTALL_DIR" rev-parse --verify HEAD >/dev/null 2>&1; then
+        local broken
+        broken="${INSTALL_DIR}.broken-$(date -u +%Y%m%d-%H%M%S)"
+        log "$INSTALL_DIR has no commits (interrupted clone); moving it aside to $broken"
+        mv "$INSTALL_DIR" "$broken" || fail "cannot move $INSTALL_DIR aside"
+    fi
     if [ -d "$INSTALL_DIR/.git" ]; then
         log "updating $INSTALL_DIR"
+        # An explicit HERMES_REPO_URL names the source for reruns too, not
+        # just the first clone.
+        if [ -n "${HERMES_REPO_URL:-}" ]; then
+            git -C "$INSTALL_DIR" remote set-url origin "$REPO_URL" || fail "cannot point origin at $REPO_URL"
+        fi
         git -C "$INSTALL_DIR" fetch origin "$BRANCH" || fail "git fetch failed"
+        local stamp prior rescue
+        stamp="$(date -u +%Y%m%d-%H%M%S)"
+        # Park local work BEFORE switching branches: checkout refuses a dirty
+        # tree that conflicts, and the reset below would discard it. Work
+        # that cannot be parked stops the install -- never overwrite it.
+        if [ -n "$(git -C "$INSTALL_DIR" status --porcelain)" ]; then
+            # An interrupted update can leave unmerged index entries, where
+            # stash aborts ("could not write index"). Dropping only the
+            # index-level conflict state keeps the working-tree changes for
+            # the stash below (#4735).
+            if [ -n "$(git -C "$INSTALL_DIR" ls-files --unmerged)" ]; then
+                log "clearing unmerged index entries from a previous conflict"
+                git -C "$INSTALL_DIR" reset -q || fail "cannot clear the unmerged index in $INSTALL_DIR"
+            fi
+            git -C "$INSTALL_DIR" stash push --include-untracked -m "hermes-install-autostash-$stamp" \
+                || fail "could not stash local changes in $INSTALL_DIR; commit or move them aside, then rerun"
+            log "local changes stashed as hermes-install-autostash-$stamp"
+        fi
         git -C "$INSTALL_DIR" checkout "$BRANCH" || fail "git checkout failed"
         if ! git -C "$INSTALL_DIR" merge --ff-only "origin/$BRANCH"; then
             # A release cut off the main line, a force-pushed remote, or the
             # user's own commits cannot fast-forward. Every stage below reads
             # files only the new tree has (pm/), so an install left on the old
             # tree cannot finish -- match the remote the way `hermes update`
-            # does, after parking the old tip and any local work.
-            local stamp prior rescue
-            stamp="$(date -u +%Y%m%d-%H%M%S)"
+            # does, after parking the old tip.
             prior="$(git -C "$INSTALL_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
             rescue="refs/hermes-install-backup/$stamp-$prior"
-            if [ -n "$(git -C "$INSTALL_DIR" status --porcelain)" ]; then
-                git -C "$INSTALL_DIR" stash push --include-untracked -m "hermes-install-autostash-$stamp" \
-                    && log "local changes stashed as hermes-install-autostash-$stamp" \
-                    || log "could not stash local changes; they are overwritten below"
-            fi
             git -C "$INSTALL_DIR" update-ref "$rescue" HEAD 2>/dev/null \
                 && log "previous HEAD backed up to $rescue" \
                 || log "could not back up the previous HEAD"
@@ -311,6 +365,16 @@ stage_repository() {
             log "not fast-forwardable; reset to origin/$BRANCH"
         fi
     else
+        # `mv <clone> <existing dir>` nests the checkout INSIDE it as
+        # <dir>/tree, so a pre-existing destination must be empty (we take
+        # the empty dir over) or we refuse: whatever lives there is not ours.
+        if [ -e "$INSTALL_DIR" ] || [ -L "$INSTALL_DIR" ]; then
+            if [ -d "$INSTALL_DIR" ] && [ ! -L "$INSTALL_DIR" ] && [ -z "$(ls -A "$INSTALL_DIR")" ]; then
+                rmdir "$INSTALL_DIR" || fail "cannot replace empty $INSTALL_DIR"
+            else
+                fail "$INSTALL_DIR exists and is not a Hermes git checkout. Move it aside, or install elsewhere with --dir <path>."
+            fi
+        fi
         log "cloning $REPO_URL ($BRANCH) into $INSTALL_DIR"
         mkdir -p "$(dirname "$INSTALL_DIR")"
         local staged attempt cloned=false
@@ -324,8 +388,11 @@ stage_repository() {
             [ "$attempt" = 3 ] || sleep "$((attempt * 5))"
         done
         if [ "$cloned" = false ]; then
+            # Full history, blobs on demand: --commit, tags and later branch
+            # switches all still resolve (a shallow single-branch clone
+            # could not check out anything but the tip).
             log "direct clone failed; trying deferred blob download"
-            if git clone --depth 1 --single-branch --filter=blob:none --no-checkout \
+            if git clone --filter=blob:none --no-checkout \
                 --branch "$BRANCH" "$REPO_URL" "$staged/tree"; then
                 for attempt in 1 2; do
                     if git -C "$staged/tree" reset --hard HEAD; then
@@ -347,6 +414,11 @@ stage_repository() {
         rmdir "$staged"
     fi
     if [ -n "$INSTALL_COMMIT" ]; then
+        # A pin must come from the branch being installed: the complete
+        # marker records both, and a commit off that branch would make the
+        # next plain rerun "update" onto a different line.
+        git -C "$INSTALL_DIR" merge-base --is-ancestor "$INSTALL_COMMIT" "origin/$BRANCH" 2>/dev/null \
+            || fail "commit $INSTALL_COMMIT is not on branch $BRANCH"
         git -C "$INSTALL_DIR" checkout "$INSTALL_COMMIT" || fail "could not pin commit $INSTALL_COMMIT"
     fi
 }
@@ -377,7 +449,7 @@ bootstrap_python() {
     # This interpreter only boots PM; PM still owns the exact runtime pin.
     if ! boot_py="$(UV_SYSTEM_PYTHON=1 UV_NO_PROJECT=1 "$UV_CMD" python find --managed-python "$_py" 2>/dev/null)" \
         && ! boot_py="$("$UV_CMD" python find --system --no-project "$_py" 2>/dev/null)"; then
-        "$UV_CMD" python install --no-bin "$_py" || fail "bootstrap Python installation failed"
+        "$UV_CMD" python install --no-bin --no-registry "$_py" || fail "bootstrap Python installation failed"
         boot_py="$(UV_SYSTEM_PYTHON=1 UV_NO_PROJECT=1 "$UV_CMD" python find --managed-python "$_py")" || fail "bootstrap Python lookup failed"
     fi
     boot_py="${boot_py%$'\r'}"
@@ -448,14 +520,27 @@ stage_config() {
     log "config prepared in $HERMES_HOME"
 }
 
+# Interactive stages read the terminal, not stdin: under `curl | bash` stdin
+# IS the script. Probe by opening /dev/tty -- a Docker build has the device
+# node in its mount namespace but opening it fails (ENXIO).
+has_terminal() { (: </dev/tty) 2>/dev/null; }
+
 stage_setup() {
     if [ "$NON_INTERACTIVE" = true ]; then return 0; fi
-    "$INSTALL_DIR/.hermes/bin/hermes" setup || fail "setup failed"
+    if ! has_terminal; then
+        log "setup skipped (no terminal); run 'hermes setup' after install"
+        return 0
+    fi
+    "$INSTALL_DIR/.hermes/bin/hermes" setup </dev/tty || fail "setup failed"
 }
 
 stage_gateway() {
     if [ "$NON_INTERACTIVE" = true ]; then return 0; fi
-    "$INSTALL_DIR/.hermes/bin/hermes" gateway install || fail "gateway installation failed"
+    if ! has_terminal; then
+        log "gateway setup skipped (no terminal); run 'hermes gateway install' after install"
+        return 0
+    fi
+    "$INSTALL_DIR/.hermes/bin/hermes" gateway install </dev/tty || fail "gateway installation failed"
 }
 
 stage_complete() {
@@ -499,8 +584,9 @@ run_stage() (
 
 # Main. Guarded so the script can be SOURCED for its functions (the
 # installer-test harness sources it with --manifest, which must define
-# the functions and stop before main).
-if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+# the functions and stop before main). Under `curl | bash` BASH_SOURCE is
+# empty, and `set -u` would abort on the bare expansion.
+if [ "${BASH_SOURCE[0]:-$0}" = "$0" ]; then
     if [ "$WANT_MANIFEST" = true ]; then
         emit_manifest
         exit 0

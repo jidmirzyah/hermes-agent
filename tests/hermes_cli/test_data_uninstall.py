@@ -137,3 +137,22 @@ def test_data_only_preserves_the_containing_bundled_application(layout, monkeypa
     assert shell.read_bytes() == b"retained app bytes"
     assert manifest.is_file()
     assert all(not path.exists() for path in data)
+
+
+def test_data_only_works_from_a_self_contained_runtime_without_an_app(layout, monkeypatch):
+    """A Termux-shaped runtime (sealed, APT-owned, no Electron app around it)
+    must plan a data-only removal instead of hunting for a desktop app."""
+    import json
+
+    home, _, data = layout
+    package = home.parent / "usr" / "lib" / "hermes-agent"
+    project = package / "app"
+    (project / "hermes_cli").mkdir(parents=True)
+    (project / "hermes_cli" / "__init__.py").write_text("", encoding="utf-8")
+    (project / "install-stamp.json").write_text(json.dumps(
+        {"payload": "runtime", "distribution": "apt-termux", "updateMechanism": "external"}), encoding="utf-8")
+    (package / "venv").mkdir()
+    monkeypatch.setattr(uninstall, "get_project_root", lambda: project)
+    uninstall.run_data_uninstall(SimpleNamespace(yes=True))
+    assert all(not path.exists() for path in data)
+    assert (project / "install-stamp.json").is_file() and (package / "venv").is_dir()

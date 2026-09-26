@@ -1,7 +1,6 @@
-// msix-shared — the 4-part MSIX version derivation (minutes-since-stable
-// for canaries). The git-backed lookup is deterministic here because
-// node:child_process.execFileSync is mocked; the math it feeds is the
-// contract App Installer compares.
+// msix-shared — native package versions come from the immutable build time.
+// Stable keeps the Store quad; canary uses yy.mmdd.hh.mmss. The git-backed
+// lookup is deterministic here because node:child_process.execFileSync is mocked.
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -28,23 +27,19 @@ function makeFakeDesktop(version) {
   return dir
 }
 
-function gitMock(tags, stableEpoch) {
-  execFileSync.mockImplementation((cmd, args) => {
-    if (args[0] === 'tag') return `${tags.join('\n')}\n`
-    if (args[0] === 'log') return `${stableEpoch}\n`
-    throw new Error(`unexpected git call ${cmd} ${args.join(' ')}`)
-  })
-}
-
 beforeEach(() => {
   execFileSync.mockReset()
 })
 
 test('explicit stable tag owns the package version, independent of checkout metadata', () => {
   const desktop = makeFakeDesktop('0.1.0')
+  execFileSync.mockImplementation((cmd, args) => {
+    if (args[0] === 'for-each-ref') return `${Math.floor(Date.UTC(2026, 7, 29, 1, 2, 3) / 1000)}\n`
+    throw new Error(`unexpected git call ${cmd} ${args.join(' ')}`)
+  })
   try {
     const { version, fileVersion } = msix.appIdentity(desktop, 'v0.27.1')
-    assert.equal(version, '0.27.1.0')
+    assert.equal(version, '2026.5761.123.0')
     assert.equal(fileVersion, '0.27.1')
     assert.equal(msix.appIdentity(desktop, '').version, '0.1.0.0')
     assert.throws(() => msix.appIdentity(desktop, 'v0.27.1-invalid'), /release tag/)
@@ -53,39 +48,20 @@ test('explicit stable tag owns the package version, independent of checkout meta
   }
 })
 
-test('canary version is tag base + minutes since the same-minor stable', () => {
+test('stable and canary use their own native build-time quads', () => {
   const desktop = makeFakeDesktop('0.27.1')
-  // Stable v0.27.1 committed 2026-08-01T00:00:00Z; canary cut 2026-08-29T01:02:03Z.
-  const stableEpoch = Math.floor(Date.UTC(2026, 7, 1) / 1000)
-  gitMock(['v0.27.1', 'v0.27.2-canary.20260829010203'], stableEpoch)
-  const { version, fileVersion } = msix.appIdentity(desktop, 'v0.27.2-canary.20260829010203')
-  const expectedMinutes = Math.floor((Date.UTC(2026, 7, 29, 1, 2, 3) - Date.UTC(2026, 7, 1)) / 60000)
-  assert.equal(version, `0.27.2.${expectedMinutes}`)
-  // The artifact FILENAME carries the full canary string (appInfo.version),
-  // not the 4-part feed version.
-  assert.equal(fileVersion, '0.27.2-canary.20260829010203')
-})
-
-test('canaryBuildMinutesFor is pure minutes math', () => {
-  const base = Date.UTC(2026, 7, 1) / 1000
-  const minutes = msix.canaryBuildMinutesFor('v0.27.2-canary.20260829010203', base)
-  assert.equal(minutes, Math.floor((Date.UTC(2026, 7, 29, 1, 2, 3) - Date.UTC(2026, 7, 1)) / 60000))
-})
-
-test('canaryBuildMinutesFor returns null for a stable tag', () => {
-  assert.equal(msix.canaryBuildMinutesFor('v0.27.1', 0), null)
-})
-
-test('canaryBuildMinutesFor rejects a stable base older than 45 days', () => {
-  const base = Date.UTC(2026, 5, 1) / 1000 // 2026-06-01
-  assert.throws(
-    () => msix.canaryBuildMinutesFor('v0.27.2-canary.20260829010203', base),
-    /45 days|16-bit/i
-  )
-})
-
-test('legacy 8-digit canary stamp still computes minutes (midnight of that day)', () => {
-  const base = Date.UTC(2026, 7, 1) / 1000
-  const minutes = msix.canaryBuildMinutesFor('v0.27.2-canary.20260801', base)
-  assert.equal(minutes, 0)
+  const epoch = Math.floor(Date.UTC(2026, 7, 29, 1, 2, 3) / 1000)
+  execFileSync.mockImplementation((cmd, args) => {
+    if (args[0] === 'for-each-ref') return `${epoch}\n`
+    throw new Error(`unexpected git call ${cmd} ${args.join(' ')}`)
+  })
+  try {
+    const stable = msix.appIdentity(desktop, 'v0.27.1')
+    const canary = msix.appIdentity(desktop, 'v0.27.1+canary.20260829T010203Z')
+    assert.equal(stable.version, '2026.5761.123.0')
+    assert.equal(canary.version, '26.829.1.203')
+    assert.equal(canary.fileVersion, '0.27.1+canary.20260829T010203Z')
+  } finally {
+    fs.rmSync(desktop, { recursive: true, force: true })
+  }
 })

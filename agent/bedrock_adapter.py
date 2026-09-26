@@ -5,6 +5,7 @@ control-plane model discovery. OpenAI-format messages/tools are converted to Con
 and responses normalized back to OpenAI-shaped objects.
 """
 
+from pm import install_hint
 import base64
 import importlib
 import json
@@ -97,7 +98,7 @@ def _require_boto3():
     except ImportError:
         raise ImportError(
             "The 'boto3' package is required for the AWS Bedrock provider. "
-            "Run: python -c \"from pm import sync_venv; sync_venv(['bedrock'], explicit=True)\""
+            f"Run: {install_hint('bedrock')}"
         )
     try:
         version = tuple(int(x) for x in boto3.__version__.split(".")[:3])

@@ -19,6 +19,7 @@ import plugins.memory.hindsight.embedded_runtime as rt
 def side_root(tmp_path, monkeypatch):
     root = tmp_path / "hermes-home" / "profiles" / "Hindsight" / "env"
     monkeypatch.setattr(rt, "sideenv_root", lambda: root)
+    monkeypatch.setattr(rt, "_probe_verdicts", {})
     return root
 
 
@@ -121,8 +122,58 @@ def test_side_interpreter_probe_and_bridge(side_python, side_root, monkeypatch, 
     assert not {"hindsight_embed", "hindsight_api", "sentence_transformers"}.intersection(sys.modules)
     assert "daemon ready" in caplog.text and "starting side-env daemon manager" in caplog.text
     (site / "sentence_transformers.py").write_text("raise RuntimeError('NumPy SIMD unavailable')", encoding="utf-8")
+    rt._probe_verdicts.clear()  # same interpreter path mutated in place; a real reinstall is a new generation
     ok, reason = rt.check_local_runtime()
     assert not ok and "NumPy SIMD unavailable" in reason
+
+
+def test_probe_verdict_is_reused_within_the_process_until_the_interpreter_changes(side_root, monkeypatch):
+    """is_available()/unavailable_reason()/initialize() each ask per session; the probe is a
+    torch cold start. One spawn per interpreter path, re-probed when PM publishes a new one."""
+    from pm.environments import venv_python
+
+    interpreters = [venv_python(side_root / "gen-1"), venv_python(side_root / "gen-2")]
+    monkeypatch.setattr(rt, "sideenv_python", lambda root=None: interpreters[0])
+    spawned = []
+
+    def run(argv, *a, **k):
+        spawned.append(argv[0])
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(rt, "subprocess", SimpleNamespace(run=run, TimeoutExpired=subprocess.TimeoutExpired))
+    for _ in range(3):
+        assert rt.check_local_runtime() == (True, None)
+    assert spawned == [str(interpreters[0])]
+    interpreters.reverse()
+    assert rt.check_local_runtime() == (True, None)
+    assert spawned == [str(interpreters[1]), str(interpreters[0])]
+
+
+def test_daemon_env_is_the_served_profiles_not_the_launch_environ(tmp_path, monkeypatch):
+    """Under multiplex os.environ is the LAUNCH profile's. A daemon started for a routed profile
+    must see that profile's HERMES_HOME and none of the launch profile's credentials."""
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    launch = tmp_path / "launch"
+    routed = launch / "profiles" / "beta"
+    routed.mkdir(parents=True)
+    (launch / ".env").write_text("OPENAI_API_KEY=sk-launch\nHINDSIGHT_API_KEY=hs-launch\n", encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(launch))
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-launch")
+    monkeypatch.setenv("HINDSIGHT_API_KEY", "hs-launch")
+    monkeypatch.setenv("VIRTUAL_ENV", "/invalid/main-environment")
+
+    token = set_hermes_home_override(routed)
+    try:
+        env = rt._daemon_subprocess_env({"port_health_grace_timeout": 30})
+    finally:
+        reset_hermes_home_override(token)
+
+    assert Path(env["HERMES_HOME"]) == routed
+    assert "OPENAI_API_KEY" not in env and "HINDSIGHT_API_KEY" not in env
+    assert "VIRTUAL_ENV" not in env
+    assert env["HINDSIGHT_EMBED_PORT_HEALTH_GRACE_TIMEOUT"] == "30.0"
+    assert env["HINDSIGHT_EMBED_API_VERSION"] == rt._API_SLIM_VERSION
 
 
 @pytest.mark.parametrize("outcome,message", [

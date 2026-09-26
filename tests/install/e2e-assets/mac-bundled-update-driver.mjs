@@ -55,12 +55,19 @@ fs.mkdirSync(values.shots, { recursive: true });
 fs.mkdirSync(values['chat-out'], { recursive: true });
 
 log(`launching ${appBin}`);
+// Preserve the exact environment for post-launch identity assertions. The
+// driver process itself may name a different userData path.
+const launchEnv = updateWindowEnvironment(
+  process.env,
+  path.resolve(path.dirname(appBin), '..', 'Resources', 'agent-payload'),
+  'bundled',
+);
 const app = await _electron.launch({
   executablePath: appBin,
   cwd: path.dirname(appBin),
   // Inherit the driver env: HERMES_HOME / HOME / updates feed config must
   // reach the main process exactly as a user's double-click would.
-  env: updateWindowEnvironment(process.env, path.resolve(path.dirname(appBin), '..', 'Resources', 'agent-payload'), 'bundled'),
+  env: launchEnv,
   timeout: 120_000,
 });
 const child = app.process();
@@ -78,6 +85,7 @@ await runUpdateWindowChat(app, page, {
   expectCommit: values['old-sha'],
   origin: 'bundled', executable: appBin,
   root: path.resolve(path.dirname(appBin), '..', 'Resources', 'agent-payload'),
+  userData: launchEnv.HERMES_DESKTOP_USER_DATA_DIR,
 });
 await shot(page, '01-app-booted');
 

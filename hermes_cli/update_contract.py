@@ -91,6 +91,17 @@ def evaluate_update_admission(project_root: Path) -> Optional[UpdateRefusal]:
         )
 
         steward = sealed_steward(project_root)
+        if steward is None:
+            from hermes_constants import is_termux
+
+            if is_termux():
+                from hermes_cli.steward import SOURCE_ON_TERMUX_UPDATE_COMMAND, SOURCE_ON_TERMUX_UPDATE_MESSAGE
+
+                return UpdateRefusal(
+                    code=STEWARD_APT_TERMUX,
+                    message=SOURCE_ON_TERMUX_UPDATE_MESSAGE,
+                    update_command=SOURCE_ON_TERMUX_UPDATE_COMMAND,
+                )
         if steward is not None and steward != "unknown":
             from hermes_cli.config import recommended_update_command_for_method
 

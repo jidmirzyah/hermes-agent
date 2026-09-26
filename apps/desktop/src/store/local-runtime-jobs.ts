@@ -62,8 +62,14 @@ export function localModelsKey(owner: LocalModelsOwner, resource?: string): Quer
   ]
 }
 
+// A legacy (unpinned) owner is fenced by the endpoint it was minted for;
+// once the primary connection moves, its requests and toasts must stop.
+export function isLocalModelsOwnerLive(owner: LocalModelsOwner): boolean {
+  return Boolean(owner.connectionId) || owner.legacyBaseUrl === ($connection.get()?.baseUrl ?? '')
+}
+
 export function localModelsRequestScope(owner: LocalModelsOwner): LocalModelsScope {
-  if (!owner.connectionId && owner.legacyBaseUrl !== ($connection.get()?.baseUrl ?? '')) {
+  if (!isLocalModelsOwnerLive(owner)) {
     throw new Error('Local models connection changed')
   }
 
@@ -194,7 +200,7 @@ export function localModelsJobsOptions(owner: LocalModelsOwner): UseQueryOptions
       return [...jobs].sort((a: LocalRuntimeJob, b: LocalRuntimeJob): number => a.job_id.localeCompare(b.job_id))
     },
     refetchInterval: (query: Query<readonly LocalRuntimeJob[]>): number | false => {
-      if (!owner.connectionId && owner.legacyBaseUrl !== ($connection.get()?.baseUrl ?? '')) {
+      if (!isLocalModelsOwnerLive(owner)) {
         return false
       }
 
@@ -298,6 +304,9 @@ export function watchLocalRuntimeJobs(
     )
 
     let changed: boolean = [...downloading].some((jobId: string): boolean => !nextDownloads.has(jobId))
+    // A stale legacy owner still settles its bookkeeping; it just has no
+    // toast to show — a throw here would abort the whole listener instead.
+    const live: boolean = isLocalModelsOwnerLive(owner)
 
     for (const job of jobs) {
       if (isActive(job.status) || !active.has(job.job_id) || settledNotified.has(job.job_id)) {
@@ -306,7 +315,10 @@ export function watchLocalRuntimeJobs(
 
       settledNotified.add(job.job_id)
       changed = true
-      notifySettled(owner, job)
+
+      if (live) {
+        notifySettled(owner, job)
+      }
     }
 
     active = new Set(

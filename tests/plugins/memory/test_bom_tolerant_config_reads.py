@@ -2,7 +2,7 @@
 
 Notepad and PowerShell ``>`` prepend U+FEFF when saving; ``json.loads`` rejects it
 ("Unexpected UTF-8 BOM") and every loader below degrades to defaults, so a user who
-edited mem0.json / honcho.json / supermemory.json lost the
+edited mem0.json / honcho.json / hindsight config.json / supermemory.json lost the
 whole config with no error (Qwen CLI creds raised ``qwen_auth_read_failed``). Same
 class as the auth-store/.env sweep; these were the missed sibling readers.
 """
@@ -20,13 +20,19 @@ def _write_bom_json(path: Path, payload: dict) -> Path:
 
 
 def _via_shared_reader(p: Path, monkeypatch) -> dict:
-    from utils import read_json_or_empty  # mem0 / honcho CLI all read through this
+    from utils import read_json_or_empty  # mem0 / hindsight / honcho CLI all read through this
     return read_json_or_empty(p)
 
 
 def _via_supermemory(p: Path, monkeypatch) -> dict:
     from plugins.memory.supermemory import _load_supermemory_config
     return _load_supermemory_config(str(p.parent))
+
+
+def _via_hindsight_config(p: Path, monkeypatch) -> dict:
+    import plugins.memory.hindsight as hs
+    monkeypatch.setattr(hs, "get_hermes_home", lambda: p.parent.parent)  # <home>/hindsight/config.json
+    return hs._load_config()
 
 
 def _via_honcho_client(p: Path, monkeypatch) -> dict:
@@ -39,6 +45,7 @@ def _via_honcho_client(p: Path, monkeypatch) -> dict:
     ("mem0.json", _via_shared_reader),
     ("supermemory.json", _via_supermemory),
     ("honcho.json", _via_honcho_client),
+    ("hindsight/config.json", _via_hindsight_config),
 ])
 def test_plugin_config_json_tolerates_bom(tmp_path, monkeypatch, filename, loader):
     target = tmp_path / filename

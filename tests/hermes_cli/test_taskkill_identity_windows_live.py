@@ -19,9 +19,7 @@ import time
 
 import pytest
 
-pytestmark = pytest.mark.skipif(
-    sys.platform != "win32", reason="live taskkill-identity probes are Windows-only"
-)
+pytestmark = pytest.mark.platforms("windows")  # live taskkill-identity probes are Windows-only
 
 
 def _spawn_sleeper(seconds: int = 60) -> subprocess.Popen:

@@ -8,6 +8,7 @@ const { client } = vi.hoisted(() => ({
     channel: '',
     allowPrerelease: true,
     allowDowngrade: true,
+    currentVersion: { version: '9.9.9' },
     on: vi.fn(),
     setFeedURL: vi.fn(),
     checkForUpdates: vi.fn(async () => null)
@@ -27,9 +28,14 @@ vi.mock('electron-updater', () => ({
 
 import { createMacStrategy } from './mac-client'
 
-afterEach(() => vi.clearAllMocks())
+afterEach((): void => {
+  vi.clearAllMocks()
+  client.currentVersion = { version: '9.9.9' }
+})
 
-function deps(feedBaseUrl = '', light = false, channel: 'stable' | 'canary' = 'stable') {
+function deps(
+  feedBaseUrl = '', light = false, channel: 'stable' | 'canary' = 'stable'
+): Parameters<typeof createMacStrategy>[0] {
   return {
     channel,
     light,
@@ -67,6 +73,7 @@ describe('macOS client wiring', () => {
       channel: 'latest'
     })
     expect(client.allowDowngrade).toBe(false)
+    expect(client.currentVersion.version).toBe('0.0.0')
     expect(client.autoDownload).toBe(false)
     expect((): void => {
       createMacStrategy({
@@ -74,6 +81,26 @@ describe('macOS client wiring', () => {
         feed: { url: 'https://other.example/latest-mac.yml', channel: 'latest' }
       })
     }).toThrow('authority')
+  })
+
+  it('checks a newer channel head when SemVer build metadata has equal precedence', async (): Promise<void> => {
+    const version = '0.21.4+canary.20260922T001500Z'
+    client.checkForUpdates.mockImplementationOnce(async () => {
+      expect(client.currentVersion.version).toBe('0.0.0')
+      const info = { version, files: [], releaseDate: '', path: '', sha512: '' }
+      return { isUpdateAvailable: true, updateInfo: info, versionInfo: info }
+    })
+    const strategy = createMacStrategy({
+      ...deps('https://updates.example', false, 'canary'),
+      appVersion: '0.21.4+canary.20260922T001400Z',
+      expectedVersion: version,
+      feed: {
+        url: 'https://updates.example/releases/channel-builds/abc/darwin/latest-mac.yml',
+        channel: 'latest'
+      }
+    })
+
+    await expect(strategy.check()).resolves.toMatchObject({ updateAvailable: true, latestTag: `v${version}` })
   })
 
   it('overrides the provider with the same variant/channel path as the publisher', () => {

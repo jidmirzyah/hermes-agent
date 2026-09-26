@@ -21,6 +21,10 @@ from hermes_cli.config import get_hermes_home  # noqa: F401  (re-exported; patch
 from hermes_cli import update_handoff as _update_handoff
 from hermes_cli.update_cmd_common import _best_effort
 from hermes_cli._old_updater import stop_for_relaunch
+from hermes_cli.update_completion import run_completion
+from hermes_cli.update_channel import adopt_retired_channel
+from pm.receipt import accept_worker_receipt as _accept_completion_pm_receipt
+from hermes_cli import update_receipt as _completion_receipt, update_cmd_config as _completion_config
 from hermes_constants import project_venv_dir, venv_python_path
 
 # Re-exports: every split-module name stays reachable (and monkeypatchable) as update_cmd.<name>.
@@ -45,7 +49,7 @@ from hermes_cli.update_cmd_fleet import (  # noqa: F401
     _FLEET_RESTART_PENDING_NAME, _FRESH_RESTART_SUPERVISORS, _GatewayRestartOutcome,
     _clear_fleet_restart_pending_marker,
     _current_checkout_sha, _drain_or_signal_gateway_for_update, _fleet_probe_expected_runtimes,
-    _fleet_restart_pending_marker_path, _for_each_systemd_gateway_unit,
+    _fleet_restart_pending_marker_path, _fleet_restart_skip_reason, _for_each_systemd_gateway_unit,
     _gateway_recovery_partition, _gateway_service_matches_profile, _pending_fleet_restart_needed,
     _receipt_looks_unfinished, _receipt_reports_stale_runtime, _resolve_manage_cmd,
     _restart_gateway_fleet_after_update, _restart_launchd_gateway_after_update,
@@ -559,6 +563,78 @@ def _write_marker_file(path: Path, *, label: str) -> None:
         logger.debug("Could not write %s marker: %s", label, exc)
 
 
+def _base_git_cmd() -> list[str]:
+    """``git`` argv; Windows adds ``-c windows.appendAtomically=false`` (git can fail "unable to
+    write loose object file: Invalid argument" on non-atomic appends)."""
+    if sys.platform == "win32":
+        return ["git", "-c", "windows.appendAtomically=false"]
+    return ["git"]
+
+
+def _is_shallow_checkout(git_cmd) -> bool:
+    return _git_run(git_cmd, ["rev-parse", "--is-shallow-repository"]).stdout.strip() == "true"
+
+
+def _tip_shas(git_cmd, target_ref: str) -> tuple[str, str]:
+    """``(HEAD sha, <target_ref> sha)`` as printed by rev-parse ("" when unresolvable)."""
+    return tuple(_git_run(git_cmd, ["rev-parse", ref]).stdout.strip() for ref in ("HEAD", target_ref))
+
+
+def _print_update_check_result(behind: int | None, compare_branch: str) -> None:
+    """Report ``--check``'s verdict: up to date, N commits behind, or behind by an unknown count."""
+    if behind == 0:
+        print("✓ Already up to date.")
+        return
+    if behind is not None:
+        print(f"☤ Update available: {behind} {'commit' if behind == 1 else 'commits'} behind {compare_branch}.")
+    else:
+        print(f"☤ Update available (behind {compare_branch}).")
+    from hermes_cli.config import recommended_update_command
+    print(f"  Run '{recommended_update_command()}' to install.")
+
+
+def _source_completion_request(opts, plan, snapshot_id, windows_resume, desktop, gateway_mode) -> dict:
+    """Freeze data before mutation; no pre-swap module objects cross the seam."""
+    from copy import deepcopy
+    current = _completion_receipt._current.get()
+    if current is None:
+        _completion_receipt.begin_update_receipt()
+        current = _completion_receipt._current.get()
+    return {
+        "schema": 1, "source": str(_m().PROJECT_ROOT.resolve()),
+        "home": str(get_hermes_home()), "branch": "main", "desktop": desktop,
+        "assume_yes": opts.assume_yes, "gateway_mode": gateway_mode,
+        "no_gateway_restart": getattr(opts, "no_gateway_restart", False),
+        "pre_update_version": opts.pre_update_version, "snapshot_id": snapshot_id,
+        "sibling_snapshots": deepcopy(_completion_config._LAST_SIBLING_SNAPSHOTS),
+        "plan": plan.to_dict() if plan is not None else None,
+        "receipt": deepcopy(current.data), "windows_resume": windows_resume,
+    }
+
+
+def _complete_source_update(request: dict | None) -> None:
+    if request is None:
+        stop_for_relaunch(incomplete=True)
+    from copy import deepcopy
+    current = _completion_receipt._current.get()
+    if current is not None:
+        request["receipt"] = deepcopy(current.data)
+    _write_fleet_restart_pending_marker(expected_sha=request.get("expected_sha") or "")
+    result = run_completion(request)
+    _accept_completion_pm_receipt(result.get("pm_receipt"), request["receipt"]["update_id"])
+    token = request["windows_resume"]
+    if token is not None and result.get("windows_resume") is not None:
+        resumed = dict(result["windows_resume"])
+        token.clear()
+        token.update(resumed)
+    if result.get("receipt") is not None:
+        current = _completion_receipt._current.get()
+        if current is not None:
+            _completion_receipt._current.reset(current.current_token)
+    if result["exit_code"]:
+        raise SystemExit(result["exit_code"])
+    if adopt_retired_channel(request):
+        print(f"→ Source subscription moved to {request['channel_retirement']['destination']}")
 
 
 def _reconcile_diverged_checkout(git_cmd, branch: str, pre_pull_sha, *, target_ref=None) -> None:
@@ -1078,6 +1154,9 @@ def _finish_already_up_to_date(
         _git_run(git_cmd, ["checkout", current_branch])
 
     if completion_request is not None:
+        # Same code, same host obligation: an SHA-less arm would REPLACE the standing record
+        # (and its restarted proof), so a sibling profile's no-op update re-kills the multiplexer.
+        completion_request["expected_sha"] = _capture_head_sha(git_cmd, _m().PROJECT_ROOT) or ""
         completion_request["completion_message"] = (
             "✓ Already up to date!" if _plan.upstream_checked
             else "✓ Up to date with your fork (official repo not checked).")

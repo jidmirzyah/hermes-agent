@@ -29,10 +29,8 @@ def fixture_repo(tmp_path):
     git(repo, 'commit', '-qm', 'fixture')
     git(repo, 'push', '-q', 'origin', 'main')
     git(repo, 'remote', 'set-url', 'origin', 'https://github.com/fixture-owner/fixture-repo.git')
-    for relative in ('scripts/release.py', 'scripts/releases/commit_build.py',
-                     'scripts/releases/bundle_env.py',
-                     'scripts/releases/channel_build.py', 'scripts/releases/channels.py',
-                     'scripts/releases/r2.py', 'scripts/releases/r2_scope.py', 'scripts/release-content-types.json',
+    shutil.copytree(ROOT / 'scripts/releases', repo / 'scripts/releases')
+    for relative in ('scripts/release.py', 'scripts/release-content-types.json',
                      'hermes_cli/__init__.py', 'hermes_cli/update_channel.py',
                      'hermes_cli/release_channels.py',
                      'pm/paths.py', 'pm/environments.py', 'hermes_constants.py'):

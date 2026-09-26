@@ -10,7 +10,9 @@
 #   3. Point you at `.\activate.ps1` - the venv-style way to put the pm env
 #      (PATH + tool vars) into your current session.
 # ============================================================================
-param([switch]$RuntimeOnly)
+# Setup and activation both prepare the isolated test interpreter; installers
+# invoke pm.cli directly and do not select it. -TestExtras overrides coverage.
+param([switch]$RuntimeOnly, [string]$TestExtras = '')
 $ErrorActionPreference = 'Stop'
 
 Write-Host ''
@@ -70,25 +72,21 @@ if (Test-Path $uv) {
 }
 
 # ---------------------------------------------------------------------------
-# ARM64 source wheels need the native compiler and OpenSSL development libraries.
-# Activation runs setup in a child, so these build variables do not leak into its caller.
-if ($arch -eq 'arm64') {
-    . (Join-Path $repo 'scripts\windows-build-deps.ps1')
-    Initialize-HermesArm64BuildTools -StateRoot (Split-Path $store -Parent)
-}
-
-# Delegate to pm: python + venv + tool store + hash-verified venv sync
+# PM installs the tools, then the venv. On ARM64 PM prepares the compiler and
+# OpenSSL environment for that sync itself (pm/native_build.py), after its own
+# git is published, so every install path builds the same way.
+# Activation trusts the recorded tool digest. A direct setup re-checks it.
 # ---------------------------------------------------------------------------
 Write-Host 'Installing python + tools + dependencies via pm (hash-verified via uv.lock)...' -ForegroundColor Cyan
 Write-Host '(first run on a fresh checkout can take 1-5 minutes)'
 Push-Location $repo
 try {
     # PM can replace its uv entry only after the bootstrap uv has exited.
-    & $uv python install --no-bin $pyVersion
+    & $uv python install --no-bin --no-registry $pyVersion
     if ($LASTEXITCODE -ne 0) { throw 'bootstrap Python installation failed' }
     $bootPy = (& $uv python find --managed-python $pyVersion) -join "`n"
     if ($LASTEXITCODE -ne 0 -or -not $bootPy) { throw 'bootstrap Python lookup failed' }
-    & $bootPy.Trim() -m pm.cli install
+    & $bootPy.Trim() -m pm.cli install $(if ($RuntimeOnly) { '--trust-recorded' }) "--test-environment=$TestExtras"
     if ($LASTEXITCODE -ne 0) { throw 'pm install failed - see output above.' }
 } finally {
     Pop-Location

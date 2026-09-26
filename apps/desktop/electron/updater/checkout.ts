@@ -6,6 +6,7 @@ import * as path from 'node:path'
 import { updateHandoffConflict, writeUpdateMarker } from '../update-marker'
 import {
   collectRelaunchArgs,
+  describeUpdaterHandoffFailure,
   observeUpdaterHandoff,
   resolveInstallationLauncher,
   resolvePosixScriptHandoff,
@@ -347,7 +348,7 @@ export function createCheckoutStrategy(deps: CheckoutStrategyDeps): UpdaterStrat
     const handoffOutcome = await observeUpdaterHandoff(child, deps.updateHandoffDwellMs)
 
     if (!handoffOutcome.ok) {
-      const message = `Update failed to start: ${handoffOutcome.message}. Hermes will keep running — try again, or run \`hermes update\` from a terminal.`
+      const message: string = describeUpdaterHandoffFailure(handoffOutcome)
 
       deps.rememberLog(`[updates] hand-off not viable, aborting quit: ${handoffOutcome.message}`)
       deps.emitUpdateProgress({ stage: 'error', message, percent: null })
@@ -474,7 +475,7 @@ export function createCheckoutStrategy(deps: CheckoutStrategyDeps): UpdaterStrat
     const handoffOutcome = await observeUpdaterHandoff(child, deps.updateHandoffDwellMs)
 
     if (!handoffOutcome.ok) {
-      const message = `Update failed to start: ${handoffOutcome.message}. Hermes will keep running — try again, or run \`hermes update\` from a terminal.`
+      const message: string = describeUpdaterHandoffFailure(handoffOutcome)
 
       deps.rememberLog(`[updates] posix hand-off not viable, aborting quit: ${handoffOutcome.message}`)
       deps.emitUpdateProgress({ stage: 'error', message, percent: null })

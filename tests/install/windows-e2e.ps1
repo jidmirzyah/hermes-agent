@@ -62,7 +62,7 @@
 #
 # USAGE (local Windows box or CI):
 #   powershell -File tests\install\windows-e2e.ps1 -Phase all
-#   ... -Phase stage / install / update
+#   ... -Phase stage / install / update / verify-stamp
 #   Phases share state via <workroot>\shas.json, so CI can run them as
 #   separate steps for readable logs. -InstallMethod and -Route are
 #   orthogonal axes: the install phase dispatches on -InstallMethod, the
@@ -492,6 +492,16 @@ function Invoke-HermesUpdate {
     Assert-True ($updateExit -eq 0) "hermes update exited $updateExit (expected 0)"
 }
 
+function Invoke-ManualCardUpdate([string]$ReceiptPath, [string]$TargetSha) {
+    Assert-True (Test-Path -LiteralPath $ReceiptPath) "manual update card produced a receipt"
+    $manual = Get-Content -LiteralPath $ReceiptPath -Raw | ConvertFrom-Json
+    Assert-True ($manual.command -match '^hermes update(?:\s|$)') "manual update card instructed hermes update"
+    Invoke-HermesUpdate
+    Assert-True ((Get-InstalledHead) -eq $TargetSha) "manual update landed on target commit"
+    Test-HermesRuns "post-manual-update"
+    Assert-True ($null -ne (Get-DesktopExe)) "Hermes.exe still present after manual update"
+}
+
 function Invoke-HermesDesktopAppUpdate([string]$TargetSha) {
     # The hermes-desktop launch surface: `hermes desktop` runs its whole
     # real pipeline; the driver intercepts the product's final spawn
@@ -540,7 +550,26 @@ function Invoke-HermesDesktopAppUpdate([string]$TargetSha) {
         $ErrorActionPreference = $prevEap
     }
     Confirm-OldChat $chatOut
+    $manualReceipt = Join-Path $chatOut 'manual-update.json'
+    if ($driveExit -eq 42) {
+        Invoke-ManualCardUpdate $manualReceipt $TargetSha
+        return
+    }
     Assert-True ($driveExit -eq 0) "app driven via captured hermes desktop spec; update completed"
+
+    # The production updater relaunches Hermes. Close that verified window
+    # normally so the test-owned checkpoint starts and owns its own backend.
+    $desktopExe = Get-DesktopExe
+    $deadline = (Get-Date).AddMinutes(5)
+    $windows = @()
+    while ((Get-Date) -lt $deadline) {
+        $windows = @(Get-VerifiedDesktopWindows $desktopExe)
+        if ($windows.Count -eq 1) { break }
+        Start-Sleep -Seconds 2
+    }
+    Assert-True ($windows.Count -eq 1) "updated desktop relaunched exactly one verified window"
+    $script:ChatFailure = $true
+    Close-VerifiedDesktop $desktopExe $windows[0].Id
 }
 
 function Save-DesktopScreenshot([string]$OutFile) {
@@ -618,6 +647,7 @@ function Invoke-PhaseStage {
         Remove-Item -LiteralPath $WorkRoot -Recurse -Force
     }
     New-Item -ItemType Directory -Path $WorkRoot -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $WorkRoot "logs") -Force | Out-Null
     # The purge above deleted the redirect gitconfig; re-arm it so the
     # bare-clone below (and everything after) sees the redirect file.
     Set-GitRedirect
@@ -683,10 +713,27 @@ function Invoke-PhaseInstallGui {
     $proof = Join-Path $ProofRoot $(if ($Mode -eq "install") { "install-gui" } else { "update-gui-installer" })
     New-Item -ItemType Directory -Path $proof -Force | Out-Null
 
-    # The production installer, from the website. This is the binary users
-    # double-click, run EXACTLY as shipped: its own pinned install.ps1, its
-    # own baked BUILD_PIN_COMMIT. The only environmental difference is the
-    # git URL redirect to serve.git.
+    # The production installer binary comes from the website. Pair its script
+    # input with the source revision it will materialize. A branch-following
+    # installer can otherwise run today's install.ps1 against OLD, whose tree
+    # legitimately lacks helpers added later (for example
+    # apps/desktop/scripts/ensure-rolldown-binding.mjs). The bootstrap's public
+    # dev-source seam changes only script resolution. The GUI binary and cloned
+    # source remain the real artifacts under test.
+    $bootstrapRoot = Join-Path $WorkRoot "bootstrap-source-$Mode"
+    $bootstrapScripts = Join-Path $bootstrapRoot "scripts"
+    New-Item -ItemType Directory -Path $bootstrapScripts -Force | Out-Null
+    $installScript = Join-Path $bootstrapScripts "install.ps1"
+    (Invoke-Git @("-C", $RepoRoot, "show", "$ExpectedSha`:scripts/install.ps1")) -join "`n" |
+        Set-Content -LiteralPath $installScript -Encoding UTF8
+    Copy-Item $installScript (Join-Path $proof "bootstrap-install-script.ps1") -Force
+    $scriptBlob = Invoke-Git @("-C", $RepoRoot, "rev-parse", "$ExpectedSha`:scripts/install.ps1")
+    @(
+        "source_commit=$ExpectedSha"
+        "script_blob=$scriptBlob"
+    ) | Set-Content -LiteralPath (Join-Path $proof "bootstrap-install-script.txt") -Encoding ASCII
+    Write-Host "  bootstrap script is scripts/install.ps1 from $ExpectedLabel ($ExpectedSha)"
+
     $setupExe = Join-Path $WorkRoot "Hermes-Setup.exe"
     if (-not (Test-Path -LiteralPath $setupExe)) {
         Write-Host "  downloading $SetupExeUrl"
@@ -708,9 +755,6 @@ function Invoke-PhaseInstallGui {
     Copy-Item -Path (Join-Path $AssetsDir "install-and-launch.ahk"), (Join-Path $AssetsDir "install-button.png"), (Join-Path $AssetsDir "launch-button.png") -Destination $AhkDir -Force
 
     $env:HERMES_HOME = $HermesHome
-    # As shipped: NO dev-root override, no pin override. Ensure a stray
-    # local dev checkout can't hijack resolution.
-    Remove-Item Env:HERMES_SETUP_DEV_REPO_ROOT -ErrorAction SilentlyContinue
     New-Item -ItemType Directory -Path $HermesHome -Force | Out-Null
 
     $recorder = Start-DesktopRecorder (Join-Path $proof "desktop-frames")
@@ -718,8 +762,21 @@ function Invoke-PhaseInstallGui {
     try {
         Save-DesktopScreenshot (Join-Path $proof "00-before-installer.png")
 
-        # Launch the REAL installer, headed -- exactly a double-click.
-        $installer = Start-Process -FilePath $setupExe -PassThru
+        # Launch the real headed installer. Scope the paired script source to
+        # this process only so later product launches cannot inherit it.
+        $previousSetupSource = $env:HERMES_SETUP_DEV_REPO_ROOT
+        $env:HERMES_SETUP_DEV_REPO_ROOT = $bootstrapRoot
+        try {
+            $installer = Start-Process -FilePath $setupExe -PassThru
+        }
+        finally {
+            if ($null -eq $previousSetupSource) {
+                Remove-Item Env:HERMES_SETUP_DEV_REPO_ROOT -ErrorAction SilentlyContinue
+            }
+            else {
+                $env:HERMES_SETUP_DEV_REPO_ROOT = $previousSetupSource
+            }
+        }
         Write-Host "  Hermes-Setup.exe launched (pid $($installer.Id))"
 
         # Drive it: Install click -> wait -> Launch click -> Hermes.exe window.
@@ -777,6 +834,15 @@ function Invoke-PhaseInstallGui {
     # The installer Launch proof above must pass before a test-owned launch.
     $script:ChatFailure = $true
     Close-VerifiedDesktop (Get-DesktopExe)
+    # The installer-launched renderer boots before the journey seeds its local
+    # mock provider. Its disposable userData can therefore persist the release's
+    # default OpenRouter choice and override the mock on the checkpoint relaunch.
+    # Reset only this driver-owned pre-checkpoint state; OLD -> HEAD keeps the
+    # state created by the checkpoint itself.
+    if (Test-Path -LiteralPath $env:HERMES_DESKTOP_USER_DATA_DIR) {
+        Remove-Item -LiteralPath $env:HERMES_DESKTOP_USER_DATA_DIR -Recurse -Force
+    }
+    New-Item -ItemType Directory -Path $env:HERMES_DESKTOP_USER_DATA_DIR -Force | Out-Null
     $chatPhase = if ($Mode -eq 'install') { 'old' } else { 'new' }
     @{ phase=$chatPhase; launch='post-installer-launch'; handoffProof=$proof } | ConvertTo-Json |
         Set-Content (Join-Path $ProofRoot "desktop-chat-$chatPhase-launch.json")
@@ -826,6 +892,12 @@ function Invoke-GuiUpdateDesktopRoute([string]$TargetSha) {
             $ErrorActionPreference = $prevEap
         }
         Confirm-OldChat $proof
+        $manualReceipt = Join-Path $proof 'manual-update.json'
+        if ($driveExit -eq 42) {
+            Invoke-ManualCardUpdate $manualReceipt $TargetSha
+            Invoke-DesktopCheckpoint 'new' $TargetSha 'open-app-update-manual'
+            return
+        }
         Assert-True ($driveExit -eq 0) "GUI driver clicked Update now and the app quit for hand-off"
 
         # The detached updater (spawned by the app, NOT by us) now runs
@@ -901,6 +973,7 @@ function Invoke-GuiUpdateDesktopRoute([string]$TargetSha) {
         # Foreground the relaunched Hermes window so the proof screenshot
         # captures IT, not whatever else is on top (the full-desktop grab is
         # otherwise at the mercy of z-order -- an earlier run caught VS Code).
+        $mainProc = $null
         try {
             $mainProc = Get-Process -Name "Hermes" -ErrorAction SilentlyContinue |
                 Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
@@ -914,10 +987,11 @@ function Invoke-GuiUpdateDesktopRoute([string]$TargetSha) {
                 Start-Sleep -Seconds 2
             }
         } catch {}
+        Assert-True ($null -ne $mainProc) "relaunch has a foregroundable desktop window"
         Save-DesktopScreenshot (Join-Path $proof "99-relaunched-desktop.png")
         # Native relaunch and read-only product verification already passed.
         $script:ChatFailure = $true
-        Close-VerifiedDesktop (Get-DesktopExe)
+        Close-VerifiedDesktop (Get-DesktopExe) $mainProc.Id
         @{ phase='new'; launch='post-update-launch'; automaticRelaunch=$true } | ConvertTo-Json |
             Set-Content (Join-Path $ProofRoot 'desktop-chat-new-launch.json')
         Invoke-DesktopCheckpoint 'new' $TargetSha $Route
@@ -1162,8 +1236,19 @@ function Assert-UserShims {
     }
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
     if ($userPath) {
-        Assert-True ($userPath -like "*$(Join-Path $HermesHome 'bin')*") `
-            "the USER PATH still exposes $(Join-Path $HermesHome 'bin')"
+        # The fixture home contains ``..`` while Windows can persist the same
+        # directory canonically. Compare path identities, not raw substrings.
+        $expectedUserBin = [IO.Path]::GetFullPath((Join-Path $HermesHome 'bin')).TrimEnd('\')
+        $userPathEntries = @(
+            foreach ($entry in ($userPath -split ';')) {
+                if (-not $entry) { continue }
+                $expanded = [Environment]::ExpandEnvironmentVariables($entry)
+                try { [IO.Path]::GetFullPath($expanded).TrimEnd('\') }
+                catch { $expanded.TrimEnd('\') }
+            }
+        )
+        Assert-True ($userPathEntries -icontains $expectedUserBin) `
+            "the USER PATH still exposes $expectedUserBin (actual: $userPath)"
     }
 }
 
@@ -1218,6 +1303,11 @@ function Invoke-PhaseUpdate {
     # remote's main moves forward. The GUI route re-advances harmlessly
     # (same sha); script routes need it here because only the GUI arm's
     # helper used to own this step.
+    # The mock provider is journey setup, not an upgrade mutation. Configure it
+    # before preservation snapshots so its stable endpoint is part of baseline state.
+    if ($Route -in @('open-app-update', 'hermes-desktop-app-update', 'desktop-installer@latest')) {
+        Start-JourneyChat
+    }
     # Snapshot every plugin tree BEFORE the upgrade moves anything.
     Invoke-PreserveSnapshot
     # ... and the user's own durable state, produced by the install phase
@@ -1226,7 +1316,6 @@ function Invoke-PhaseUpdate {
     Invoke-Git @("-C", $ServeRepo, "update-ref", "refs/heads/main", $state.current) | Out-Null
     Write-Host "  serve.git main advanced to $($state.current)"
 
-    if ($Route -in @('open-app-update', 'hermes-desktop-app-update')) { Start-JourneyChat }
     switch ($Route) {
         "open-app-update" {
             # Meaningful only where an OS entry point exists - install.ps1
@@ -1304,6 +1393,22 @@ function Invoke-CheckedPhaseUpdate {
     }
 }
 
+function Invoke-PhaseVerifyStamp {
+    # Runs AFTER everything (install, update, the new runtime's launch and its
+    # smoke checks): the bootstrap-complete receipt and the checkout's source
+    # stamp must both tell the truth about the final HEAD. A separate phase —
+    # not an install-phase check — because the bootstrap marker can complete
+    # on a LATER run than the install itself.
+    $state = Read-State
+    $head = Get-InstalledHead
+    Assert-True ($head -match '^[0-9a-f]{40}$') "installed HEAD readable: '$head'"
+    Write-Host "  install HEAD: $($head.Substring(0, 12))"
+    & python -B (Join-Path $RepoRoot 'scripts\verify-bootstrap-version-stamp.py') `
+        --stamp (Join-Path $InstallDir '.hermes-bootstrap-complete') `
+        --repo $InstallDir --expect-commit $state.current
+    if ($LASTEXITCODE -ne 0) { throw "stamp verification failed (exit $LASTEXITCODE)" }
+}
+
 # ----------------------------------------------------------------------------
 # Dispatch
 # ----------------------------------------------------------------------------
@@ -1323,10 +1428,12 @@ switch ($Phase) {
     "stage"   { Invoke-PhaseStage }
     "install" { Invoke-SourceBuild { Invoke-PhaseInstall } }
     "update"  { Invoke-SourceBuild { Invoke-CheckedPhaseUpdate } }
+    "verify-stamp" { Invoke-PhaseVerifyStamp }
     "all" {
         Invoke-PhaseStage
         Invoke-SourceBuild { Invoke-PhaseInstall }
         Invoke-SourceBuild { Invoke-CheckedPhaseUpdate }
+        Invoke-PhaseVerifyStamp
     }
 }
 

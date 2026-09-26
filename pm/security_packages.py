@@ -94,9 +94,9 @@ class Tirith(_SignedBinary):
         return [archive, *[f"{base}/{name}" for name in ("checksums.txt", "checksums.txt.sig", "checksums.txt.pem")]]
 
     def verify_provenance(self, directory: Path) -> None:
-        from tools.tirith_security import _verify_release_provenance
+        from tools.tirith_security import verify_release_provenance
 
-        _, reason = _verify_release_provenance(directory, logging.getLogger(__name__).warning)
+        _, reason = verify_release_provenance(directory, logging.getLogger(__name__).warning)
         if reason:
             raise InstallError(self.name, reason)
 

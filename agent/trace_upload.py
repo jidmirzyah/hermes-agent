@@ -7,6 +7,7 @@ programmatic callers use :func:`build_trace_jsonl` + :func:`_do_upload`."""
 
 from __future__ import annotations
 
+from pm import install_hint
 import json
 import logging
 import os
@@ -195,7 +196,7 @@ def _do_upload(
         from huggingface_hub import HfApi
     except ImportError:
         return ("Hugging Face upload needs the `huggingface_hub` package. Run: "
-                "python -c \"from pm import sync_venv; sync_venv(['trace-upload'], explicit=True)\"")
+                f"{install_hint('trace-upload')}")
     api = HfApi(token=token)
     try:
         who = api.whoami()

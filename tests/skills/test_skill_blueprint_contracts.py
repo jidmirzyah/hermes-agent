@@ -37,6 +37,9 @@ def test_price_watch_fills_and_persists_with_chosen_cadence(hours, tmp_path, mon
 
     monkeypatch.setattr(jobs, "CRON_DIR", tmp_path)
     monkeypatch.setattr(jobs, "JOBS_FILE", tmp_path / "jobs.json")
+    # Re-pointing two of the three store constants selects the "live constants" store, whose
+    # OUTPUT_DIR would still be the import-time (real-home) path.
+    monkeypatch.setattr(jobs, "OUTPUT_DIR", tmp_path / "output")
     blueprint = get_blueprint("price-watch")
     assert blueprint is not None
     spec = fill_blueprint(blueprint, {

@@ -23,7 +23,6 @@ import pytest
 
 from tui_gateway import server
 
-
 class _FlushAgent:
     """Minimal agent exposing the real ``_persist_session`` flush contract."""
 
@@ -38,7 +37,6 @@ class _FlushAgent:
 
     def _persist_session(self, messages, conversation_history=None):
         self.flush_calls.append(list(messages))
-
 
 @pytest.fixture
 def registered_session():
@@ -59,13 +57,11 @@ def registered_session():
         for sid in registered:
             server._sessions.pop(sid, None)
 
-
 def _restore_signal_state(prev_handlers):
     for signum, handler in prev_handlers.items():
         signal.signal(signum, handler)
     server._exit_flush_prev_handlers.clear()
     server._exit_flush_handlers_installed = False
-
 
 @pytest.mark.platforms("posix")
 def test_sigterm_flushes_populated_session_into_state_db(
@@ -114,7 +110,6 @@ def test_sigterm_flushes_populated_session_into_state_db(
     assert any("survive the kill" in str(r.get("content", "")) for r in rows)
     db.close()
 
-
 def test_exit_flush_is_bounded(registered_session):
     """A hung persist must never block exit longer than the budget."""
 
@@ -128,7 +123,6 @@ def test_exit_flush_is_bounded(registered_session):
     server._flush_sessions_before_exit(budget_s=0.3)
     elapsed = time.monotonic() - start
     assert elapsed < 2.0, f"exit flush blocked {elapsed:.1f}s past its budget"
-
 
 def test_shutdown_sessions_flushes_before_teardown(monkeypatch):
     """The atexit path persists transcripts BEFORE slow per-session teardown."""
@@ -158,7 +152,6 @@ def test_shutdown_sessions_flushes_before_teardown(monkeypatch):
     assert order and order[0] == "flush"
     assert "close:sess-order" in order
 
-
 def test_periodic_flush_respects_interval_with_fake_clock(
     registered_session, monkeypatch
 ):
@@ -177,7 +170,6 @@ def test_periodic_flush_respects_interval_with_fake_clock(
     assert server._flush_dirty_sessions(now=1_000.0 + 301.0) == 1
     assert len(agent.flush_calls) == 2
 
-
 def test_periodic_flush_skips_running_sessions(registered_session, monkeypatch):
     """Mid-turn sessions are the turn thread's to persist — never race them."""
     monkeypatch.setattr(server, "_INCREMENTAL_FLUSH_INTERVAL_S", 300.0)
@@ -186,5 +178,3 @@ def test_periodic_flush_skips_running_sessions(registered_session, monkeypatch):
 
     assert server._flush_dirty_sessions(now=1_000.0) == 0
     assert agent.flush_calls == []
-
-

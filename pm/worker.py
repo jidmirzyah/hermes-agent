@@ -73,7 +73,9 @@ def main():
     from pm import paths, receipt
     from pm.package import InstallError
     from pm.registry import load_package_definitions
+    from pm.runtime import lease_current_runtime
     from pm.worker_operations import OPERATIONS
+    lease_current_runtime()
     context = request["context"]
     paths.repo_root = lambda: Path(context["repo"])
     paths.lockfile_path = lambda: Path(context["lockfile"])

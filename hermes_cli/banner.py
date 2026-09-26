@@ -67,7 +67,8 @@ def _skin_color(key: str, fallback: str) -> str:
 
 # === ASCII Art & Branding ===
 
-from hermes_cli import __version__ as VERSION, __release_date__ as RELEASE_DATE
+from hermes_cli import __release_date__ as RELEASE_DATE
+from hermes_cli.version_info import get_version_info
 
 HERMES_AGENT_LOGO = """[bold #FFD700]██╗  ██╗███████╗██████╗ ███╗   ███╗███████╗███████╗       █████╗  ██████╗ ███████╗███╗   ██╗████████╗[/]
 [bold #FFD700]██║  ██║██╔════╝██╔══██╗████╗ ████║██╔════╝██╔════╝      ██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝[/]
@@ -534,8 +535,7 @@ def format_banner_version_label() -> str:
 
     stamp = read_install_stamp(get_project_root())
     if stamp.get("distribution") == "desktop-app":
-        version = stamp.get("displayVersion") or stamp.get("baseVersion") or VERSION
-        label = f"Hermes Agent v{version}"
+        label = f"Hermes Agent v{get_version_info().derived_version}"
         if stamp.get("source") == "commit-build":
             return f"{label} · commit-build · {str(stamp.get('commit') or '')[:12]}"
         if stamp.get("tag"):
@@ -548,7 +548,7 @@ def format_banner_version_label() -> str:
             return f"{label} · installer"
         return label
 
-    base = f"Hermes Agent v{VERSION} ({RELEASE_DATE})"
+    base = f"Hermes Agent v{get_version_info().derived_version} ({RELEASE_DATE})"
     from hermes_cli.config import load_config
     from hermes_cli.update_channel import resolve_update_channel
 
@@ -744,8 +744,9 @@ def banner_snapshot_fingerprint() -> Optional[str]:
     for p in paths:
         st = _quiet(p.stat)
         parts.append(f"{p.name}:{st.st_mtime_ns}:{st.st_size}" if st else f"{p.name}:absent")
-    # Code checkout: version + git HEAD when available (post-update change).
-    parts.append(str(VERSION))
+    # Code checkout: commit when known, otherwise its derived version.
+    version_info = get_version_info()
+    parts.append(version_info.commit or version_info.derived_version)
     state = get_git_banner_state()
     if state:
         parts.append(str(state.get("local", "")))

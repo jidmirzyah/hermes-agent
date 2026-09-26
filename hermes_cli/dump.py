@@ -199,13 +199,14 @@ _API_KEYS = [
 
 
 def _version_line(project_root: Path) -> str:
-    """``<version> [<commit>] (<commit date>)`` — the commit date is the real "as-of" date; __release_date__
-    is intentionally NOT shown (reads like a wall-clock timestamp, confuses triage)."""
+    """``<version> [<commit>] (<commit date>)`` using the running code identity."""
     try:
-        from hermes_cli import __version__
-    except ImportError:
-        __version__ = "(unknown)"
-    ver_str = f"{__version__} [{_get_git_commit(project_root)}]"
+        from hermes_cli.version_info import get_version_info
+
+        version = get_version_info().derived_version
+    except Exception:
+        version = "(unknown)"
+    ver_str = f"{version} [{_get_git_commit(project_root)}]"
     commit_date = _get_git_commit_date(project_root)
     return f"{ver_str} ({commit_date})" if commit_date else ver_str
 

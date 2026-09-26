@@ -23,19 +23,24 @@ from scripts.bundles import release_artifacts as artifacts
 ROOT = Path(__file__).resolve().parents[2]
 SMOKE_RESULTS = {name: {'result': 'success'} for name in (
     'smoke-darwin', 'smoke-win32', 'smoke-win32-universal')}
+RELEASE_EPOCH = 1_787_965_323
+WINDOWS_VERSION = '2026.5761.123.0'
 
 
 def test_windows_metadata_is_read_from_package_and_stale_stamp_is_rejected(tmp_path):
     tag, commit = 'v1.2.3', 'a' * 40
     root = tmp_path / 'release'
     root.mkdir()
-    package = root / 'Product-win-x64.msix'
+    package = root / 'Product-1.2.3-win-x64.msix'
     manifest = '<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"><Identity Name="Product" Publisher="CN=Test" Version="1.2.3.0" ProcessorArchitecture="x64"/><Applications><Application Id="App"/></Applications></Package>'
 
     def write_package(sha, receiver=None):
         with zipfile.ZipFile(package, 'w') as archive:
             archive.writestr('AppxManifest.xml', manifest)
-            archive.writestr('app/resources/install-stamp.json', json.dumps({'tag': tag, 'commit': sha, 'receiverProtocol': receiver}))
+            archive.writestr('app/resources/install-stamp.json', json.dumps({
+                'tag': tag, 'commit': sha, 'baseVersion': tag[1:],
+                'receiverProtocol': receiver,
+            }))
 
     write_package(commit)
     out = root / 'metadata-windows-x64.json'
@@ -70,9 +75,13 @@ def staged_candidate(tmp_path, r2_server, https_origin):
     built.mkdir()
     for platform, arches in [('windows', ('x64', 'arm64')), ('macos', ('x64', 'arm64')), ('termux', ('aarch64',))]:
         for arch in arches:
-            row = {'platform': platform, 'arch': arch, 'tag': tag, 'commit': commit, 'identity': 'Product'}
+            row = {
+                'platform': platform, 'arch': arch, 'tag': tag, 'commit': commit,
+                'baseVersion': tag[1:], 'identity': 'Product',
+            }
             if platform == 'windows':
-                row.update(version='1.2.3.0', publisher='CN=Test', applicationId='App')
+                row.update(version=WINDOWS_VERSION, executableVersion=WINDOWS_VERSION,
+                           publisher='CN=Test', applicationId='App')
                 package = f'HermesBundled-1.2.3-win-{arch}.msix'
                 handoff_name = f'win32-{arch}'
             elif platform == 'macos':
@@ -102,14 +111,15 @@ def staged_candidate(tmp_path, r2_server, https_origin):
             handoff.stage(tag, commit, handoff_name, built, includes)
     bundle = built / 'Product-win.msixbundle'
     with zipfile.ZipFile(bundle, 'w') as archive:
-        archive.writestr('AppxMetadata/AppxBundleManifest.xml', '<Bundle><Identity Name="Product" Publisher="CN=Test" Version="1.2.3.0"/><Packages><Package Type="application" Architecture="arm64"/><Package Type="application" Architecture="x64"/></Packages></Bundle>')
+        archive.writestr('AppxMetadata/AppxBundleManifest.xml', f'<Bundle><Identity Name="Product" Publisher="CN=Test" Version="{WINDOWS_VERSION}"/><Packages><Package Type="application" Architecture="arm64"/><Package Type="application" Architecture="x64"/></Packages></Bundle>')
     (built / 'Store-Product-win.msixbundle').write_bytes(b'Store bundle transport fixture')
     handoff.stage(tag, commit, 'windows-universal', built, ['*.msixbundle'])
     fetched = tmp_path / 'fetched'
     names = ['win32-x64', 'win32-arm64', 'darwin-x64', 'darwin-arm64', 'termux', 'windows-universal']
     handoff.fetch(tag, commit, names, fetched, ['metadata-*.json', '*.msixbundle'])
     r2_server.requests.clear()
-    manifest = assemble(fetched, tag, commit, base, tmp_path / 'release-candidates.json', smoke_results=SMOKE_RESULTS)
+    manifest = assemble(fetched, tag, commit, base, tmp_path / 'release-candidates.json',
+                        smoke_results=SMOKE_RESULTS, release_epoch=RELEASE_EPOCH)
     assert {row['platform'] + '/' + row['arch'] for row in manifest['packages']} == {
         'windows/x64', 'windows/arm64', 'macos/x64', 'macos/arm64', 'termux/aarch64'}
     assert all(not file['path'].startswith(('handoff-', 'metadata-')) for file in manifest['files'])
@@ -156,11 +166,13 @@ def test_assemble_rejects_missing_and_changed_receipts(tmp_path, staged_candidat
     original = receipt.read_bytes()
     receipt.unlink()
     with pytest.raises(ValueError, match='handoff'):
-        assemble(fetched, tag, commit, base, tmp_path / 'missing.json', smoke_results=SMOKE_RESULTS)
+        assemble(fetched, tag, commit, base, tmp_path / 'missing.json',
+                 smoke_results=SMOKE_RESULTS, release_epoch=RELEASE_EPOCH)
     receipt.write_bytes(original)
     (fetched / 'metadata-windows-x64.json').write_text('{}', encoding='utf-8')
     with pytest.raises(ValueError, match='digest'):
-        assemble(fetched, tag, commit, base, tmp_path / 'changed.json', smoke_results=SMOKE_RESULTS)
+        assemble(fetched, tag, commit, base, tmp_path / 'changed.json',
+                 smoke_results=SMOKE_RESULTS, release_epoch=RELEASE_EPOCH)
 
 
 def test_candidate_publication_and_store_selection(tmp_path, monkeypatch, r2_server, staged_candidate):
@@ -198,9 +210,12 @@ def test_candidate_publication_and_store_selection(tmp_path, monkeypatch, r2_ser
     for item in manifest['files']:
         assert (tmp_path / 'promote' / item['path']).read_bytes() == r2_server.store[f'releases/tag/{tag}/{item["path"]}'][0]
     descriptor = ET.fromstring(r2_server.store['releases/win32/stable/stable.appinstaller'][0])
-    assert descriptor.attrib == {'Uri': base + '/releases/win32/stable/stable.appinstaller', 'Version': '1.2.3.0'}
+    assert descriptor.attrib == {
+        'Uri': base + '/releases/win32/stable/stable.appinstaller',
+        'Version': WINDOWS_VERSION,
+    }
     assert descriptor.find('{*}MainBundle').attrib == {
-        'Name': 'Product', 'Publisher': 'CN=Test', 'Version': '1.2.3.0',
+        'Name': 'Product', 'Publisher': 'CN=Test', 'Version': WINDOWS_VERSION,
         'Uri': base + '/releases/tag/v1.2.3/Product-win.msixbundle'}
     pointer = 'releases/win32/stable/stable.appinstaller'
     original = r2_server.store[pointer]
@@ -225,6 +240,17 @@ def candidate_workflow_step(tmp_path, r2_server, staged_candidate):
     """Run real workflow shell/CLIs; replace only service endpoints and tool setup."""
     manifest, fetched, base = staged_candidate
     jobs = hermes_yaml.safe_load((ROOT / '.github/workflows/desktop-bundled-release.yml').read_text(encoding='utf-8-sig'))['jobs']
+    stable_jobs = hermes_yaml.safe_load(
+        (ROOT / '.github/workflows/stable-release.yml').read_text(encoding='utf-8-sig'))['jobs']
+    render = next(step for step in stable_jobs['complete']['steps']
+                  if step.get('name', '').startswith('Render the admitted'))
+    jobs['controller-promote'] = {
+        'env': jobs['stable-publish']['env'],
+        'steps': [
+            {'run': 'python -m scripts.bundles.release_artifacts promote --root verified'},
+            render,
+        ],
+    }
     shutil.copytree(fetched, tmp_path / 'candidates')
     bin_dir = tmp_path / 'bin'
     bin_dir.mkdir()
@@ -266,6 +292,10 @@ def candidate_workflow_step(tmp_path, r2_server, staged_candidate):
         expressions = {
             '${{ inputs.tag }}': manifest['tag'], '${{ inputs.manifest-sha256 }}': pinned,
             '${{ needs.validate.outputs.sha }}': manifest['commit'], '${{ github.token }}': 'inert',
+            '${{ needs.validate.outputs.release-epoch }}': str(manifest['releaseEpoch']),
+            '${{ needs.admit.outputs.tag }}': manifest['tag'],
+            '${{ needs.admit.outputs.commit }}': manifest['commit'],
+            '${{ needs.candidates.outputs.manifest-sha256 }}': pinned,
             '${{ vars.CLOUDFLARE_R2_PUBLIC_URL }}': base, '${{ toJSON(needs) }}': json.dumps(needs),
         }
         for key in ('CLOUDFLARE_R2_ACCOUNT_ID', 'CLOUDFLARE_R2_ACCESS_KEY_ID', 'CLOUDFLARE_R2_SECRET_ACCESS_KEY', 'CLOUDFLARE_R2_BUCKET'):
@@ -300,9 +330,10 @@ def test_candidate_smoke_survives_real_promotion_and_renderer(tmp_path, r2_serve
     # An unrelated orphan object must not acquire the candidate's Passed label.
     orphan = f"releases/tag/{manifest['tag']}/HermesBundled-1.2.3-linux-x64.AppImage"
     r2_server.store[orphan] = (b'orphan transport fixture', '"e"')
-    for step in jobs['stable-promote']['steps']:
+    for step in jobs['controller-promote']['steps']:
         if 'run' in step:
-            result = run('stable-promote', step, {'validate': {'result': 'success'}}, ambient_needs=ambient_needs)
+            result = run('controller-promote', step, {'validate': {'result': 'success'}},
+                         ambient_needs=ambient_needs)
             assert result.returncode == 0, result.stdout + result.stderr
     assert 'releases/win32/stable/stable.appinstaller' in r2_server.store
     page = r2_server.store['releases/stable/index.html'][0].decode()
@@ -334,7 +365,7 @@ def test_candidate_smoke_admission_fails_before_publication(tmp_path, r2_server,
             assert not any(method == 'PUT' for method, _, _ in r2_server.requests)
     key = f"releases/tag/{manifest['tag']}/release-candidates.json"
     raw = r2_server.store[key][0]
-    for fault, message in [('legacy', 'Legacy candidate'), ('missing', 'Candidate smoke results'),
+    for fault, message in [('legacy', 'Candidate manifest'), ('missing', 'Candidate smoke results'),
                            ('failed', 'smoke-win32=failure'), ('identity', 'release identity'),
                            ('tampered', 'digest mismatch')]:
         invalid = copy.deepcopy(manifest)
@@ -352,11 +383,11 @@ def test_candidate_smoke_admission_fails_before_publication(tmp_path, r2_server,
         digest = hashlib.sha256(raw if fault == 'tampered' else data).hexdigest()
         before = dict(r2_server.store), body_file.read_bytes()
         # Exercise both commands independently, not just shell short-circuiting.
-        for step in jobs['stable-promote']['steps']:
+        for step in jobs['controller-promote']['steps']:
             if 'run' not in step:
                 continue
             r2_server.requests.clear()
-            result = run('stable-promote', step, {}, pinned=digest)
+            result = run('controller-promote', step, {}, pinned=digest)
             assert result.returncode != 0, (fault, step, result.stdout, result.stderr)
             assert message in result.stderr, result.stdout + result.stderr
             assert not any(method == 'PUT' for method, _, _ in r2_server.requests)

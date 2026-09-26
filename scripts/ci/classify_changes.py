@@ -24,7 +24,6 @@ Lanes:
   PyPI, so a diff that touches neither ``pyproject.toml`` nor ``uv.lock``
   must not run it.
 * ``npm_lock``    — semantic package-lock.json diff PR comment.
-* ``installer``   — PowerShell installer tests (Windows runner).
 * ``bootstrap``   — the bootstrap installer lane: install.sh sandbox install,
   pin-fragment drift check, and shipped version-stamp verification.
 * ``desktop_updater`` — the Windows desktop-update hand-off script and the
@@ -126,11 +125,6 @@ _SCAN_FILES = {"setup.cfg", "pyproject.toml"}
 _MCP_CATALOG_PATHS = ("optional-mcps/",)
 _MCP_CATALOG_FILES = {"hermes_cli/mcp_catalog.py"}
 
-# Windows installer + its PowerShell tests. These only run on a Windows runner,
-# so they get their own lane rather than riding along with ``python``.
-_INSTALLER_PATHS = ("scripts/tests/",)
-_INSTALLER_FILES = {"scripts/install.ps1", "scripts/install.cmd"}
-
 # Bootstrap installer: the POSIX shell installer, the dev-checkout wrapper
 # that carries the same pin fragment, and the Tauri app's non-Rust sources
 # (the .rs/Cargo files are the ``rust`` lane's job). Changes here get the
@@ -197,10 +191,6 @@ def _is_mcp_catalog(p: str) -> bool:
     return p.startswith(_MCP_CATALOG_PATHS) or p in _MCP_CATALOG_FILES
 
 
-def _is_installer(p: str) -> bool:
-    return p.startswith(_INSTALLER_PATHS) or p in _INSTALLER_FILES
-
-
 def _is_desktop_updater(p: str) -> bool:
     return (
         p.startswith(_DESKTOP_UPDATER_PATHS)
@@ -256,7 +246,6 @@ def classify(files: list[str]) -> dict[str, bool]:
         "deps": deps,
         "uv_lock": any(f in ("pyproject.toml", "uv.lock") for f in files),
         "npm_lock": npm_lock,
-        "installer": any(_is_installer(f) for f in files),
         "bootstrap": any(
             f.startswith(_BOOTSTRAP_PATHS) or f in _BOOTSTRAP_FILES for f in files
         ),
@@ -277,7 +266,6 @@ def classify(files: list[str]) -> dict[str, bool]:
         ret["deps"] = True
         ret["uv_lock"] = True
         ret["npm_lock"] = True
-        ret["installer"] = True
         ret["bootstrap"] = True
         ret["desktop_updater"] = True
         ret["rust"] = True

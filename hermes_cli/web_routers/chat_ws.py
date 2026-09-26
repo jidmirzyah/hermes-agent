@@ -187,6 +187,12 @@ async def _unwind_console_worker(worker: Any, scope: InterruptScope, reason: str
         _log.warning("console worker still running %ss after %s", _CONSOLE_UNWIND_TIMEOUT_SECONDS, reason)
 
 
+async def _wait_for_console_worker(worker: Any) -> Any:
+    return await asyncio.wait_for(
+        asyncio.wrap_future(worker), timeout=_CONSOLE_COMMAND_TIMEOUT_SECONDS,
+    )
+
+
 class _ConsoleSender:
     """Serialises frames onto one console socket and owns the prompt suffix."""
 
@@ -309,7 +315,7 @@ async def console_ws(ws: WebSocket) -> None:
             _execute_console_line, engine, line, confirmed=confirmed, profile=profile, scope=scope,
         )
         try:
-            result = await asyncio.wait_for(asyncio.wrap_future(worker), timeout=_CONSOLE_COMMAND_TIMEOUT_SECONDS)
+            result = await _wait_for_console_worker(worker)
         except asyncio.CancelledError:
             await _unwind_console_worker(worker, scope, "cancelled")
             raise

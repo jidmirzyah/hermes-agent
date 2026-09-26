@@ -440,7 +440,7 @@ def _stream_and_hash(url: str, creds: dict[str, str], now: str, algorithm: str):
 # ---------------------------------------------------------------------------
 
 def channel_for_tag(tag: str) -> str:
-    """'stable' for a stable tag, 'canary' for a -canary.<ts> tag."""
+    """Return the release channel encoded by a canonical tag."""
     from hermes_cli.update_channel import is_canary_tag
 
     return "canary" if is_canary_tag(tag) else "stable"
@@ -687,6 +687,8 @@ def put_object(
         remote_size = match.group(1)
     if str(remote_size) != str(size):
         raise R2RequestError("HEAD", key, head.status, f"size mismatch (remote {remote_size}, local {size})")
+    from scripts.releases.upload_summary import note
+    note(key)
     print(f"OK r2: {key} ({size} bytes)")
 
 
@@ -818,7 +820,7 @@ def canary_doomed_keys(keys: list[str], cutoff: str) -> list[str]:
     doomed = []
     for key in keys:
         match = tag_re.search(key)
-        if match and match.group(0).split("-canary.", 1)[1][:8] < cutoff:
+        if match and match.group(0).split("+canary.", 1)[1][:8] < cutoff:
             doomed.append(key)
     return doomed
 

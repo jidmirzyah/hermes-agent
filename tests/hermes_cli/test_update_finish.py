@@ -44,12 +44,17 @@ def completion(tmp_path, monkeypatch):
     # in the working checkout is modified, even by import-time self-heals.
     for path in ROOT.glob("*.py"):
         shutil.copy2(path, source / path.name)
-    for name in ("hermes_cli", "pm", "agent", "gateway", "tools", "cron"):
+    for name in ("hermes_cli", "hermes_platform", "pm", "agent", "gateway", "tools", "cron"):
         shutil.copytree(ROOT / name, source / name,
                         ignore=shutil.ignore_patterns("__pycache__", "web_dist", "tui_dist"))
     shutil.copytree(ROOT / "scripts/build", source / "scripts/build",
                     ignore=shutil.ignore_patterns("__pycache__"))
     _put(source, "pyproject.toml", '[project]\nname="takeover-fixture"\nversion="2.0"\n')
+    # Successful completion stamps the selected checkout's own git identity.
+    git_env = {**os.environ, "GIT_AUTHOR_NAME": "fixture", "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
+               "GIT_COMMITTER_NAME": "fixture", "GIT_COMMITTER_EMAIL": "fixture@example.invalid"}
+    for command in (["init", "-q"], ["add", "--all"], ["-c", "commit.gpgsign=false", "commit", "-qm", "selected"]):
+        subprocess.run(["git", *command], cwd=source, env=git_env, check=True, capture_output=True)
     # The selected interpreter is dependency-free, not the pytest environment. A symlink, not a
     # copy: a relocatable build (python-build-standalone) locates its stdlib beside the resolved
     # executable, so a lone copied binary cannot even import ``encodings``.
@@ -384,6 +389,8 @@ def test_selected_child_builds_and_finalizes_under_parent_lock(completion):
     assert receipt["steps"][0] == request["receipt"]["steps"][0]
     assert receipt["pm_venv_rebuild"] == request["pm_receipt"]["venv_rebuild"]
     assert json.loads(result.read_text()) == {"resume_handled": True, "receipt_handled": True}
+    head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip()
+    assert json.loads((source / "install-stamp.json").read_text())["commit"] == head
 
 
 @pytest.mark.platforms("posix")

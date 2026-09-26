@@ -15,7 +15,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { createRequire } from 'node:module'
-import { appIdentity, storeManifestTemplate } from '../../../scripts/msix-shared.mjs'
+import { appIdentity, nativeManifestTemplate, storeManifestTemplate } from '../../../scripts/msix-shared.mjs'
 
 
 const require = createRequire(import.meta.url)
@@ -31,6 +31,9 @@ export default async function beforeBuild() {
   stageMsixAssets()
   writeMsixExtensions()
   if (store) stageStoreManifest(path.join(import.meta.dirname, '..'), process.env.HERMES_PAYLOAD_TAG)
+  else if (process.env.HERMES_PAYLOAD_TAG) {
+    stageReleaseManifest(path.join(import.meta.dirname, '..'), process.env.HERMES_PAYLOAD_TAG)
+  }
 
   return false
 }
@@ -63,6 +66,18 @@ export function stageStoreManifest(desktop, tag) {
   fs.mkdirSync(path.dirname(output), { recursive: true })
   fs.writeFileSync(output, storeManifestTemplate(template, version), 'utf8')
   return output
+}
+
+export function stageReleaseManifest(desktop, tag) {
+  const generated = path.join(desktop, 'build/msix-manifest.xml')
+  const { identity, version } = appIdentity(desktop, tag)
+  const source = identity.appNamePascal === identity.artifactNamePascal || !fs.existsSync(generated)
+    ? path.join(desktop, 'assets/msix-manifest.xml')
+    : generated
+  const template = fs.readFileSync(source, 'utf8')
+  fs.mkdirSync(path.dirname(generated), { recursive: true })
+  fs.writeFileSync(generated, nativeManifestTemplate(template, version), 'utf8')
+  return generated
 }
 
 function writeMsixExtensions() {
@@ -101,8 +116,8 @@ function writeMsixExtensions() {
   <uap3:AppExtension
       Name="com.microsoft.windows.copilotkeyprovider"
       Id="CopilotKeyProvider"
-      DisplayName="${displayName}"
-      Description="Launch ${displayName} with the Copilot key"
+      DisplayName="${xmlAttribute(displayName)}"
+      Description="Launch ${xmlAttribute(displayName)} with the Copilot key"
       PublicFolder="Public">
     <uap3:Properties>
       <SingleTap>hermes://copilot-key/start?state=Tap</SingleTap>
@@ -117,6 +132,15 @@ ${aliases}`
   fs.writeFileSync(file, copilot)
 }
 
+// The manifest fragments above are string templates; a display name or a
+// payload-declared launcher stem carrying `&`, `<` or `"` would otherwise
+// corrupt the XML makeappx reads (an opaque 0x80080204 at best, a different
+// alias at worst).
+/** @param {string} value */
+export function xmlAttribute(value) {
+  return String(value).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`)
+}
+
 /**
  * One uap5:Extension carries the aliases declared by the payload.
  * Exported pure for tests.
@@ -128,8 +152,8 @@ export function appExecutionAliasApplications(launchers, identity) {
   // Give each CLI its own hidden application, with one extension per app.
   return launchers.map((name, index) => {
     const executable = ['app', 'resources', 'agent-payload', 'bin', `${name}.exe`].join(String.fromCharCode(92))
-    return `<Application Id="${identity.appNamePascal}Cli${index}" Executable="${executable}" EntryPoint="Windows.FullTrustApplication">
-      <uap:VisualElements DisplayName="${identity.displayName}" Description="${identity.displayName} CLI"
+    return `<Application Id="${xmlAttribute(identity.appNamePascal)}Cli${index}" Executable="${xmlAttribute(executable)}" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements DisplayName="${xmlAttribute(identity.displayName)}" Description="${xmlAttribute(identity.displayName)} CLI"
         Square150x150Logo="assets\\Square150x150Logo.png" Square44x44Logo="assets\\Square44x44Logo.png"
         BackgroundColor="transparent" AppListEntry="none" />
       <Extensions>${appExecutionAliasExtensions([name])}</Extensions>
@@ -147,11 +171,11 @@ export function appExecutionAliasExtensions(launchers) {
   return `<uap5:Extension
     xmlns:uap5="http://schemas.microsoft.com/appx/manifest/uap/windows10/5"
     Category="windows.appExecutionAlias"
-    Executable="${executable(launchers[0])}"
+    Executable="${xmlAttribute(executable(launchers[0]))}"
     EntryPoint="Windows.FullTrustApplication">
   <uap5:AppExecutionAlias>
 ${launchers
-  .map((name) => `    <uap5:ExecutionAlias Alias="${name}.exe" />`)
+  .map((name) => `    <uap5:ExecutionAlias Alias="${xmlAttribute(name)}.exe" />`)
   .join('\n')}
   </uap5:AppExecutionAlias>
 </uap5:Extension>`

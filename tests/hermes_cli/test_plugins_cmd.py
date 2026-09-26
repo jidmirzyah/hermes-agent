@@ -10,7 +10,8 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-import yaml
+from tests.pm._fixtures import client, isolated_python  # noqa: F401
+import hermes_yaml as yaml
 
 from hermes_cli.plugins_cmd import (
     PluginOperationError,
@@ -258,6 +259,7 @@ class TestGitPullPluginDirAutostash:
         ok, msg = pc._git_pull_plugin_dir(checkout)
         assert ok is True
         assert "Already up to date" in msg
+        assert git(checkout, "stash", "list").strip() == ""
 
     def test_autostash_addresses_git_by_sha_never_brace_selector(self, tmp_path, monkeypatch):
         """Native Windows: MSYS strips the braces from ``stash@{0}`` in git.exe's argv, so the
@@ -448,6 +450,21 @@ class TestCmdRemove:
         _remove_plugin_core(target)
 
         assert not target.exists()
+
+    def test_remove_deletes_only_the_requested_plugin(self, tmp_path, monkeypatch):
+        from hermes_cli.plugins_cmd import cmd_remove
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        target = tmp_path / "plugins/test-plugin"
+        target.mkdir(parents=True)
+        (target / "plugin.yaml").write_text("name: test-plugin\n", encoding="utf-8")
+        sibling = tmp_path / "plugins/keep/plugin.yaml"
+        sibling.parent.mkdir()
+        sibling.write_text("name: keep\n", encoding="utf-8")
+        cmd_remove("test-plugin")
+        assert not target.exists()
+        assert sibling.read_text(encoding="utf-8") == "name: keep\n"
+
 
 
 # ── cmd_list tests ─────────────────────────────────────────────────────────
@@ -651,9 +668,8 @@ class TestSubdirInstallE2E:
         repo_root = tmp_path / "monorepo"
         self._make_repo_with_subdir_plugin(repo_root)
 
-        plugins_dir = tmp_path / "installed"
-        plugins_dir.mkdir()
-        monkeypatch.setattr(pc, "_plugins_dir", lambda: plugins_dir)
+        plugins_dir = tmp_path / "home/plugins"
+        monkeypatch.setenv("HERMES_HOME", str(plugins_dir.parent))
 
         identifier = f"file://{repo_root}#my-plugin"
         target, manifest, name = pc._install_plugin_core(identifier, force=False)
@@ -698,10 +714,8 @@ class TestSubdirInstallE2E:
 
         repo_root = tmp_path / "monorepo"
         self._make_repo_with_subdir_plugin(repo_root)
-        plugins_dir = tmp_path / "installed"
-        plugins_dir.mkdir()
-        monkeypatch.setattr(pc, "_plugins_dir", lambda: plugins_dir)
-        monkeypatch.setattr(pc, "_install_metadata_path", lambda: plugins_dir / ".install-metadata.json")
+        plugins_dir = tmp_path / "home/plugins"
+        monkeypatch.setenv("HERMES_HOME", str(plugins_dir.parent))
         target, _manifest, _name = pc._install_plugin_core(f"file://{repo_root}#my-plugin", force=False)
         assert not (target / ".git").exists()
 
@@ -744,9 +758,8 @@ class TestSubdirInstallE2E:
         sp.run(["git", "init", "-q"], cwd=repo_root, check=True, env=env)
         sp.run(["git", "add", "-A"], cwd=repo_root, check=True, env=env)
         sp.run(["git", "commit", "-q", "-m", "init"], cwd=repo_root, check=True, env=env)
-        plugins_dir = tmp_path / "installed"
-        plugins_dir.mkdir()
-        monkeypatch.setattr(pc, "_plugins_dir", lambda: plugins_dir)
+        plugins_dir = tmp_path / "home/plugins"
+        monkeypatch.setenv("HERMES_HOME", str(plugins_dir.parent))
 
         target, manifest, name = pc._install_plugin_core(
             f"file://{repo_root}", force=False
@@ -757,7 +770,13 @@ class TestSubdirInstallE2E:
         assert target == (plugins_dir / "portable.test").resolve()
         assert pc._resolve_plugin_key("portable.test") == "portable.test"
 
+    @pytest.fixture(autouse=True)
+    def _isolated_publication(self, client):
+        """Publish through an isolated PM home, not the developer's active environment."""
 
+
+
+@pytest.mark.usefixtures("prepared_publication")
 class TestReviewedPinScanTrust:
     """A caution-verdict tree installs without a prompt when it is the reviewed catalog pin, still
     prompts/blocks as a raw source or at a different revision, and dangerous blocks regardless."""
@@ -801,6 +820,7 @@ class TestReviewedPinScanTrust:
             pc._install_plugin_core("https://github.com/o/r", force=False, ref=self.SHA, reviewed_pin=self.SHA)
 
 
+@pytest.mark.usefixtures("prepared_publication")
 class TestInstallReadabilityGate:
     """A clone that lands unreadable is repaired or rolled back, never shipped (#111804)."""
 
@@ -816,7 +836,8 @@ class TestInstallReadabilityGate:
         monkeypatch.setattr(pc, "_clone_plugin_repo", fake_clone)
         monkeypatch.setattr(pc, "_scan_plugin_tree", lambda *a, **k: None)
 
-    @pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="POSIX mode bits, non-root")
+    @pytest.mark.platforms("posix")
+    @pytest.mark.skipif(getattr(os, "geteuid", lambda: 1)() == 0, reason="root ignores mode bits")
     def test_unreadable_file_is_repaired_before_install(self, tmp_path, monkeypatch):
         from hermes_cli import plugins_cmd as pc
 
@@ -830,7 +851,8 @@ class TestInstallReadabilityGate:
         assert name == "badperm"  # manifest read after repair, not the URL fallback
         assert (target / "plugin.yaml").read_text(encoding="utf-8").startswith("name: badperm")
 
-    @pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="POSIX mode bits, non-root")
+    @pytest.mark.platforms("posix")
+    @pytest.mark.skipif(getattr(os, "geteuid", lambda: 1)() == 0, reason="root ignores mode bits")
     def test_unrepairable_tree_rolls_back_and_names_the_fix(self, tmp_path, monkeypatch):
         from hermes_cli import plugins_cmd as pc
 
@@ -929,3 +951,18 @@ def test_toggle_plugin_toolset_rewrites_a_list_literal_string_platform_entry(tmp
     plugins_cmd._toggle_plugin_toolset("my-plugin", enable=False)
     saved = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))["platform_toolsets"]
     assert saved["cli"] == ["web", "terminal"]
+
+
+@pytest.fixture
+def prepared_publication(client, tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+
+def test_default_compressor_does_not_activate_an_offered_plugin(monkeypatch):
+    from agent.agent_init import _select_context_engine
+    from types import SimpleNamespace
+    candidate = SimpleNamespace(name='offered', clone_for_agent=lambda: candidate)
+    monkeypatch.setattr('plugins.context_engine.load_context_engine', lambda _: None)
+    monkeypatch.setattr('hermes_cli.plugins.get_plugin_context_engine', lambda: candidate)
+    assert _select_context_engine({'context': {'engine': 'compressor'}}) is None
+    assert _select_context_engine({'context': {'engine': 'offered'}}).name == 'offered'

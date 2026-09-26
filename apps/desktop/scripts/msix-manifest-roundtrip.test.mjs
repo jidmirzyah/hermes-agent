@@ -45,10 +45,9 @@ function makeFakeDesktop(version) {
   return dir
 }
 
-function gitMock(tags, stableEpoch) {
+function gitMock(epoch) {
   execFileSync.mockImplementation((cmd, args) => {
-    if (args[0] === 'tag') return `${tags.join('\n')}\n`
-    if (args[0] === 'log') return `${stableEpoch}\n`
+    if (args[0] === 'for-each-ref') return `${epoch}\n`
     throw new Error(`unexpected git call ${cmd} ${args.join(' ')}`)
   })
 }
@@ -73,44 +72,33 @@ beforeEach(() => {
   execFileSync.mockReset()
 })
 
-test('stable tag: appIdentity derivation round-trips into the manifest Version', () => {
+test('stable tag: the build-time quad round-trips into the manifest Version', () => {
   const app = makeFakeDesktop('0.27.1')
+  gitMock(Math.floor(Date.UTC(2026, 7, 29, 1, 2, 3) / 1000))
   const { version, xml } = buildManifest(app, 'v0.27.1')
-  assert.equal(version, '0.27.1.0')
+  assert.equal(version, '2026.5761.123.0')
   assert.equal(identityVersion(xml), version)
 })
 
-test('canary tag: minutes-since-stable build number round-trips into the manifest Version', () => {
+test('canary tag: the build-time quad round-trips into the manifest Version', () => {
   const app = makeFakeDesktop('0.27.1')
-  // Stable v0.27.1 committed 2026-08-01T00:00:00Z; canary cut 2026-08-29T01:02:03Z.
-  const stableEpoch = Math.floor(Date.UTC(2026, 7, 1) / 1000)
-  gitMock(['v0.27.1', 'v0.27.2-canary.20260829010203'], stableEpoch)
-  const { version, xml } = buildManifest(app, 'v0.27.2-canary.20260829010203')
-  const expectedMinutes = Math.floor((Date.UTC(2026, 7, 29, 1, 2, 3) - Date.UTC(2026, 7, 1)) / 60000)
-  assert.equal(version, `0.27.2.${expectedMinutes}`)
+  const { version, xml } = buildManifest(app, 'v0.27.1+canary.20260829T010203Z')
+  assert.equal(version, '26.829.1.203')
   assert.equal(identityVersion(xml), version)
 })
 
 test('manifest Version components are 16-bit (makeappx rejects anything larger)', () => {
   const app = makeFakeDesktop('0.27.1')
-  const stableEpoch = Math.floor(Date.UTC(2026, 7, 1) / 1000)
-  gitMock(['v0.27.1', 'v0.27.2-canary.20260829010203'], stableEpoch)
-  const { xml } = buildManifest(app, 'v0.27.2-canary.20260829010203')
+  const { xml } = buildManifest(app, 'v0.27.1+canary.20260829T010203Z')
   for (const part of identityVersion(xml).split('.')) {
     const n = Number(part)
     assert.ok(Number.isInteger(n) && n >= 0 && n <= 65535, `component ${part} outside 16 bits`)
   }
 })
 
-test('a later canary stamps a strictly larger BUILD_NUMBER than an earlier one', () => {
-  // The build number exists so Windows can order canaries on the same
-  // base version; monotonicity across the stamp is the actual contract.
+test('a later build stamps a strictly larger quad than an earlier one', () => {
   const app = makeFakeDesktop('0.27.1')
-  const stableEpoch = Math.floor(Date.UTC(2026, 7, 1) / 1000)
-  const early = 'v0.27.2-canary.20260815080000'
-  const late = 'v0.27.2-canary.20260829010203'
-  gitMock([early, late, 'v0.27.1'], stableEpoch)
-  const earlyBuild = Number(buildManifest(app, early).version.split('.')[3])
-  const lateBuild = Number(buildManifest(app, late).version.split('.')[3])
-  assert.ok(lateBuild > earlyBuild, `${lateBuild} must exceed ${earlyBuild}`)
+  const early = Number(buildManifest(app, 'v0.27.1+canary.20260815T080000Z').version.split('.')[1])
+  const late = Number(buildManifest(app, 'v0.27.1+canary.20260829T010203Z').version.split('.')[1])
+  assert.ok(late > early, `${late} must exceed ${early}`)
 })

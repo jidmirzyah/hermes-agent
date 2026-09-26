@@ -477,34 +477,6 @@ def strip_launch_profile_env(env: dict, target_home: "str | Path | None" = None)
 
 
 # --- Shell discovery ---
-def _windows_bash_candidates(custom: "str | None") -> list[str]:
-    """Ordered bash.exe candidates on Windows: HERMES_GIT_BASH_PATH, our portable Git
-    under %LOCALAPPDATA%\\hermes\\git (PortableGit ``bin`` and MinGit ``usr\\bin``),
-    known Git-for-Windows dirs, then PATH last — ``shutil.which`` may return WSL's
-    bash, which fails silently on Windows paths."""
-    getenv = os.environ.get
-    lad = getenv("LOCALAPPDATA", "")
-    roots = [
-        lad and os.path.join(lad, "hermes", "git", "bin"),
-        lad and os.path.join(lad, "hermes", "git", "usr", "bin"),
-        os.path.join(getenv("ProgramFiles", r"C:\Program Files"), "Git", "bin"),
-        os.path.join(getenv("ProgramFiles(x86)", r"C:\Program Files (x86)"), "Git", "bin"),
-        lad and os.path.join(lad, "Programs", "Git", "bin"),
-    ]
-    raw = [custom or "", *(os.path.join(r, "bash.exe") for r in roots if r)]
-    candidates = list(dict.fromkeys(c for c in raw if c and os.path.isfile(c)))
-    found = shutil.which("bash")
-    if found and found not in candidates:
-        # Skip WSL/system bash.exe (C:\Windows\System32\bash.exe or
-        # WindowsApps bash.exe) — it is a stub launcher, not a usable shell.
-        norm = os.path.normpath(found).lower()
-        if "system32" in norm or "windowsapps" in norm:
-            logger.debug("Skipping WSL/system bash.exe at %s", found)
-        else:
-            candidates.append(found)
-    return candidates
-
-
 def _find_bash() -> str:
     """Resolve the shell Hermes runs commands with. Owned by pm (the store
     is the authority on bundled bash); this is a thin wrapper over

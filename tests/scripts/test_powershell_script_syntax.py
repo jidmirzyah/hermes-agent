@@ -53,6 +53,29 @@ if ($failed) { exit 1 }
 """
 
 
+# Scripts users fetch and run as a string, never from disk:
+# `& ([scriptblock]::Create((irm <raw url>)))` (website/docs/user-guide/
+# windows-native.md, scripts/update-test/HANDOFF.md). Windows PowerShell
+# 5.1's irm keeps a UTF-8 BOM as a literal U+FEFF, so `param(` is no longer
+# the first statement and the script dies with "The assignment expression is
+# not valid". ParseFile above treats the BOM as an encoding marker, so it
+# cannot catch this; the BOM has been stripped twice and re-added once.
+# (The GUI bootstrap adds a BOM to its *cached* copy on purpose, because it
+# runs that copy with -File; see install_script.rs::prepare_cached_script_bytes.)
+FETCHED_AS_STRING = (
+    REPO_ROOT / "scripts/install.ps1",
+    REPO_ROOT / "scripts/update-test/hermes-update-rehearsal.ps1",
+)
+
+
+@pytest.mark.parametrize("script", FETCHED_AS_STRING, ids=lambda p: p.name)
+def test_fetched_scripts_have_no_utf8_bom(script: Path) -> None:
+    assert not script.read_bytes().startswith(b"\xef\xbb\xbf"), (
+        f"{script.relative_to(REPO_ROOT)} starts with a UTF-8 BOM; "
+        "[scriptblock]::Create((irm ...)) cannot parse it on PowerShell 5.1"
+    )
+
+
 def _powershell_host() -> str | None:
     for name in ("pwsh", "powershell"):
         found = shutil.which(name)

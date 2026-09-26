@@ -23,7 +23,7 @@ from scripts.releases.darwin import (
 
 
 def _inputs(version="0.28.0", light=False):
-    channel = "canary" if "-canary." in version else "stable"
+    channel = "canary" if "+canary." in version else "stable"
     bytes_by_key = {}
     legs = {}
     for i, arch in enumerate(("arm64", "x64")):
@@ -55,10 +55,10 @@ def base64_sha512(data: bytes) -> str:
 
 
 def test_real_prune_protects_live_macos_artifacts_and_fails_closed(r2_server, monkeypatch):
-    legs, _bytes = _inputs("0.28.0-canary.20200101000000")
-    plan = merge_mac_feeds(legs, "v0.28.0-canary.20200101000000")
+    legs, _bytes = _inputs("0.28.0+canary.20200101T000000Z")
+    plan = merge_mac_feeds(legs, "v0.28.0+canary.20200101T000000Z")
     references = mac_feed_references(plan["text"])
-    stale = "releases/tag/v0.27.0-canary.20200101000000/unreferenced.zip"
+    stale = "releases/tag/v0.27.0+canary.20200101T000000Z/unreferenced.zip"
     for key in [plan["key"], *references, stale]:
         r2_server.store[key] = (b"x", '"e"')
     r2_server.store[plan["key"]] = (plan["text"].encode(), '"e"')
@@ -90,8 +90,8 @@ def test_merges_native_legs_and_preserves_release_metadata():
     ]
     assert r2.cache_control_for(plan["key"]) == "no-store"
     selection = _darwin_feed("canary", True)
-    light_legs, _ = _inputs("0.29.0-canary.20260906000000", light=True)
-    light_plan = merge_mac_feeds(light_legs, "v0.29.0-canary.20260906000000", light=True)
+    light_legs, _ = _inputs("0.29.0+canary.20260906T000000Z", light=True)
+    light_plan = merge_mac_feeds(light_legs, "v0.29.0+canary.20260906T000000Z", light=True)
     assert light_plan["key"] == f"{selection['directory']}/{selection['fileName']}"
 
 
@@ -122,16 +122,17 @@ def test_rejects_broken_legs_instead_of_publishing(kind):
 
 def test_semver_grammar_rejects_non_release_versions():
     # The Python port never imports npm semver; it implements exactly the
-    # release grammar (vMAJOR.MINOR.PATCH[-canary.<14 digits>]) and fails
+    # release grammar (vMAJOR.MINOR.PATCH[+canary.<full UTC timestamp>]) and fails
     # loudly on anything else instead of guessing an order.
     from scripts.releases.semver import compare, is_valid_version
 
-    assert is_valid_version("0.28.0") and is_valid_version("0.28.0-canary.20260904101010")
-    assert not is_valid_version("0.28") and is_valid_version("2026.7.20")
+    assert is_valid_version("0.28.0") and is_valid_version("0.28.0+canary.20260904T101010Z")
+    # Legacy CalVer (four-digit major) is not a release version anywhere.
+    assert not is_valid_version("0.28") and not is_valid_version("2026.7.20")
     assert not is_valid_version("0.28.0-beta.1")
     assert compare("0.28.0", "0.27.9") == 1
-    assert compare("0.28.0-canary.20260904101010", "0.28.0") == -1  # prerelease < release
-    assert compare("0.28.0-canary.20260904101010", "0.28.0-canary.20260904101011") == -1
+    assert compare("0.28.0+canary.20260904T101010Z", "0.28.0") == 0
+    assert compare("0.28.0+canary.20260904T101010Z", "0.28.0+canary.20260904T101011Z") == 0
     with pytest.raises(ValueError):
         compare("nonsense", "0.28.0")
 

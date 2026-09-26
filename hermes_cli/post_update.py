@@ -206,24 +206,35 @@ def step_adopt_blessed_checkout(project_root: Path | None = None) -> dict:
     if not is_blessed:
         return {"ok": True, "skipped": "not-a-blessed-root"}
 
-    stamp = {
-        "schemaVersion": 2,
-        "updateMechanism": "self",
-        "source": "adoption",
-        "adoptedAt": datetime.now(timezone.utc).isoformat(),
-    }
+    from hermes_cli.source_stamp import write_source_stamp
+
     try:
-        fd, tmp_name = tempfile.mkstemp(
-            dir=str(root), prefix=".install-stamp.", suffix=".tmp"
-        )
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(json.dumps(stamp, indent=2) + "\n")
-        os.replace(tmp_name, stamp_path)
+        # Full checkout identity when git can answer; the birth-certificate
+        # minimum below only when it cannot (or the tree is read-only).
+        identified = write_source_stamp(root)
     except OSError as exc:
         # A read-only tree (nix-like layouts without their own stamp)
         # must not crash the boot — it just stays unadopted.
         logger.debug("blessed-checkout adoption skipped (unwritable): %s", exc)
         return {"ok": True, "skipped": f"unwritable: {exc}"}
+    if identified is None:
+        # No derivable git identity: write the minimal birth certificate.
+        stamp = {
+            "schemaVersion": 2,
+            "updateMechanism": "self",
+            "source": "adoption",
+            "adoptedAt": datetime.now(timezone.utc).isoformat(),
+        }
+        try:
+            fd, tmp_name = tempfile.mkstemp(
+                dir=str(root), prefix=".install-stamp.", suffix=".tmp"
+            )
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps(stamp, indent=2) + "\n")
+            os.replace(tmp_name, stamp_path)
+        except OSError as exc:
+            logger.debug("blessed-checkout adoption skipped (unwritable): %s", exc)
+            return {"ok": True, "skipped": f"unwritable: {exc}"}
     logger.info("adopted blessed checkout at %s (updateMechanism: self)", root)
     return {"ok": True, "adopted": str(root)}
 

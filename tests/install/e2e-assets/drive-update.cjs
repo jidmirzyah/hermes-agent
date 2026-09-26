@@ -21,7 +21,7 @@ const fs = require('node:fs')
 const { _electron } = require('@playwright/test')
 const { prepareWindowForInput } = require('./window-input.cjs')
 const { observeProcessClose } = require('./process-close.cjs')
-const { pickAppWindow, openAbout, waitForUpdate } = require('./update-ui.cjs')
+const { pickAppWindow, openAbout, readManualUpdateCommand, waitForUpdate } = require('./update-ui.cjs')
 
 const exePath = process.argv[2]
 const proofDir = process.argv[3]
@@ -61,19 +61,21 @@ killer.unref()
 
 async function main() {
   const { runUpdateWindowChat } = await import('./update-window-chat.mjs')
-  const { updateWindowEnvironment } = await import('./smoke-env.mjs')
+  const { isolateUpdateWindowEnvironment, isolatedElectronArgs, updateWindowEnvironment } = await import('./smoke-env.mjs')
   const origin = nativeHandoff ? 'bundled' : 'source'
   const root = nativeHandoff ? path.join(path.dirname(exePath), 'resources', 'agent-payload') : path.join(process.env.HERMES_HOME, 'hermes-agent')
+  const launchEnv = isolateUpdateWindowEnvironment(updateWindowEnvironment(process.env, root, origin))
+  const userData = launchEnv.HERMES_DESKTOP_USER_DATA_DIR
   log(`launching ${exePath}`)
 
   const app = await _electron.launch({
     executablePath: exePath,
-    args: ['--disable-gpu', '--no-sandbox', '--force-renderer-accessibility'],
+    args: isolatedElectronArgs(['--disable-gpu', '--no-sandbox', '--force-renderer-accessibility'], userData),
     cwd: path.dirname(exePath),
     // Inherit the driver's env: HERMES_HOME (isolated install) and
     // GIT_CONFIG_GLOBAL (URL redirect to the staged serve repo) MUST reach
     // the main process so its update check fetches from the staged repo.
-    env: updateWindowEnvironment(process.env, root, origin),
+    env: launchEnv,
     timeout: 120_000
   })
   const child = app.process()
@@ -91,7 +93,7 @@ async function main() {
   await runUpdateWindowChat(app, page, {
     mockUrl: process.env.HERMES_E2E_MOCK_URL, outDir: proofDir,
     expectCommit: oldSha,
-    origin, root, executable: exePath,
+    origin, root, executable: exePath, userData,
   })
   await shot(page, '01-app-booted')
 
@@ -120,6 +122,18 @@ async function main() {
   // The app can close during the dwell. This wait must outlive its page.
   await new Promise(resolve => setTimeout(resolve, 1200))
   await shot(page, '05-updating-overlay')
+
+  const manualCommand = await readManualUpdateCommand(page)
+  if (manualCommand) {
+    fs.writeFileSync(
+      path.join(proofDir, 'manual-update.json'),
+      `${JSON.stringify({ command: manualCommand, oldSha }, null, 2)}\n`,
+    )
+    log(`OLD requires the manual update path: ${manualCommand}`)
+    await app.close()
+    await waitForProcessClose()
+    return 42
+  }
 
   // ── Wait for the hand-off to take over ────────────────────────────────
   // Clicking Update now spawns the detached updater (desktop-update.ps1 or
@@ -180,7 +194,7 @@ async function main() {
 }
 
 main()
-  .then(() => process.exit(0))
+  .then(code => process.exit(code || 0))
   .catch(err => {
     console.error(`[drive-update] FAILED: ${err.message}`)
     process.exit(1)

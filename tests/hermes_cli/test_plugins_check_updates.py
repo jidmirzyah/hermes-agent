@@ -467,3 +467,18 @@ def test_run_checks_never_mutates(tmp_path):
     )
     assert results[0].update_available is True
     assert (plugins / ".install-metadata.json").read_text(encoding="utf-8") == before
+
+
+@pytest.mark.parametrize("url", ["http://feed.example/f.yml", "file:///etc/passwd", "ftp://x/f.yml", ""])
+def test_default_fetch_refuses_non_https_feeds_before_any_request(monkeypatch, url):
+    """Rows saved before the https rule (or hand-edited) still reach the real fetcher from the
+    gateway tick; the sink refuses them instead of opening the URL."""
+    import urllib.request
+    from hermes_cli.plugins_updates import default_fetch
+
+    def never(*a, **k):
+        raise AssertionError("urlopen must not be reached")
+
+    monkeypatch.setattr(urllib.request, "urlopen", never)
+    with pytest.raises(ValueError, match="https://"):
+        default_fetch(url)

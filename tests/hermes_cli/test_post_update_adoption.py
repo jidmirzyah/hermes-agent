@@ -81,10 +81,8 @@ def test_sealed_tree_untouched(tmp_path, monkeypatch):
     assert not (root / "install-stamp.json").exists()
 
 
-@pytest.mark.skipif(
-    sys.platform == "win32" or os.geteuid() == 0,
-    reason="chmod-based read-only dirs are not enforceable on Windows or as root",
-)
+@pytest.mark.platforms("posix")
+@pytest.mark.skipif(getattr(os, "geteuid", lambda: 1)() == 0, reason='chmod-based read-only dirs are not enforceable on Windows or as root')
 def test_read_only_tree_fails_soft(blessed_checkout):
     """nix-like read-only tree: debug-log skip, never a crash."""
     mode = stat.S_IMODE(os.stat(blessed_checkout).st_mode)
@@ -107,3 +105,39 @@ def test_adoption_keeps_the_steward_verdict_checkout(blessed_checkout):
     assert sealed_steward(blessed_checkout) is None
     stamp = json.loads((blessed_checkout / "install-stamp.json").read_text())
     assert stamp["updateMechanism"] == "self"
+
+
+def test_adoption_of_real_checkout_records_full_identity(tmp_path, monkeypatch):
+    """A real git checkout gets the full source stamp (commit, base version),
+    not just the birth-certificate minimum."""
+    import subprocess
+
+    git_env = {"HOME": str(tmp_path), "PATH": os.environ["PATH"]}
+
+    home = tmp_path / ".hermes"
+    root = home / "hermes-agent"
+    root.mkdir(parents=True)
+
+    def git(*args: str) -> None:
+        subprocess.run(["git", *args], cwd=root, env=git_env, check=True,
+                       capture_output=True)
+
+    git("init", "-q")
+    git("config", "user.name", "Hermes Test")
+    git("config", "user.email", "hermes@example.invalid")
+    (root / "tracked").write_text("release\n", encoding="utf-8")
+    git("add", "tracked")
+    git("commit", "-qm", "release")
+    git("tag", "v0.21.4")
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_INSTALL_ROOT", str(root))
+
+    result = step_adopt_blessed_checkout()
+
+    assert result.get("adopted") == str(root)
+    stamp = json.loads((root / "install-stamp.json").read_text())
+    assert stamp["updateMechanism"] == "self"
+    assert stamp["baseVersion"] == "0.21.4"
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, env=git_env,
+                          check=True, capture_output=True, text=True).stdout.strip()
+    assert stamp["commit"] == head

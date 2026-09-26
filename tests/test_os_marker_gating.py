@@ -7,8 +7,16 @@ import sys
 import pytest
 
 
+_INVALID_MARKERS = {
+    "stacked": "@pytest.mark.platforms('any')",
+    "keyword": "@pytest.mark.platforms('any', bogus=True)",
+    "typo": "@pytest.mark.platforms('linx')",
+}
+
+
 @pytest.mark.parametrize("invalid,message", [("", ""), ("stacked", "at most one platforms()"),
-                                               ("keyword", "unexpected keyword")])
+                                               ("keyword", "unexpected keyword"),
+                                               ("typo", "unknown spec")])
 def test_native_collection_witnesses(tmp_path, invalid, message):
     root = Path(__file__).resolve().parents[1]
     host = {"linux": "linux", "darwin": "macos", "win32": "windows"}[sys.platform]
@@ -25,7 +33,7 @@ def test_native_collection_witnesses(tmp_path, invalid, message):
         suite += f"{marker}\ndef test_{name}():\n    Path({name!r}).touch()\n"
     (tmp_path / "test_valid.py").write_text(suite, encoding="utf-8")
     if invalid:
-        marker = "@pytest.mark.platforms('any')" if invalid == "stacked" else "@pytest.mark.platforms('any', bogus=True)"
+        marker = _INVALID_MARKERS[invalid]
         module_mark = "pytestmark = pytest.mark.platforms('any')\n" if invalid == "stacked" else ""
         (tmp_path / "test_bad.py").write_text(
             f"import pytest\n{module_mark}{marker}\ndef test_bad():\n    raise AssertionError('must reject collection')\n",

@@ -422,6 +422,7 @@ def ensure(
     *,
     base_env: Optional[dict] = None,
     explicit: bool = False,
+    verify: bool = True,
     progress=None,
     pause_event: threading.Event | None = None,
     download_progress: ProgressFn | None = None,
@@ -430,6 +431,11 @@ def ensure(
     """``explicit`` marks a deliberate install command (`hermes pm
     install`, `hermes pm bundle`) — those ARE the remedy the lazy-install
     policy names, so the policy does not apply to them.
+
+    ``verify`` re-hashes an already-recorded entry and repairs it when the
+    bytes moved. A deliberate install keeps that check. Shell activation
+    passes ``False``. It trusts the recorded digest, the same check startup
+    uses, because hashing every tool tree costs seconds per shell.
 
     ``progress(stage, done, total, label)`` reports the slow parts of an
     install to a UI, including ordered multi-archive labels.
@@ -454,7 +460,7 @@ def ensure(
                     json.dumps(_identity(lockfile, package.name, target), sort_keys=True))
         if identity in checked:
             continue
-        if _installed_location(package, lockfile, target, verify=explicit) is None:
+        if _installed_location(package, lockfile, target, verify=explicit and verify) is None:
             missing.append(package)
         else:
             checked.add(identity)
@@ -741,13 +747,17 @@ def _store_path_dirs() -> list[str]:
     return dirs
 
 
-def activate() -> list[str]:
+def activate(*, allow_incomplete: bool = False) -> list[str]:
     """Make the installed store usable: prepend its tool dirs to
     os.environ['PATH'] so reactive `shutil.which('git'|'bash'|'ffmpeg'|...)`
     resolves the bundled binaries. The gate is `check()` — if the store is
     broken, refuse to inject (fail fast rather than serving a partial PATH).
     Return the check's problems, or an empty list on success, so startup
     callers can report the verdict without checking the store twice.
+
+    ``allow_incomplete`` is the install-time exception: tools are published
+    before the venv sync, so a missing venv must not hide the tools the sync
+    is about to build against. A missing tool still refuses.
 
     This is the ONE sanctioned global PATH write: PATH is the discovery
     contract every `which` reads, not a tool-specific env leak. Store-first
@@ -756,6 +766,8 @@ def activate() -> list[str]:
     import os
 
     problems = check()
+    if allow_incomplete:
+        problems = [problem for problem in problems if not problem.startswith("venv:")]
     if problems:
         return problems
     dirs = _store_path_dirs()

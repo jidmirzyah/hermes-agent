@@ -30,7 +30,6 @@
       # inventing a sentinel that could be a real branch name.
       rev =
         inputs.self.rev or (if dirtyRevision != null then builtins.substring 0 40 dirtyRevision else null);
-      revCount = inputs.self.revCount or null;
       rawRef = inputs.self.ref or null;
       branch = if rawRef != null then builtins.replaceStrings [ "refs/heads/" ] [ "" ] rawRef else null;
       dirty = dirtyRevision != null;
@@ -40,7 +39,6 @@
         npm-lockfile-fix = inputs'.npm-lockfile-fix.packages.default;
         inherit
           rev
-          revCount
           branch
           dirty
           lastModified
@@ -60,6 +58,7 @@
           "fal"
           "feishu"
           "firecrawl"
+          "hindsight"
           "honcho"
           "messaging"
           "modal"

@@ -179,6 +179,10 @@ def cmd_channel(args) -> None:
             print(json.dumps(result, sort_keys=True, indent=2))
             if not args.publish:
                 print("Dry run: no workflow was dispatched. Add --publish to dispatch.")
+                return
+            print(f"Channel build for {args.channel} started at commit {result['commit']}.")
+            print(f"Workflow: https://github.com/{repository}/actions/workflows/desktop-bundled-release.yml")
+            print("Wait for that workflow to finish. It builds this commit and moves the channel when every native smoke passes.")
             return
         publisher = configured_publisher(repository)
         operations = {
@@ -193,10 +197,14 @@ def cmd_channel(args) -> None:
         selected = next(key for key in operations if getattr(args, key, None))
         result = operations[selected]()
         print(json.dumps(result, sort_keys=True, indent=2))
-        if not args.publish and selected != "channels":
-            print(
-                "Dry run: no R2 object or workflow was written. Add --publish to execute."
-            )
+        if selected == "channels":
+            print("These are the channel records. This command did not change them.")
+        elif not args.publish:
+            print("Dry run: no R2 object was written. Add --publish to execute.")
+        elif selected == "retire_channel":
+            print(f"Retired {args.retire_channel}. New installs move to {args.to} at version {args.minimum_version} or newer.")
+        else:
+            print("Wrote the channel records. Check the JSON above for each record.")
     except (OSError, ValueError, subprocess.SubprocessError, r2.R2RequestError) as exc:
         raise SystemExit(f"release: channel operation refused: {exc}") from exc
 
@@ -292,12 +300,9 @@ def validate_arguments(parser, args) -> bool:
     if args.retire_channel and not all(retirement):
         parser.error("--retire-channel requires --to and --minimum-version")
     if (not args.channel and args.build_commit) or any((
-        args.bump,
         args.canary,
         args.prune_canaries,
-        args.first_release,
         args.date,
-        args.output,
         args.no_changelog,
     )):
         parser.error(

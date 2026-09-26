@@ -35,8 +35,6 @@ name: Install & Update E2E
 # Triggers:
 #   * every 12 hours, so upstream drift (a new uv, a Node bump, a PyPI change)
 #     surfaces on a schedule rather than in someone's review cycle;
-#   * when a release tag is created -- the moment the set of versions users can
-#     update FROM changes, and the moment a broken updater would strand them;
 #   * manually, where you can pick the route and how many releases to sample.
 #
 # Deliberately NOT on pull_request: a leg takes ~11 minutes of real toolchain
@@ -118,18 +116,13 @@ on:
   schedule:
     # Every 12 hours, off the hour to avoid the top-of-hour runner crunch.
     - cron: '20 7,19 * * *'
-  push:
-    tags:
-      # Release tags only: the repo also carries backup/* and one-off tags.
-      - 'v[0-9]+.[0-9]+.[0-9]+'
-      - 'v[0-9]+.[0-9]+.[0-9]+.[0-9]+'
 
 permissions:
   contents: read
 
 # A workflow_call run (stable release) is never cancelled: its group uses
 # github.run_id so a parent rerun cannot kill this child mid-flight. The
-# scheduled/push runs keep ref-scoped collapse.
+# scheduled/manual runs keep ref-scoped collapse.
 concurrency:
   group: install-e2e-${{ inputs.release == true && github.run_id || github.ref }}
   cancel-in-progress: ${{ inputs.release != true }}

@@ -183,14 +183,13 @@ interface PreservedRun {
   rows: ChatMessage[]
 }
 
-export function preserveLocalAssistantErrors(
+function mergeStoredAssistantErrors(
   nextMessages: ChatMessage[],
   currentMessages: ChatMessage[]
 ): ChatMessage[] {
-  nextMessages = reconcileLocalAssistantTimeline(nextMessages, currentMessages)
   const localById = new Map(currentMessages.map(message => [message.id, message]))
 
-  const mergedNextMessages = nextMessages.map(message => {
+  return nextMessages.map(message => {
     if (message.role !== 'assistant' || message.error || message.hidden) {
       return message
     }
@@ -208,17 +207,23 @@ export function preserveLocalAssistantErrors(
       pending: false
     }
   })
+}
 
+const normalizedMessageText = (message: ChatMessage): string => chatMessageText(message).replace(/\s+/g, ' ').trim()
+
+function localAssistantErrorIdsToPreserve(
+  mergedNextMessages: ChatMessage[],
+  currentMessages: ChatMessage[]
+): Set<string> {
   const existingIds = new Set(mergedNextMessages.map(message => message.id))
   const preserveIds = new Set<string>()
-  const normalize = (value: string) => value.replace(/\s+/g, ' ').trim()
   const tailUserInNext = [...mergedNextMessages].reverse().find(message => message.role === 'user' && !message.hidden)
-  const tailUserText = tailUserInNext ? normalize(chatMessageText(tailUserInNext)) : ''
+  const tailUserText = tailUserInNext ? normalizedMessageText(tailUserInNext) : ''
   const tailUserRefs = tailUserInNext ? (tailUserInNext.attachmentRefs ?? []).join('\n') : ''
 
-  const matchesTailUserInNext = (candidate: ChatMessage) =>
+  const matchesTailUserInNext = (candidate: ChatMessage): boolean =>
     Boolean(tailUserInNext) &&
-    normalize(chatMessageText(candidate)) === tailUserText &&
+    normalizedMessageText(candidate) === tailUserText &&
     (candidate.attachmentRefs ?? []).join('\n') === tailUserRefs
 
   for (let index = 0; index < currentMessages.length; index += 1) {
@@ -258,6 +263,16 @@ export function preserveLocalAssistantErrors(
     }
   }
 
+  return preserveIds
+}
+
+function insertPreservedErrorRuns(
+  mergedNextMessages: ChatMessage[],
+  currentMessages: ChatMessage[],
+  preserveIds: Set<string>
+): ChatMessage[] {
+  const existingIds = new Set(mergedNextMessages.map(message => message.id))
+
   if (preserveIds.size === 0) {
     return mergedNextMessages
   }
@@ -266,7 +281,7 @@ export function preserveLocalAssistantErrors(
   // locally instead of below newer turns. When the refresh already fills that
   // gap with the same role/text sequence, the turn was stored under new ids.
   // A run with no refreshed successor stays trailing. #118002
-  const label = (message: ChatMessage) => `${message.role}:${normalize(chatMessageText(message))}`
+  const label = (message: ChatMessage): string => `${message.role}:${normalizedMessageText(message)}`
   const runs: PreservedRun[] = []
   let anchor: string | undefined
 
@@ -307,6 +322,17 @@ export function preserveLocalAssistantErrors(
     ...mergedNextMessages.flatMap(message => [message, ...(keptAfter.get(message.id) ?? [])]),
     ...(keptAfter.get(undefined) ?? [])
   ]
+}
+
+export function preserveLocalAssistantErrors(
+  nextMessages: ChatMessage[],
+  currentMessages: ChatMessage[]
+): ChatMessage[] {
+  const reconciled: ChatMessage[] = reconcileLocalAssistantTimeline(nextMessages, currentMessages)
+  const merged: ChatMessage[] = mergeStoredAssistantErrors(reconciled, currentMessages)
+  const preserveIds: Set<string> = localAssistantErrorIdsToPreserve(merged, currentMessages)
+
+  return insertPreservedErrorRuns(merged, currentMessages, preserveIds)
 }
 
 export function branchGroupForUser(userMessage: ChatMessage): string {

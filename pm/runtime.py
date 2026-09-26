@@ -137,12 +137,53 @@ def prepare_runtime(uv: Path, python: Path, root: Path, *, offline: bool = False
         try:
             print("Preparing the isolated PM runtime…", file=sys.stderr, flush=True)
             executable = stage_runtime(uv, python, environment, project=project, offline=offline, cache=cache)
+            (environment / ".lease-managed").touch()
             _write(environment / "pm-runtime.json", {"inputs": identity})
             _write(selected, {"inputs": identity, "generation": generation.as_posix()})
             return executable
         except BaseException:
             shutil.rmtree(environment, ignore_errors=True)
             raise
+
+
+def lease_current_runtime() -> None:
+    """Pin the PM runtime this process runs from so the collector leaves it alone."""
+    if (Path(sys.prefix) / "pm-runtime.json").is_file():
+        from hermes_cli.runtime_state import lease_directory
+
+        lease_directory(Path(sys.prefix))
+
+
+def collect_runtime_generations(root: Path) -> list[Path]:
+    """Remove PM runtime generations nothing can run from any more.
+
+    Staging happens under ``.prepare.lock``, so with it held an unpublished generation
+    (no ``pm-runtime.json``) is an aborted stage. A superseded published generation goes
+    once every worker launched from it has exited; generations published before leases
+    existed stay, as the application collector keeps its own.
+    """
+    from hermes_cli.runtime_state import _lock, leases_held
+
+    generations = root / "generations"
+    removed: list[Path] = []
+    if not generations.is_dir():
+        return removed
+    with (root / ".prepare.lock").open("a+b") as lock:
+        if not _lock(lock.fileno(), wait=False):
+            return removed  # a stage is in flight; maintenance skips rather than queues
+        try:
+            selected = json.loads((root / "selected.json").read_text(encoding="utf-8-sig")).get("generation", "")
+        except FileNotFoundError:
+            selected = ""
+        for generation in sorted(generations.iterdir()):
+            if not generation.is_dir() or generation.is_symlink() or generation == root / selected:
+                continue
+            published = (generation / "pm-runtime.json").is_file()
+            if published and (not (generation / ".lease-managed").is_file() or leases_held(generation)):
+                continue
+            shutil.rmtree(generation)
+            removed.append(generation)
+    return removed
 
 
 

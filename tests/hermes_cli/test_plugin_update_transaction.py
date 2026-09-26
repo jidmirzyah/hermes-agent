@@ -19,25 +19,28 @@ def _commit(repo, message):
     return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
 
 
-def _version(repo, version, *, broken=False, minimum=""):
+def _version(repo, version, *, broken=False, minimum="", libraries=("shared-library",)):
     from hermes_cli.plugins_manifest import SUPPORTED_MANIFEST_VERSION
 
     (repo / "plugin.yaml").write_text(
         f"name: transactional\nversion: {version}\nmanifest_version: {SUPPORTED_MANIFEST_VERSION}\n"
         f"requires_hermes: '{minimum}'\n", encoding="utf-8")
     (repo / "__init__.py").write_text(f"VERSION = {version!r}\ndef register(ctx):\n    pass\n", encoding="utf-8")
+    (repo / ".gitignore").write_text("node_modules/\n", encoding="utf-8")
     deps = '["impossible-plugin-dep==1", "impossible-plugin-dep==2"]' if broken else '[]'
-    library = repo.parent / "shared-library"
-    library.mkdir(exist_ok=True)
-    (library / "pyproject.toml").write_text(
-        '[project]\nname="shared-library"\nversion="1"\nrequires-python=">=3.14"\n'
-        '[tool.uv]\npackage=false\n', encoding="utf-8")
+    for name in libraries:
+        library = repo.parent / name
+        library.mkdir(exist_ok=True)
+        (library / "pyproject.toml").write_text(
+            f'[project]\nname="{name}"\nversion="1"\nrequires-python=">=3.14"\n'
+            '[tool.uv]\npackage=false\n', encoding="utf-8")
     if not broken:
-        deps = '["shared-library"]'
+        deps = json.dumps(list(libraries))
+    sources = "".join(f'{name}={{path="../{name}"}}\n' for name in libraries)
     (repo / "pyproject.toml").write_text(
         f'[project]\nname="transactional"\nversion="{version}"\nrequires-python=">=3.14"\n'
         f'dependencies={deps}\n[tool.uv]\npackage=false\n'
-        '[tool.uv.sources]\nshared-library={path="../shared-library"}\n', encoding="utf-8")
+        f'[tool.uv.sources]\n{sources}', encoding="utf-8")
     return _commit(repo, version)
 
 
@@ -72,6 +75,98 @@ def installed(admission_env, monkeypatch, request):
     return root, home, repo, target, state
 
 
+def _head(repo) -> str:
+    return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+
+
+@pytest.mark.parametrize("installed", ["catalog", "custom"], indirect=True)
+def test_unattended_update_refuses_newly_declared_python_dependencies(installed):
+    """Install gates Python deps behind a prompt; an update that ADDS a dependency must not
+    slip them into the shared environment without one. With nobody to ask (dashboard, gateway
+    ``plugins.auto_apply``) the update is refused and nothing — code, env, metadata — moves."""
+    import shutil
+    from hermes_cli import plugins_cmd
+    from pm.environments import selected_venv
+
+    root, home, repo, target, state = installed
+    old_head, old_venv = _head(target), selected_venv(root / "core")
+    state["sha"] = _version(repo, "2.0.0", libraries=("shared-library", "second-library"))
+    shutil.copytree(repo.parent / "second-library", target.parent / "second-library", dirs_exist_ok=True)
+
+    result = plugins_cmd.dashboard_update_user_plugin("transactional")
+
+    assert result["ok"] is False, result
+    assert "second-library" in result["error"]
+    assert _head(target) == old_head
+    assert selected_venv(root / "core") == old_venv
+
+
+@pytest.mark.parametrize("installed", ["custom"], indirect=True)
+@pytest.mark.parametrize("answer, published", [("y", True), ("n", False)])
+def test_interactive_update_asks_before_installing_new_python_dependencies(
+        installed, monkeypatch, answer, published):
+    """A terminal user is asked the same question install asks; yes publishes code AND the
+    dependency together, no leaves both untouched."""
+    import shutil
+    from types import SimpleNamespace
+    from hermes_cli import plugins_cmd
+    from hermes_cli.plugins_transaction import update_plugin
+    from pm.environments import selected_venv
+
+    root, home, repo, target, state = installed
+    old_head, old_venv = _head(target), selected_venv(root / "core")
+    state["sha"] = _version(repo, "2.0.0", libraries=("shared-library", "second-library"))
+    shutil.copytree(repo.parent / "second-library", target.parent / "second-library", dirs_exist_ok=True)
+    monkeypatch.setattr("sys.stdin", SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setattr("sys.stdout", SimpleNamespace(isatty=lambda: True, write=lambda *a: None, flush=lambda: None))
+    asked: list = []
+    monkeypatch.setattr("builtins.input", lambda prompt="": asked.append(prompt) or answer)
+
+    if published:
+        update_plugin(target, interactive=True)
+    else:
+        with pytest.raises(plugins_cmd.PluginOperationError, match="declined"):
+            update_plugin(target, interactive=True)
+
+    assert asked, "no dependency consent prompt was shown"
+    assert (_head(target) == state["sha"]) is published
+    assert (selected_venv(root / "core") != old_venv) is published
+    assert (_head(target) != old_head) is published
+
+
+@pytest.mark.parametrize("installed", ["catalog", "custom"], indirect=True)
+def test_update_rebuilds_an_accepted_node_sidecar_when_its_manifest_moves(installed, monkeypatch):
+    """Publication swaps the whole tree, so a node_modules the user accepted at install would
+    come back stale (custom pull copies it) or missing (catalog re-clone). When package.json
+    changes, the sidecar is rebuilt in the staged copy and published with the code."""
+    from hermes_cli import plugins_cmd
+    from pm import workspace
+
+    root, home, repo, target, state = installed
+    (repo / "package.json").write_text('{"name": "transactional", "dependencies": {}}', encoding="utf-8")
+    _commit(repo, "add node sidecar")
+    # the user accepted the sidecar at install time
+    (target / "node_modules").mkdir()
+    (target / "node_modules" / "stale").write_text("v1", encoding="utf-8")
+    (repo / "package.json").write_text('{"name": "transactional", "dependencies": {"left-pad": "*"}}', encoding="utf-8")
+    state["sha"] = _commit(repo, "bump node deps")
+    rebuilt: list = []
+
+    def fake_npm(plugin_dir, *, explicit=False):
+        rebuilt.append(plugin_dir)
+        (plugin_dir / "node_modules").mkdir(exist_ok=True)
+        (plugin_dir / "node_modules" / "fresh").write_text("v2", encoding="utf-8")
+        return None
+
+    monkeypatch.setattr(workspace, "install_node_sidecar", fake_npm)
+    result = plugins_cmd.dashboard_update_user_plugin("transactional")
+
+    assert result["ok"] is True, result
+    assert len(rebuilt) == 1 and rebuilt[0] != target, "npm must run in the staged copy, not the live tree"
+    assert (target / "node_modules" / "fresh").is_file()
+    assert _head(target) == state["sha"]
+
+
 @pytest.mark.parametrize("installed", ["catalog", "custom"], indirect=True)
 @pytest.mark.parametrize("failure", ["dependencies", "version", "publication", "manifest"])
 def test_failed_update_keeps_code_metadata_config_and_environment(installed, monkeypatch, failure):
@@ -89,6 +184,11 @@ def test_failed_update_keeps_code_metadata_config_and_environment(installed, mon
     old_head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=target, text=True).strip()
     state["sha"] = _version(repo, "2.0.0", broken=failure == "dependencies",
                              minimum=">=999.0.0" if failure == "version" else "")
+    if failure == "version":
+        # A checkout without a vX.Y.Z tag (CI's depth-1 clone) runs an unparseable version,
+        # which the gate deliberately treats as permissive; pin a real one so it can refuse.
+        from hermes_cli import plugins_manifest
+        monkeypatch.setattr(plugins_manifest, "running_hermes_version", lambda: "1.0.0")
     if failure == "manifest":
         (repo / "plugin.yaml").write_text("name: [broken", encoding="utf-8")
         state["sha"] = _commit(repo, "invalid manifest")
@@ -150,7 +250,7 @@ def test_successful_update_publishes_matching_code_and_durable_workspace(install
     def no_network(*args):
         raise AssertionError("catalog pin must not consult a custom update source")
 
-    if record.get("catalog_name"):
+    if (record.get("catalog") or {}).get("name"):
         state["sha"] = _version(repo, "3.0.0")
         check = next(row for row in run_checks(home / "plugins", include_pip=False,
                                               fetch=no_network, ls_remote=no_network)

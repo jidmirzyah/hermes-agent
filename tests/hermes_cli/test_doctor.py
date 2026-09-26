@@ -2,6 +2,7 @@
 
 import importlib.util
 import os
+import subprocess
 import sys
 import subprocess
 import types
@@ -14,7 +15,10 @@ from unittest.mock import patch
 
 import pytest
 
+import hermes_cli.doctor as doctor
+import hermes_constants
 from hermes_cli import config as config_mod
+import hermes_cli.gateway as gateway_cli
 from hermes_cli import doctor as doctor_mod
 from hermes_cli.doctor_config import _has_provider_env_config
 from hermes_cli.doctor_report import Finding
@@ -1468,6 +1472,7 @@ class TestDoctorDeprecatedConfigAndEnv:
     """
 
 
+
     def test_collect_deprecated_env_vars_ignores_empty(self):
         assert doctor_config.collect_deprecated_env_vars({"TERMINAL_CWD": "  "}) == []
         assert doctor_config.collect_deprecated_env_vars({}) == []
@@ -1965,3 +1970,73 @@ def test_doctor_reports_auxiliary_blocks_that_do_not_resolve(tmp_path, monkeypat
     issues = []
     doctor_config._validate_auxiliary_config(cfg_file, issues)
     assert len(issues) == 1 and "auxiliary.background_review" in issues[0] and "no-such-provider" in issues[0]
+
+
+@pytest.mark.platforms("macos")
+class TestMacOSTCCGrants:
+    """macOS TCC grant persistence check (#86385): a cdhash-pinned DR (pre-#73681
+    local builds) silently resets Screen Recording/Accessibility grants on every
+    rebuild while the Settings toggle stays ON."""
+
+    @staticmethod
+    def _darwin_bundle(monkeypatch, tmp_path, dr):
+        monkeypatch.setattr(doctor_platform, "_desktop_app_bundle", lambda: tmp_path / "Hermes.app")
+        if dr is not ...:
+            monkeypatch.setattr(doctor_platform, "_macos_desktop_dr", lambda app: dr)
+
+    def test_silent_without_desktop_bundle(self, monkeypatch, capsys):
+        monkeypatch.setattr(doctor_platform, "_desktop_app_bundle", lambda: None)
+        doctor_platform.check_macos_tcc_grants()
+        assert capsys.readouterr().out == ""
+
+    def test_warns_on_cdhash_pinned_dr(self, monkeypatch, capsys, tmp_path):
+        self._darwin_bundle(
+            monkeypatch, tmp_path,
+            'designated => identifier "com.nousresearch.hermes" and cdhash H"97e692f3890f781fa0ad5ad6cb9d769cfaf42628"',
+        )
+        doctor_platform.check_macos_tcc_grants()
+        out = capsys.readouterr().out
+        assert "TCC grants will reset after every update" in out
+        assert "hermes update" in out
+        assert "signing identity is stable" not in out
+
+    def test_identifier_dr_is_stable_with_upgrade_hint_and_repair_info(self, monkeypatch, capsys, tmp_path):
+        self._darwin_bundle(monkeypatch, tmp_path, 'designated => identifier "com.nousresearch.hermes"')
+        doctor_platform.check_macos_tcc_grants()
+        out = capsys.readouterr().out
+        assert "TCC signing identity is stable" in out
+        assert "--setup-tcc-identity" in out
+        assert "tccutil reset ScreenCapture com.nousresearch.hermes" in out
+
+    def test_certificate_anchored_dr_is_stable_without_upgrade_hint(self, monkeypatch, capsys, tmp_path):
+        self._darwin_bundle(
+            monkeypatch, tmp_path,
+            'designated => identifier "com.nousresearch.hermes" and certificate root = H"aabbcc"',
+        )
+        doctor_platform.check_macos_tcc_grants()
+        out = capsys.readouterr().out
+        assert "TCC signing identity is stable" in out
+        assert "--setup-tcc-identity" not in out
+        assert "tccutil reset ScreenCapture com.nousresearch.hermes" in out
+
+    @pytest.mark.parametrize("failure", ["none", "empty", "timeout", "no_codesign"])
+    def test_unreadable_dr_warns_and_never_claims_stable(self, monkeypatch, capsys, tmp_path, failure):
+        """codesign failing, hanging, missing or printing nothing degrades to a
+        warning; an empty DR must not false-positive as a stable identity."""
+        if failure in ("none", "empty"):
+            self._darwin_bundle(monkeypatch, tmp_path, None if failure == "none" else "")
+        else:
+            self._darwin_bundle(monkeypatch, tmp_path, ...)
+            if failure == "timeout":
+                monkeypatch.setattr(shutil, "which", lambda _name: "/usr/bin/codesign")
+
+                def _timeout(*args, **kwargs):
+                    raise subprocess.TimeoutExpired(cmd=["codesign"], timeout=15)
+
+                monkeypatch.setattr(subprocess, "run", _timeout)
+            else:
+                monkeypatch.setattr(shutil, "which", lambda _name: None)
+        doctor_platform.check_macos_tcc_grants()
+        out = capsys.readouterr().out
+        assert "could not read code-signing requirement" in out
+        assert "stable" not in out

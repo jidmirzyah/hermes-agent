@@ -392,10 +392,11 @@ venv and the checkout, never the home directory.
 Hermes quarantines **its own** dependencies: the checkout's `[tool.uv] exclude-newer = "14 days"`
 keeps a freshly published release of any package Hermes itself depends on out of `hermes update`
 and the built-in lazy installs for two weeks, so a hijacked upload is caught upstream before it
-reaches users. **That quarantine does not apply to your plugin's dependencies.** Plugin installs
-run outside Hermes's project policy (`uv pip install --no-config`, still under the core constraints
-file above), so a plugin can floor on a release published yesterday and install today — and the
-plugin's author, not Hermes, is responsible for what that pulls in.
+reaches users. **That quarantine does not apply to your plugin's dependencies.** When Hermes
+resolves your plugin into its environment, the cutoff stays on the packages Hermes itself locks
+and nowhere else, so a plugin can floor on a release published yesterday and install today — and the
+plugin's author, not Hermes, is responsible for what that pulls in. (A plugin that needs a newer
+version of a package Hermes itself depends on still waits out that package's window.)
 
 Set your own policy and hold yourself to it. Strongly recommended:
 
@@ -406,8 +407,7 @@ Set your own policy and hold yourself to it. Strongly recommended:
   wide range and skips the one bad release.
 - **Adopt a new-release quarantine of your own** — wait ~14 days before floors move to a new
   release, and resolve with `uv --exclude-newer "14 days"` (or `UV_EXCLUDE_NEWER`) in your own CI so
-  the lock you test is the one users get. Operators who want the same guard on plugin installs
-  can set `UV_EXCLUDE_NEWER` in Hermes's environment; it applies to every install Hermes runs.
+  the lock you test is the one users get.
 - **Pin your lock, review your bumps.** Treat a dependency bump as a code change: read the
   upstream diff, then re-pin.
 

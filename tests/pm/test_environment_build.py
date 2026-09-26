@@ -140,15 +140,19 @@ def test_public_build_installs_all_extras_at_explicit_destination(installable_pr
         cache=tmp_path / "cache", env=env, all_extras=True, offline=True,
         sealed=sealed,
     )
+    from pm.environments import site_packages
+
+    site = site_packages(executable.parent.parent)
+    # Bytecode is written at build time, not by the first user request's import (#100461);
+    # checked before anything imports from the environment.
+    assert list(site.glob("*/__pycache__/*.pyc")) or list(site.glob("__pycache__/*.pyc")), \
+        "dependencies were installed without bytecode"
     assert _run([str(executable), "-I", "-c",
                  "import root_app, member_dep, chosen_dep, other_dep; print(root_app.VALUE)"],
                 cwd=tmp_path, env=env) == "installed from the explicit source"
     assert executable.parent.parent == tmp_path / "native environment"
     assert not (tmp_path / "wrong-environment").exists()
     assert "root_app" not in sys.modules
-    from pm.environments import site_packages
-
-    site = site_packages(executable.parent.parent)
     assert (site / "_virtualenv.pth").exists() is not sealed
     assert (site / "construction_root.pth").is_file(), "load-bearing .pth must survive sealing"
     assert (source / "uv.lock").read_bytes() == locked
@@ -461,7 +465,9 @@ def streaming_runner(request, tmp_path):
                                  env=dict(os.environ), timeout=timeout)
         return environment._run(["-c", script], cwd=tmp_path, timeout=timeout)
 
-    return run, output, RuntimeError if request.param == "cli" else subprocess.TimeoutExpired
+    from pm.package import InstallError
+
+    return run, output, RuntimeError if request.param == "cli" else InstallError
 
 
 @pytest.mark.parametrize("parent_exits", [True, False])

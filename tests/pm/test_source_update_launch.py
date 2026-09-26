@@ -391,3 +391,53 @@ def test_real_bootstrap_reexecs_before_app_imports(source_launch, tmp_path, isol
     assert json.loads(receipt.read_text(encoding="utf-8"))["outcome"] == "ok"
     assert not (root / ".update-incomplete").exists()
     assert not (root / ".lazy-refresh-incomplete").exists()
+
+
+@pytest.mark.platforms("posix")
+@pytest.mark.parametrize("argv", [[], ["--version"]])
+def test_failed_launch_completion_degrades_to_a_warning(source_launch, tmp_path, isolated_python, argv):
+    """An update whose dependency sync cannot finish (offline, bad lock) must leave a usable
+    CLI on the previous generation with a warning — and a metadata query must not even try."""
+    root, store_python, worker_command = source_launch
+    repository = Path(__file__).resolve().parents[2]
+    shutil.copy2(repository / "hermes_bootstrap.py", root / "hermes_bootstrap.py")
+    (root / "launch_test_tools.py").write_text(
+        "import sys\n"
+        "from pathlib import Path\n"
+        f"sys.path.insert(1, {str(repository)!r})\n"
+        "import pm.client\n"
+        "from pm import paths\n"
+        f"paths.lockfile_path = lambda: Path({str(tmp_path / 'tool-lock.json')!r})\n"
+        f"pm.client.runtime_command = lambda *args, **kwargs: {worker_command!r}\n",
+        encoding="utf-8",
+    )
+    entry = root / "launch_probe.py"
+    entry.write_text(
+        "import launch_test_tools\n"
+        "import hermes_bootstrap\n"
+        "import json, sys\n"
+        "print(json.dumps({'executable': sys.executable, 'args': sys.argv[1:]}))\n",
+        encoding="utf-8",
+    )
+    pm.sync_venv(["all"], explicit=True, project_root=root)
+    previous = _fact(root)
+    lock = root / "uv.lock"
+    lock.write_text("version = 1\nnot valid TOML\n", encoding="utf-8")
+    assert not pm.venv_is_current(project_root=root)
+    before_receipts = _receipts(tmp_path)
+
+    result = subprocess.run(
+        [str(isolated_python), str(entry), *argv], cwd=root,
+        env=dict(os.environ), capture_output=True, text=True, timeout=60,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {"executable": str(isolated_python), "args": argv}
+    assert _fact(root) == previous
+    if argv:
+        assert "source-update completion failed" not in result.stderr
+        assert _receipts(tmp_path) == before_receipts, "a metadata query attempted a dependency sync"
+    else:
+        assert "source-update completion failed" in result.stderr
+        assert "hermes update" in result.stderr
+

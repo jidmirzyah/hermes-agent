@@ -83,7 +83,7 @@ def test_desktop_build_reaches_the_managed_payload_with_commit_ref(tmp_path, mon
 
 
 
-@pytest.mark.parametrize("tag,commit", [(None, "a" * 40), ("v1.2.3-canary.20260911120000", None)])
+@pytest.mark.parametrize("tag,commit", [(None, "a" * 40), ("v1.2.3+canary.20260911T120000Z", None)])
 def test_store_build_rejects_nonstable_before_reading_or_preparing_repo(tmp_path, tag, commit):
     absent = tmp_path / "must-not-be-created"
     with pytest.raises(ValueError, match="Store.*stable"):

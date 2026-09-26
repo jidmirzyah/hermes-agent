@@ -261,6 +261,87 @@ class TestEntryPointsImportBootstrap:
         )
 
 
+def test_pre_pm_editable_venv_reaches_pm_through_the_bootstrap(tmp_path):
+    """A venv editable-installed from a pre-PM tree must still start the PM-era tree.
+
+    setuptools' flat-layout editable finder maps only the top-level names it saw at
+    install time (no ``pm``) and never puts the checkout on ``sys.path``. The console
+    script imports ``hermes_cli`` first, then ``hermes_cli.main`` imports the bootstrap;
+    both must load, and the bootstrap must reach ``pm``, or PM adoption never runs.
+    """
+    root = Path(__file__).resolve().parents[1]
+    program = r"""
+import importlib.util, os, sys
+from importlib.abc import MetaPathFinder
+root = sys.argv[1]
+class PrePMEditableFinder(MetaPathFinder):
+    def find_spec(self, name, path=None, target=None):
+        if name == 'hermes_cli':
+            pkg = os.path.join(root, 'hermes_cli')
+            return importlib.util.spec_from_file_location(
+                name, os.path.join(pkg, '__init__.py'), submodule_search_locations=[pkg])
+        if name == 'hermes_bootstrap':
+            return importlib.util.spec_from_file_location(name, os.path.join(root, 'hermes_bootstrap.py'))
+        return None
+sys.meta_path.append(PrePMEditableFinder())
+sys.argv = ['hermes', 'pm', 'repair']
+import hermes_cli
+import hermes_bootstrap
+assert hermes_bootstrap._pm_repair is True
+print('reached-pm')
+"""
+    result = subprocess.run([sys.executable, "-I", "-S", "-c", program, str(root)],
+                            cwd=tmp_path, env={**os.environ, "HERMES_HOME": str(tmp_path / "home")},
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "reached-pm"
+
+
+@pytest.mark.parametrize("path", [
+    "hermes_cli/main.py", "run_agent.py", "acp_adapter/entry.py",
+    "gateway/run.py", "batch_runner.py", "cli.py",
+])
+@pytest.mark.parametrize("bootstrap,expected", [
+    (None, "proceeded"),
+    ("import hermes_missing_dependency_probe\n", "raised hermes_missing_dependency_probe"),
+])
+def test_entrypoint_tolerates_only_an_absent_bootstrap(tmp_path, path, bootstrap, expected):
+    """The entry-point guard covers a bootstrap a partial update left unregistered.
+
+    A bootstrap that exists but cannot import its own dependencies must surface:
+    swallowing that skipped PM activation silently and the tree ran on stale deps.
+    """
+    root = Path(__file__).resolve().parents[1]
+    entry = tmp_path / "startup.py"
+    entry.write_bytes((root / path).read_bytes())
+    fake_root = tmp_path / "root"
+    fake_root.mkdir()
+    if bootstrap is not None:
+        (fake_root / "hermes_bootstrap.py").write_text(bootstrap)
+    program = r"""
+import builtins, runpy, sys
+fake_root, entry = sys.argv[1:]
+sys.path.insert(0, fake_root)
+real_import = builtins.__import__
+class Boundary(BaseException): pass
+def guarded(name, globals=None, locals=None, fromlist=(), level=0):
+    if globals and globals.get('__file__') == entry and name not in ('__future__', 'hermes_bootstrap'):
+        raise Boundary()
+    return real_import(name, globals, locals, fromlist, level)
+builtins.__import__ = guarded
+try:
+    runpy.run_path(entry, run_name='__main__')
+except Boundary:
+    print('proceeded')
+except ModuleNotFoundError as exc:
+    print('raised', exc.name)
+"""
+    result = subprocess.run([sys.executable, "-I", "-S", "-c", program, str(fake_root), str(entry)],
+                            cwd=tmp_path, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == expected
+
+
 class TestHardenImportPath:
     """harden_import_path() must keep a same-named package in the launch
     directory from shadowing Hermes's own top-level modules — covering both

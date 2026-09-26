@@ -2,8 +2,8 @@ name: Bootstrap installer
 
 # Exercises the bootstrap-installer path on PRs that can affect it: the
 # POSIX shell installer (scripts/install.sh), its generated pin fragments,
-# and the version stamp the `complete` stage ships. The PowerShell installer
-# keeps its own Windows-only lane (installer-tests.yml); this lane runs the
+# and the version stamp the `complete` stage ships. The PowerShell installer's
+# native tests run in the tests-os Windows lanes; this lane runs the
 # protocol/stamp cross-checks plus a whole current installer against a tiny
 # application graph. The latter runs real PM/uv and generated launchers, not
 # every production extra. Tool download/hash tests remain separate.
@@ -33,10 +33,10 @@ jobs:
           # checkout can't (git: "shallow update not allowed").
           fetch-depth: 0
 
-      - name: Stage manifest is well-formed protocol v1
+      - name: Stage manifest is well-formed protocol v1 (piped, as `curl | bash` runs it)
         shell: bash
         run: |
-          bash scripts/install.sh --manifest | python3 -c '
+          cat scripts/install.sh | bash -s -- --manifest | python3 -c '
           import json, sys
           m = json.load(sys.stdin)
           assert m["protocol_version"] == 1, m
@@ -99,7 +99,8 @@ jobs:
             --stamp "$HERMES_INSTALL_DIR/.hermes-bootstrap-complete" \
             --repo "$HERMES_INSTALL_DIR" \
             --expect-commit "${{ steps.source.outputs.sha }}" \
-            --expect-branch ci-under-test
+            --expect-branch ci-under-test \
+            --no-source-stamp  # the protocol check above skips the products stage
 
       - name: The pinned commit is on the branch the installer cloned
         shell: bash

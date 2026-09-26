@@ -64,7 +64,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--manager-runtime requires the target --python")
     try:
         if args.exact_lock:
-            from pm.cache_lock import prune_uv_cache_to_lock
+            from pm.uv_cache_prune import prune_uv_cache_to_lock
 
             pruned = prune_uv_cache_to_lock(args.cache, args.lock_source)
             print(f"pruned {pruned} cache entries outside the lock")

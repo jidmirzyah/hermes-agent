@@ -165,9 +165,9 @@ class TestRunJobScript:
 
     @pytest.mark.platforms("windows")
     def test_windows_uv_venv_python_script_bypasses_launcher(self, cron_env, tmp_path, monkeypatch):
-        # Windows-only: the real ``Scripts/python.exe`` launcher layout and
-        # CREATE_NO_WINDOW creationflags this branch exists for cannot be
-        # reproduced with a patched ``sys.platform``.
+        # Windows-only: the fake ``sys.platform`` could not reproduce the
+        # ``Scripts/python.exe`` launcher layout or the CREATE_NO_WINDOW
+        # creationflags this branch exists for.
         from cron import scheduler as sched_mod
         from cron import scheduler_script as sched_script
         from cron.scheduler_script import _run_job_script
@@ -175,51 +175,18 @@ class TestRunJobScript:
         script = cron_env / "scripts" / "probe.py"
         script.write_text('print("ok")\n')
 
-        # pm bundled-install layout: store + manifest + relocatable venv,
-        # with facts recording both the venv and the staged interpreter.
-        payload = tmp_path / "payload"
-        store = payload / "tools"
-        venv = payload / "venv"
-        site_packages = venv / "Lib" / "site-packages"
-        python_entry = store / "python-3.11.13"
-        site_packages.mkdir(parents=True)
-        python_entry.mkdir(parents=True)
-        base_python = python_entry / "python.exe"
-        base_python.write_text("", encoding="utf-8")
-        (payload / "manifest.json").write_text("{}", encoding="utf-8")
-        (store / "facts.json").write_text(
-            json.dumps(
-                {
-                    "schema": 1,
-                    "packages": {
-                        "venv": {"stamp": "abc", "extras": []},
-                        "python": {"entry": "python-3.11.13", "version": "3.11.13"},
-                    },
-                }
-            ),
-            encoding="utf-8",
-        )
-        monkeypatch.setenv("HERMES_RUNTIME_DIR", str(store))
-        # The supplied payload launcher is older than the committed extension
-        # generation. It must not override the installation's current selection.
-        from pm.environments import install_state_dir, site_packages as dependency_site
-        repo = Path(sched_script.__file__).resolve().parents[1]
-        state = install_state_dir(repo)
-        selected = state / "environments" / "selected" / "venv"
-        site_packages = dependency_site(selected)
-        site_packages.mkdir(parents=True)
-        (selected / "pyvenv.cfg").write_text("home = fixture\n", encoding="utf-8")
-        (state / "facts.json").write_text(
-            json.dumps({"packages": {"venv": {"environment": str(selected)}}}), encoding="utf-8")
-        # No ambient VIRTUAL_ENV anywhere: resolution must come from pm.
-        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
-
-        # The launcher the gateway hands over (a venv python) — the invocation
-        # must swap it for the pm store python.
+        venv = tmp_path / "venv"
         venv_scripts = venv / "Scripts"
+        site_packages = venv / "Lib" / "site-packages"
+        base = tmp_path / "base"
         venv_scripts.mkdir(parents=True)
+        site_packages.mkdir(parents=True)
+        base.mkdir()
         venv_python = venv_scripts / "python.exe"
+        base_python = base / "python.exe"
         venv_python.write_text("", encoding="utf-8")
+        base_python.write_text("", encoding="utf-8")
+        (venv / "pyvenv.cfg").write_text(f"home = {base}\nuv = true\n", encoding="utf-8")
 
         captured = {}
 
@@ -265,7 +232,7 @@ class TestRunJobScript:
         )
         assert captured["kwargs"]["creationflags"] == expected_flags
         env = captured["kwargs"]["env"]
-        assert "VIRTUAL_ENV" not in env  # store-python boot uses explicit import paths
+        assert env["VIRTUAL_ENV"] == str(venv)
         assert str(site_packages) in env["PYTHONPATH"]
 
     def test_bootstrap_argv_makes_pth_editable_installs_importable(self, cron_env, tmp_path):

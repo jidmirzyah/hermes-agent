@@ -272,6 +272,24 @@ describe('maybeNotifyUpdateAvailable', () => {
     expect(notifySpy.mock.calls[0]?.[0]).toMatchObject({ message: en.notifications.updateReadyMessageAppInstaller })
   })
 
+  // A native macOS (electron-updater) check has no commit to name either: its
+  // target identity is the release tag. Requiring targetSha silenced every
+  // background notification for non-channel macOS builds.
+  it('notifies for a native macOS check that names its target by release tag', () => {
+    maybeNotifyUpdateAvailable(
+      status({
+        behind: null,
+        currentVersion: '0.19.0',
+        latestTag: 'v0.20.0',
+        mechanism: 'electron-updater',
+        targetSha: undefined,
+        updateAvailable: true
+      })
+    )
+
+    expect(notifySpy).toHaveBeenCalledTimes(1)
+  })
+
   // Eligibility stays mechanism-specific: a git-style check must still prove
   // there is a target commit before the toast fires — never a made-up SHA.
   it('stays quiet for a git-style check that names no target commit', () => {

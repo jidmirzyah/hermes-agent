@@ -85,10 +85,13 @@ def test_activation_real_setup_pm_lifecycle(tmp_path, served):
     wheels = tmp_path / "wheels"
     wheels.mkdir()
     _wheel(wheels, "activation_dep", "1.0")
+    _wheel(wheels, "dev_fixture", "1.0")
+    _wheel(wheels, "test_fixture", "1.0")
     (core / "pyproject.toml").write_text(
         '[project]\nname="activation-proof"\nversion="1"\nrequires-python=">=3.11"\n'
         'dependencies=["activation-dep==1.0"]\n[project.optional-dependencies]\nall=[]\n'
-        '[tool.uv]\npackage=false\nno-index=true\n'
+        '[dependency-groups]\ndev=["dev-fixture==1.0"]\ntest=["test-fixture==1.0"]\n'
+        '[tool.uv]\npackage=false\nno-index=true\ndefault-groups=[]\n'
         f'find-links=[{json.dumps(wheels.as_posix())}]\n', encoding="utf-8",
     )
     locked = subprocess.run(
@@ -160,7 +163,7 @@ def test_activation_real_setup_pm_lifecycle(tmp_path, served):
         script = '''
 prior_path=$PATH
 prior_pythonpath=${PYTHONPATH-}
-source "$1/activate"
+source "$1/activate" --test-extras=all
 status=$?
 if [ "$status" != 0 ]; then
     test "$PATH" = "$prior_path" || exit 91
@@ -170,6 +173,8 @@ if [ "$status" != 0 ]; then
     exit "$status"
 fi
 python3 -c 'import activation_dep, json, os; print(json.dumps({"version": activation_dep.__version__, "module": activation_dep.__file__, "pythonpath": os.environ["PYTHONPATH"]}))' || exit 94
+"$__HERMES_TEST_PYTHON" -c 'import dev_fixture, test_fixture' || exit 97
+python3 -c 'import importlib.util; assert importlib.util.find_spec("dev_fixture") is None' || exit 98
 deactivate
 test "$PATH" = "$prior_path" || exit 95
 test "${PYTHONPATH-}" = "$prior_pythonpath" || exit 96
@@ -191,7 +196,8 @@ test "${PYTHONPATH-}" = "$prior_pythonpath" || exit 96
         return [line for line in calls.read_text().splitlines() if line.split()[0] == name]
 
     def app_syncs():
-        return [line for line in operations("sync") if "--frozen --all-packages" in line]
+        return [line for line in operations("sync")
+                if "--frozen --all-packages" in line and "--group dev" not in line]
 
     cold = activate()
     first = selection()

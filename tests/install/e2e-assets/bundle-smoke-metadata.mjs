@@ -18,7 +18,7 @@ function admitChannelRequest(request, commit, tag) {
 
 export function bundleIdentity(commit, tag = '', channelRequest = null) {
   if (!/^[a-f0-9]{40}$/.test(commit)) throw new Error('Expected exact full lowercase commit SHA')
-  if (tag && !/^v\d+\.\d+\.\d+(?:-canary\.20\d{6}(?:\d{6})?)?$/.test(tag)) throw new Error('Invalid release tag')
+  if (tag && !/^v\d+\.\d+\.\d+(?:\+canary\.20\d{6}T\d{6}Z)?$/.test(tag)) throw new Error('Invalid release tag')
   if (channelRequest !== null) {
     const request = admitChannelRequest(channelRequest, commit, tag)
     return { appId: request.identity.appId, msixIdentity: request.identity.msixAppIdWithOrg,

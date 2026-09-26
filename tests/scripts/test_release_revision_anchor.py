@@ -1,56 +1,43 @@
-"""Version files record the Git count of the release commit they describe."""
-import json
-import runpy
+"""Changelog attribution is anchored to the selected release range."""
+
 import subprocess
-from pathlib import Path
-
-import pytest
-
-from scripts import release
 
 
-@pytest.mark.parametrize("existing", [False, True])
-def test_version_writer_creates_and_refreshes_release_revision(tmp_path, monkeypatch, existing):
-    repo = tmp_path / "source"
+def _git(repo, *args):
+    return subprocess.check_output(["git", *args], cwd=repo, text=True).strip()
+
+
+def test_get_commits_attributes_each_revision_not_current_head(tmp_path, monkeypatch):
+    """A mailmap change after an older commit must not rewrite that commit's author."""
+    from scripts import release
+
+    repo = tmp_path / "repo"
     repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
 
-    def git(*args):
-        return subprocess.run(
-            ["git", "-C", str(repo), *args], check=True, capture_output=True,
-            text=True, encoding="utf-8", timeout=20,
-        ).stdout.strip()
+    (repo / ".mailmap").write_text("", encoding="utf-8")
+    subprocess.run(["git", "add", ".mailmap"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "base"], cwd=repo, check=True)
+    subprocess.run(["git", "tag", "base"], cwd=repo, check=True)
 
-    git("init", "--quiet")
-    git("config", "user.name", "Release fixture")
-    git("config", "user.email", "release@example.invalid")
-    files = {
-        "VERSION_FILE": ("hermes_cli/__init__.py", '__version__ = "1.0.0"\n__release_date__ = "2000.1.1"\n'),
-        "PYPROJECT_FILE": ("pyproject.toml", '[project]\nname="hermes-agent"\nversion = "1.0.0"\n'),
-        "DESKTOP_PKG_FILE": ("apps/desktop/package.json", '{"name":"desktop", "version":"1.0.0"}\n'),
-        "PKG_LOCK_FILE": ("package-lock.json", json.dumps({"version": "9.9.9", "packages": {"apps/desktop": {"name": "desktop", "version": "1.0.0"}}}) + "\n"),
-        "UV_LOCK_FILE": ("uv.lock", 'version = 1\n[[package]]\nname = "hermes-agent"\nversion = "1.0.0"\n'),
-    }
-    if existing:
-        rel, content = files["VERSION_FILE"]
-        files["VERSION_FILE"] = (rel, content + "__release_rev_count__ = 999\n")
-    for name, (rel, content) in files.items():
-        file = repo / rel
-        file.parent.mkdir(parents=True, exist_ok=True)
-        file.write_text(content, encoding="utf-8")
-        monkeypatch.setattr(release, name, file)
+    (repo / "payload.txt").write_text("one\n", encoding="utf-8")
+    subprocess.run(["git", "add", "payload.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "feat: payload"], cwd=repo, check=True)
+    payload_sha = _git(repo, "rev-parse", "HEAD")
+
+    (repo / ".mailmap").write_text("Mapped Person <mapped@example.com> Test <test@example.com>\n",
+                                    encoding="utf-8")
+    subprocess.run(["git", "add", ".mailmap"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "chore: add mailmap"], cwd=repo, check=True)
+
     monkeypatch.setattr(release, "REPO_ROOT", repo)
-    git("add", ".")
-    git("commit", "-qm", "fixture")
-    before = git("rev-parse", "HEAD")
-
-    paths = release.update_version_files("1.1.0", "2000.1.2")
-    assert set(map(Path, paths)) == {repo / rel for rel, _ in files.values()}
-    assert git("rev-parse", "HEAD") == before
-    git("add", ".")
-    git("commit", "-qm", "release fixture")
-    version = runpy.run_path(str(repo / "hermes_cli/__init__.py"))
-    assert version["__version__"] == "1.1.0"
-    assert version["__release_rev_count__"] == int(git("rev-list", "--count", "HEAD"))
-    lock = json.loads((repo / "package-lock.json").read_text(encoding="utf-8"))
-    assert lock["version"] == "9.9.9"
-    assert lock["packages"]["apps/desktop"]["version"] == "1.1.0"
+    assert _git(repo, "show", "-s", "--format=%aN", payload_sha) == "Mapped Person"
+    assert _git(repo, "show", "-s", "--use-mailmap", "--format=%aN", payload_sha) == "Mapped Person"
+    monkeypatch.setitem(release.AUTHOR_MAP, "test@example.com", "test-user")
+    commits = release.get_commits(since_tag="base")
+    payload = next(commit for commit in commits if commit["sha"] == payload_sha)
+    assert payload["author_name"] == "Test"
+    assert payload["author_email"] == "test@example.com"
+    assert payload["github_author"] == "@test-user"

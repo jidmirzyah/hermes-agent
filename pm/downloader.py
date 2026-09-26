@@ -54,7 +54,11 @@ class _HttpsRedirectHandler(urllib.request.HTTPRedirectHandler):
     carry the payload in the clear."""
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        if not (newurl.startswith("https://") or newurl.startswith(_LOOPBACK)):
+        # Plain-http loopback exists for test servers, and only a download that
+        # started on loopback may stay there: an https origin bouncing to a local
+        # listener would hand an unpinned model file to whatever is bound there.
+        loopback = req.full_url.startswith(_LOOPBACK) and newurl.startswith(_LOOPBACK)
+        if not (newurl.startswith("https://") or loopback):
             raise DownloadError(f"refusing redirect to non-https url: {newurl}")
         # urllib preserves our User-Agent and range headers. Do not re-add
         # arbitrary headers after its redirect policy has processed them.

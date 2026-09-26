@@ -161,7 +161,7 @@ function buildManifest(
       channel,
       repository: 'NousResearch/hermes-agent',
       commit: sha,
-      sourceVersion: tag.replace(/^v/, '').split('-')[0],
+      sourceVersion: tag.replace(/^v/, '').split('+')[0],
       releaseTag: tag,
       sequence,
       version: tag.replace(/^v/, ''),
@@ -237,7 +237,7 @@ it('carries each install channel from Python publication checks into the source 
       commits.push(git(['rev-parse', 'HEAD']))
     }
 
-    const tags: Record<'stable' | 'canary', string> = { stable: 'v1.2.3', canary: 'v1.2.4-canary.20260911123456' }
+    const tags: Record<'stable' | 'canary', string> = { stable: 'v1.2.3', canary: 'v1.2.3+canary.20260911T123456Z' }
 
     for (const channel of ['stable', 'canary'] as const) {
       const sha: string = commits[channel === 'stable' ? 1 : 2]

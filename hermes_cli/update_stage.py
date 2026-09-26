@@ -33,6 +33,14 @@ UI_SPAWNED_ENV = "HERMES_UPDATE_UI_ACTIVE"
 MARKER_NAME = ".hermes-update-in-progress"
 
 
+def _process_home() -> Path:
+    """The marker and the shim's log live in the PROCESS home (update_lock.update_marker_path):
+    the shim resolved ``$HERMES_HOME`` or the platform default, never a profile override, and
+    the platform default (sudo invoker, data-dir suffix) is not ``~/.hermes`` everywhere."""
+    from hermes_constants import get_process_hermes_home
+    return get_process_hermes_home()
+
+
 def status_file() -> Path | None:
     """The watching shim's status file, or None when no UI is discoverable."""
     exported = os.environ.get(STATUS_FILE_ENV, "").strip()
@@ -49,9 +57,8 @@ def _status_from_marker() -> Path | None:
     shim's status file lives beside it, pid-suffixed. No marker (plain CLI
     update) or no matching file → no UI.
     """
-    home = os.environ.get("HERMES_HOME") or str(Path.home() / ".hermes")
     try:
-        pid = int((Path(home) / MARKER_NAME).read_text(encoding="utf-8-sig")
+        pid = int((_process_home() / MARKER_NAME).read_text(encoding="utf-8-sig")
                   .splitlines()[0].strip())
     except (OSError, ValueError, IndexError):
         return None
@@ -113,8 +120,7 @@ def ensure_panel(update_root: Path) -> None:
     if not panel.is_file():
         return
     try:
-        home = os.environ.get("HERMES_HOME") or str(Path.home() / ".hermes")
-        log = Path(home) / "logs" / "desktop-update-handoff.log"
+        log = _process_home() / "logs" / "desktop-update-handoff.log"
         if log.is_file() and _ui_present_in_log(log.read_text(encoding="utf-8-sig", errors="replace")[-8000:]):
             return
         import subprocess

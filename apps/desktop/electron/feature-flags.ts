@@ -6,7 +6,7 @@ const featureFlags = {
 export type FeatureFlags = { [K in keyof typeof featureFlags]: boolean }
 
 export function isCanaryTag(tag: string | null | undefined): boolean {
-  return /-canary\./.test(tag || '')
+  return /\+canary\.20\d{6}T\d{6}Z$/.test(tag || '')
 }
 
 export interface FeatureFlagInput {

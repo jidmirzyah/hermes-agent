@@ -1,5 +1,6 @@
 import json
-from unittest.mock import MagicMock, patch
+from pathlib import Path
+import subprocess
 
 from hermes_cli.version_info import (
     VersionInfo,
@@ -9,10 +10,6 @@ from hermes_cli.version_info import (
     _stamp_version_info,
     get_version_info,
 )
-
-
-from hermes_cli import __release_date__ as RELEASE_DATE
-from hermes_cli import __version__ as VERSION
 
 
 def setup_function():
@@ -106,71 +103,83 @@ def test_stamp_version_info_returns_none_when_file_missing(tmp_path, monkeypatch
     assert _stamp_version_info() is None
 
 
-def test_get_version_info_counts_commits_after_semver_tag(tmp_path, monkeypatch):
-    repo = tmp_path / "repo"
-    (repo / ".git").mkdir(parents=True)
-    monkeypatch.setattr("hermes_cli.version_info._resolve_stamp_file", lambda: None)
-    monkeypatch.setattr("hermes_cli.version_info._resolve_repo_dir", lambda: repo)
-
-    def run(command, **_kwargs):
-        output = {
-            ("git", "rev-parse", "HEAD"): "b" * 40,
-            ("git", "branch", "--show-current"): "feature/version",
-            ("git", "status", "--porcelain", "-uno"): "",
-            ("git", "rev-list", "--count", f"v{VERSION}..HEAD"): "3",
-            ("git", "log", "-1", "--format=%ct", "HEAD"): "1718662620",
-        }[tuple(command)]
-        return MagicMock(returncode=0, stdout=f"{output}\n")
-
-    with patch("hermes_cli.version_info.subprocess.run", side_effect=run):
-        info = get_version_info()
-
-    assert info == VersionInfo(VERSION, f"{VERSION}+3", 3, "b" * 40, "feature/version", "git", False, 1718662620)
-
-
-def test_get_version_info_falls_back_to_legacy_release_date_tag(tmp_path, monkeypatch):
-    repo = tmp_path / "repo"
-    (repo / ".git").mkdir(parents=True)
-    monkeypatch.setattr("hermes_cli.version_info._resolve_stamp_file", lambda: None)
-    monkeypatch.setattr("hermes_cli.version_info._resolve_repo_dir", lambda: repo)
-
-    calls = []
-
-    def run(command, **_kwargs):
-        calls.append(tuple(command))
-        if tuple(command) == ("git", "rev-list", "--count", f"v{VERSION}..HEAD"):
-            return MagicMock(returncode=1, stdout="")
-        output = {
-            ("git", "rev-parse", "HEAD"): "c" * 40,
-            ("git", "branch", "--show-current"): "",
-            ("git", "status", "--porcelain", "-uno"): " M hermes_cli/version_info.py",
-            ("git", "rev-list", "--count", f"v{RELEASE_DATE}..HEAD"): "2",
-            ("git", "log", "-1", "--format=%ct", "HEAD"): "1718662620",
-        }[tuple(command)]
-        return MagicMock(returncode=0, stdout=f"{output}\n")
-
-    with patch("hermes_cli.version_info.subprocess.run", side_effect=run):
-        info = get_version_info()
-
-    assert info.derived_version == f"{VERSION}+2"
-    assert info.branch is None
-    assert info.dirty is True
-    assert ("git", "rev-list", "--count", f"v{RELEASE_DATE}..HEAD") in calls
-
-
 def test_get_version_info_unknown_when_no_stamp_and_no_git(monkeypatch):
-    from pathlib import Path
-
     monkeypatch.setattr("hermes_cli.version_info._resolve_stamp_file", lambda: None)
     monkeypatch.setattr("hermes_cli.version_info._resolve_repo_dir", lambda: None)
 
     info = get_version_info()
 
-    assert info.base_version == VERSION
-    assert info.derived_version == VERSION
+    assert info.base_version == "unknown"
+    assert info.derived_version == "unknown"
     assert info.distance is None
     assert info.commit is None
     assert info.source == "unknown"
+
+
+def test_get_version_info_derives_identity_from_reachable_release_tag(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def git(*args: str) -> str:
+        result = subprocess.run(
+            ["git", *args], cwd=repo, text=True, capture_output=True, check=True,
+            env={"HOME": str(tmp_path), "PATH": __import__("os").environ["PATH"]},
+        )
+        return result.stdout.strip()
+
+    git("init", "-q")
+    git("config", "user.name", "Hermes Test")
+    git("config", "user.email", "hermes@example.invalid")
+    (repo / "tracked").write_text("release\n", encoding="utf-8")
+    git("add", "tracked")
+    git("commit", "-qm", "release")
+    git("tag", "v0.21.4")
+    git("tag", "v2026.9.21")
+    (repo / "tracked").write_text("next\n", encoding="utf-8")
+    git("commit", "-qam", "next")
+
+    monkeypatch.setattr("hermes_cli.version_info._resolve_stamp_file", lambda: None)
+    monkeypatch.setattr("hermes_cli.version_info._resolve_repo_dir", lambda: repo)
+
+    info = get_version_info()
+
+    assert info.base_version == "0.21.4"
+    assert info.derived_version == f"0.21.4+1.g{git('rev-parse', '--short=7', 'HEAD')}"
+    assert info.distance == 1
+    assert info.commit == git("rev-parse", "HEAD")
+    assert info.source == "git"
+
+
+def test_get_version_info_takes_the_version_a_calver_only_release_shipped(tmp_path, monkeypatch):
+    """Releases tagged only vYYYY.M.D resolve to their pyproject version, not "unknown"."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def git(*args: str) -> str:
+        result = subprocess.run(
+            ["git", *args], cwd=repo, text=True, capture_output=True, check=True,
+            env={"HOME": str(tmp_path), "PATH": __import__("os").environ["PATH"]},
+        )
+        return result.stdout.strip()
+
+    git("init", "-q")
+    git("config", "user.name", "Hermes Test")
+    git("config", "user.email", "hermes@example.invalid")
+    (repo / "pyproject.toml").write_text('[project]\nname = "hermes-agent"\nversion = "0.21.4"\n', encoding="utf-8")
+    git("add", "pyproject.toml")
+    git("commit", "-qm", "release")
+    git("tag", "v2026.9.21")
+    (repo / "pyproject.toml").write_text('[project]\nname = "hermes-agent"\nversion = "0.0.0"\n', encoding="utf-8")
+    git("commit", "-qam", "next")
+
+    monkeypatch.setattr("hermes_cli.version_info._resolve_stamp_file", lambda: None)
+    monkeypatch.setattr("hermes_cli.version_info._resolve_repo_dir", lambda: repo)
+
+    info = get_version_info()
+
+    assert info.base_version == "0.21.4"
+    assert info.distance == 1
+    assert info.derived_version == f"0.21.4+1.g{git('rev-parse', '--short=7', 'HEAD')}"
 
 
 def test_resolve_stamp_file_honors_install_root(tmp_path, monkeypatch):
@@ -199,3 +208,36 @@ def test_resolve_stamp_file_falls_back_to_code_root_when_env_unset(tmp_path, mon
     monkeypatch.setattr("pm.paths.repo_root", lambda: tmp_path)
 
     assert _resolve_stamp_file() == tmp_path / "install-stamp.json"
+
+
+def test_old_updater_version_stub_reads_the_same_stamp_as_version_info(tmp_path):
+    """``hermes_cli.__version__`` exists only for shipped updaters that import it after the
+    checkout swap (tests/compat/old_updater_surface.json). It must report the stamp's base
+    version exactly as get_version_info() does, and the pre-stamp placeholder without one.
+    A fresh interpreter, since the stub is evaluated when the package is imported."""
+    import os
+    import sys
+
+    repo = Path(__file__).resolve().parents[2]
+    probe = (
+        f"import sys; sys.path.insert(0, {str(repo)!r}); import hermes_cli; "
+        "from hermes_cli.version_info import get_version_info; "
+        "print(hermes_cli.__version__, get_version_info().base_version)"
+    )
+
+    def read(install_root: Path) -> list[str]:
+        env = {**os.environ, "HERMES_INSTALL_ROOT": str(install_root)}
+        return subprocess.run(
+            [sys.executable, "-c", probe], env=env, capture_output=True, text=True, check=True
+        ).stdout.split()
+
+    stamped = tmp_path / "stamped"
+    stamped.mkdir()
+    stamp = {"commit": "c" * 40, "baseVersion": "9.8.7", "source": "ci", "updateMechanism": "external"}
+    (stamped / "install-stamp.json").write_text(json.dumps(stamp))
+    compat, identity = read(stamped)
+    assert compat == identity == stamp["baseVersion"]
+
+    unstamped = tmp_path / "unstamped"
+    unstamped.mkdir()
+    assert read(unstamped)[0] == "0.0.0"

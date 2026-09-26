@@ -48,32 +48,52 @@ CHANNEL_STABLE = "stable"
 CHANNEL_CANARY = "canary"
 
 
-# A canary release tag: v<major>.<minor>.<patch>-canary.<YYYYMMDDHHMMSS>,
-# or the legacy date-only shape. THIS is the single authority for the
-# canary tag shape — scripts/release.py (produces them) and
-# scripts/write_install_stamp.py (validates the feed key) import it rather
-# than re-typing the rule. Canaries are current-stable patch+1, so any
-# patch is accepted here.
-_CANARY_TAG_RE = re.compile(r"^v(?:0|[1-9]\d*)\.\d+\.\d+-canary\.20\d{6}(?:\d{6})?$")
+# A canary source identity: the exact stable version plus a full UTC build
+# timestamp in SemVer build metadata. Build metadata is precedence-invisible,
+# so channel movement comes only from the R2 head, never version comparison.
+# THIS is the single authority; producers and consumers import it rather than
+# re-typing the shape.
+_CANARY_TAG_RE = re.compile(
+    r"^v(?:0|[1-9]\d{0,2})\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)"
+    r"\+canary\.20\d{6}T\d{6}Z$"
+)
+
+# A stable release tag: v<major>.<minor>.<patch>, no suffix. The major is
+# capped at three digits so the historical CalVer tags (v2026.7.20) can never
+# pass as SemVer and reach a stable feed, Docker publish, or the source
+# updater. THIS is the single authority for the stable shape; every stable
+# selector imports it rather than re-typing the rule.
+STABLE_TAG_RE = re.compile(r"^v(?:0|[1-9]\d{0,2})\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$")
 
 
 def is_canary_tag(tag: Any) -> bool:
-    """True when ``tag`` is a canary release tag."""
-    return isinstance(tag, str) and bool(_CANARY_TAG_RE.match(tag.strip()))
+    """True for a canonical canary source identity."""
+    if not isinstance(tag, str):
+        return False
+    value = tag.strip()
+    return bool(_CANARY_TAG_RE.fullmatch(value))
+
+
+def canary_timestamp(tag: Any) -> str | None:
+    """Return the UTC receipt stamp from a canonical canary tag."""
+    if not is_canary_tag(tag):
+        return None
+    return tag.strip().split("+canary.", 1)[1]
 
 
 def canary_tag_for_date(version: str, date_utc: str) -> str:
-    """The canary tag name for a UTC timestamp: next PATCH over ``version``
-    (the newest stable's patch + 1), second-precision UTC suffix —
-    v0.27.5-canary.20260818103000 when stable is v0.27.4. A canary
-    outversions every stable at or below its patch and loses to the next
-    stable patch, which is exactly the channel-switch upgrade path
-    (canary→stable = wait for that patch bump to ship as stable).
+    """Return ``v<stable>+canary.<full UTC timestamp>``.
+
+    The stable core is unchanged. The suffix is build metadata, so the source
+    identity compares equal to the stable and only the R2 channel head moves a
+    canary subscriber.
     """
-    parts = version.lstrip("v").split(".")
-    major, minor = int(parts[0]), int(parts[1])
-    patch = int(parts[2]) if len(parts) >= 3 else 0
-    return f"v{major}.{minor}.{patch + 1}-canary.{date_utc}"
+    core = version.removeprefix("v")
+    if not STABLE_TAG_RE.fullmatch("v" + core):
+        raise ValueError(f"invalid stable version for canary: {version!r}")
+    if not re.fullmatch(r"20\d{6}T\d{6}Z", date_utc):
+        raise ValueError(f"invalid canary UTC timestamp: {date_utc!r}")
+    return f"v{core}+canary.{date_utc}"
 
 
 
@@ -111,7 +131,7 @@ def channel_record(config: Optional[dict], project_root: Optional[Path] = None) 
 
 
 def _package_channel(stamp: dict) -> bool:
-    return stamp.get("payload") in ("bundled", "light") or stamp.get("updateMechanism") in (
+    return stamp.get("payload") in ("bundled", "light", "runtime") or stamp.get("updateMechanism") in (
         "electron-updater", "app-installer", "microsoft-store"
     )
 

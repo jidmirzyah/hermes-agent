@@ -19,11 +19,23 @@ class _Yaml11Resolver(VersionedResolver):
         return (1, 1)
 
 
-def safe_load(stream: str | bytes | IO[str] | IO[bytes]) -> Any:
-    """Read standard YAML data; existing configs use YAML 1.1 booleans."""
-    yaml = YAML(typ="safe")
+def _load(document: str | bytes, *, pure: bool) -> Any:
+    yaml = YAML(typ="safe", pure=pure)
     yaml.version = (1, 1)
-    return yaml.load(stream)
+    return yaml.load(document)
+
+
+def safe_load(stream: str | bytes | IO[str] | IO[bytes]) -> Any:
+    """Read standard YAML data; existing configs use YAML 1.1 booleans.
+
+    The pure parser defines what parses: Windows ARM64 has no C extension, and libyaml rejects
+    documents the pure parser accepts (``[{url: http://h}]``), so a C rejection is re-read pure.
+    """
+    document = stream if isinstance(stream, (str, bytes)) else stream.read()
+    try:
+        return _load(document, pure=False)
+    except YAMLError:
+        return _load(document, pure=True)
 
 
 @overload

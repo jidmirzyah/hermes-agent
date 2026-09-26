@@ -1,14 +1,11 @@
-"""Truthful derived build-version metadata for user-facing Hermes displays.
-
-``__version__`` remains the package/API version. This module adds a display
-suffix only when it can prove the number of commits since that release.
+"""Canonical runtime identity for Hermes.
 
 Resolution order:
 1. Install stamp (``install-stamp.json``) — written at build time by
    ``scripts/write_install_stamp.py`` for every packager (Docker, Nix, and
    the desktop app). The stamp is authoritative
    for packaged builds.
-2. Live git — for source/dev installs with a ``.git`` directory.
+2. Live git — for unstamped source/dev installs with a ``.git`` directory.
 3. Unknown — no stamp and no git. The provenance is unknown.
 """
 
@@ -16,12 +13,13 @@ from __future__ import annotations
 
 import json
 import subprocess
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, cast
 
-from hermes_cli import __release_date__, __version__
 from hermes_cli.steward import UPDATE_MECHANISMS
+from hermes_cli.update_channel import STABLE_TAG_RE
 
 
 @dataclass(frozen=True)
@@ -37,9 +35,15 @@ class VersionInfo:
     distribution: Literal["docker", "nix", "desktop-app"] | None = None
 
 
-def _derived_version(base_version: str, distance: int | None, dirty: bool = False) -> str:
+def _derived_version(
+    base_version: str,
+    distance: int | None,
+    dirty: bool = False,
+    short_commit: str | None = None,
+) -> str:
     if distance and distance > 0:
-        return f"{base_version}+{distance}"
+        suffix = f"{distance}.g{short_commit}" if short_commit else str(distance)
+        return f"{base_version}+{suffix}{'.dirty' if dirty and short_commit else ''}"
     if dirty and distance is None:
         return f"{base_version}+?"
     return base_version
@@ -61,9 +65,11 @@ def _resolve_repo_dir() -> Path | None:
     repo_dir = Path(__file__).parent.parent.resolve()
     if (repo_dir / ".git").exists():
         return repo_dir
-    from hermes_constants import get_hermes_home
+    # The PROCESS home: this is the running code's identity and is cached
+    # process-wide, so a profile's context-local override must not pick it.
+    from hermes_constants import get_process_hermes_home
 
-    candidate = get_hermes_home() / "hermes-agent"
+    candidate = get_process_hermes_home() / "hermes-agent"
     if (candidate / ".git").exists():
         return candidate
     return None
@@ -77,18 +83,37 @@ def _parse_nonnegative(value: str | None) -> int | None:
     return parsed if parsed >= 0 else None
 
 
+def _calver_release_version(repo_dir: Path) -> tuple[str, int] | None:
+    """The version the nearest CalVer release shipped, and the commits since it.
+
+    Releases before semver tags existed are tagged ``vYYYY.M.D`` only; the
+    version users actually run is in that tag's pyproject. Without this, a
+    checkout past such a release would compare as "unknown" against plugins'
+    ``requires_hermes``.
+    """
+    described = _run_git(repo_dir, "describe", "--tags", "--long", "--match", "v2[0-9][0-9][0-9].*", "HEAD")
+    if not described:
+        return None
+    tag, count, _ = described.rsplit("-", 2)
+    distance = _parse_nonnegative(count)
+    try:
+        project = tomllib.loads(_run_git(repo_dir, "show", f"{tag}:pyproject.toml") or "").get("project", {})
+    except tomllib.TOMLDecodeError:
+        return None
+    version = project.get("version")
+    if distance is None or not isinstance(version, str) or not STABLE_TAG_RE.fullmatch(f"v{version}"):
+        return None
+    return version, distance
+
+
 # --- Install stamp reader ---------------------------------------------------
 
-# The stamp file lives at the install root: beside the code in source
-# checkouts and Docker (which writes it to the project root), and in the
-# artifact's resources dir for sealed installs — whose processes carry
-# HERMES_INSTALL_ROOT (the Nix wrapper points it at the store path's
-# share/hermes-agent, where the stamp is baked). One resolution path for
-# every steward; no stamp-specific env override.
 def _resolve_stamp_file() -> Path | None:
-    from pm.paths import install_root
+    """The executing tree's stamp (steward.install_stamp_path owns the location)."""
+    from hermes_cli.steward import install_stamp_path
+    from pm.paths import repo_root
 
-    p = install_root() / "install-stamp.json"
+    p = install_stamp_path(repo_root())
     return p if p.is_file() else None
 
 
@@ -128,8 +153,13 @@ def _stamp_version_info() -> VersionInfo | None:
     if not commit or set(commit) == {"0"}:
         # All-zero placeholder = fallback stamp, not real provenance.
         return None
+    stamp_source = str(data.get("source") or "")
+    if stamp_source == "git" and (stamp_file.parent / ".git").exists():
+        live_commit = _run_git(stamp_file.parent, "rev-parse", "HEAD")
+        if live_commit and live_commit != commit:
+            return None
 
-    base_version = data.get("baseVersion") or __version__
+    base_version = data.get("baseVersion") or "unknown"
     display_version = data.get("displayVersion") or base_version
     distance = data.get("distance")
     if isinstance(distance, str):
@@ -137,10 +167,9 @@ def _stamp_version_info() -> VersionInfo | None:
 
     # ``source`` describes build provenance, while ``distribution`` identifies
     # the package form users installed. Keep both facts intact for support.
-    stamp_source = str(data.get("source") or "")
     source = (
         cast(Literal["build", "commit-build", "ci", "docker", "fallback", "git", "local", "nix", "unknown"], stamp_source)
-        if stamp_source in {"commit-build", "ci", "docker", "fallback", "local", "nix"}
+        if stamp_source in {"commit-build", "ci", "docker", "fallback", "git", "local", "nix"}
         else "build"
     )
     distribution = data.get("distribution")
@@ -167,7 +196,7 @@ def _stamp_version_info() -> VersionInfo | None:
 # --- Git provenance (source/dev installs) -----------------------------------
 
 
-def _git_version_info(repo_dir: Path) -> VersionInfo:
+def _git_version_info(repo_dir: Path, *, include_untracked: bool = False) -> VersionInfo:
     commit = _run_git(repo_dir, "rev-parse", "HEAD")
     # A detached HEAD has no branch. Leave the field None: every formatter
     # already prints the commit separately and handles a missing branch.
@@ -180,8 +209,11 @@ def _git_version_info(repo_dir: Path) -> VersionInfo:
         # -uno: skip the untracked-file scan. This runs on the startup-banner
         # path, and a full working-tree walk costs real time on large or cold
         # checkouts. Same semantics as write_install_stamp.py.
+        status_command = ["git", "status", "--porcelain"]
+        if not include_untracked:
+            status_command.append("-uno")
         dirty_result = subprocess.run(
-            ["git", "status", "--porcelain", "-uno"],
+            status_command,
             capture_output=True,
             text=True,
             timeout=3,
@@ -191,18 +223,29 @@ def _git_version_info(repo_dir: Path) -> VersionInfo:
     except (OSError, subprocess.SubprocessError):
         dirty = False
 
-    # New releases are SemVer tags. The release-date fallback lets existing
-    # CalVer-tagged releases display a correct distance during the transition.
-    distance = None
-    for tag in (f"v{__version__}", f"v{__release_date__}"):
-        raw_distance = _run_git(repo_dir, "rev-list", "--count", f"{tag}..HEAD")
-        parsed_distance = _parse_nonnegative(raw_distance)
-        if parsed_distance is not None:
-            distance = parsed_distance
-            break
+    tags = _run_git(repo_dir, "tag", "--merged", "HEAD", "--list", "v[0-9]*")
+    releases = [
+        tag[1:]
+        for tag in (tags or "").splitlines()
+        if STABLE_TAG_RE.fullmatch(tag)
+    ]
+    base_version = (
+        max(releases, key=lambda value: tuple(int(part) for part in value.split(".")))
+        if releases else "unknown"
+    )
+    distance = _parse_nonnegative(
+        _run_git(repo_dir, "rev-list", "--count", f"v{base_version}..HEAD")
+    ) if releases else None
+    if not releases:
+        base_version, distance = _calver_release_version(repo_dir) or ("unknown", None)
+    short_commit = _run_git(repo_dir, "rev-parse", "--short=7", "HEAD")
+    if base_version == "unknown" and short_commit:
+        display_version = f"git.{short_commit}{'.dirty' if dirty else ''}"
+    else:
+        display_version = _derived_version(base_version, distance, dirty, short_commit)
 
     return VersionInfo(
-        __version__, _derived_version(__version__, distance, dirty), distance, commit, branch, "git", dirty, commit_date
+        base_version, display_version, distance, commit, branch, "git", dirty, commit_date
     )
 
 
@@ -242,7 +285,7 @@ def get_version_info() -> VersionInfo:
 
     # 3. Unknown — no stamp, no git
     if info is None:
-        info = VersionInfo(__version__, __version__, None, None, None, "unknown")
+        info = VersionInfo("unknown", "unknown", None, None, None, "unknown")
 
     _cached_version_info = info
     return info

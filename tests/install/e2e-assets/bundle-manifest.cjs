@@ -2,7 +2,7 @@
 const fs = require('node:fs')
 const semver = require('semver')
 
-const TAG = /^v\d+\.\d+\.\d+(?:-canary\.\d{14})?$/
+const TAG = /^v\d+\.\d+\.\d+(?:\+canary\.20\d{6}T\d{6}Z)?$/
 const COMMIT = /^[0-9a-f]{40}$/
 const SHA256 = /^[0-9a-f]{64}$/
 const FORMATS = { windows: '.msixbundle', macos: '.zip' }
@@ -78,7 +78,7 @@ function validateBundleInputs(value, platform, arch) {
   } else {
     if (value.new.teamId !== value.old.teamId) throw new Error('Update must preserve signing team')
     if (!semver.gt(value.new.version, value.old.version)) throw new Error('New package version must increase')
-    if (value.old.tag.includes('-canary.') !== value.new.tag.includes('-canary.')) throw new Error('Bundle transition must stay on one update channel')
+    if (value.old.tag.includes('+canary.') !== value.new.tag.includes('+canary.')) throw new Error('Bundle transition must stay on one update channel')
   }
   return value
 }

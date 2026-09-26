@@ -34,13 +34,7 @@ def test_apt_readers_accept_bom_and_keep_archive_bytes(tmp_path, bom):
     ("v26.8.31", "26.8.31-1", "stable"),
     ("v126.8.31", "126.8.31-1", "stable"),
     ("v1.234.567", "1.234.567-1", "stable"),
-    ("v0.20.6-canary.20260831", "0.20.6~canary.20260831-1", "canary"),
-    ("v0.20.6-canary.20260831120000", "0.20.6~canary.20260831120000-1", "canary"),
-    # The repo's CalVer line: a 4-digit major must pass BOTH the stable and
-    # the canary shape (handoff/validate_identity rejected v2026.9.15-canary
-    # while the same-minor stable passed — the major cap was canary-only).
-    ("v2026.9.14", "2026.9.14-1", "stable"),
-    ("v2026.9.15-canary.20260916120000", "2026.9.15~canary.20260916120000-1", "canary"),
+    ("v0.20.6+canary.20260831T120000Z", "0.20.6~canary.20260831T120000Z-1", "canary"),
 ])
 def test_tag_mapping(tag, version, channel):
     assert deb_version_for_tag(tag) == version
@@ -52,18 +46,17 @@ def test_canary_shape_matches_the_stable_shape_on_every_component():
     # a canary cut over the newest stable must never be rejected when the
     # stable tag itself is accepted.
     from hermes_cli.update_channel import _CANARY_TAG_RE
-    from scripts.releases.semver import is_valid_version
+    from scripts.releases.semver import is_release_version
 
-    assert _CANARY_TAG_RE.fullmatch("v2026.9.15-canary.20260916120000")
-    assert is_valid_version("2026.9.15-canary.20260916120000")
-    # And the malformed-tag negatives stay malformed.
-    assert not is_valid_version("2026.9.15-canary.2026091612")
-    assert not is_valid_version("2026.9.15-canary.20260916120000123")
+    assert _CANARY_TAG_RE.fullmatch("v1.9.15+canary.20260916T120000Z")
+    assert is_release_version("1.9.15+canary.20260916T120000Z")
+    assert not is_release_version("2026.9.15+canary.20260916T120000Z")
+    assert not is_release_version("1.9.15-canary.20260916120000")
 
 
 @pytest.mark.parametrize("tag", [
     "", "1.2.3", "v1.2", "v1.2.3.4", "v1.2.3-", "v1.2.3-canary", "v1.2.3-canary.abc",
-    "v1.2.3-beta.1", "v1.2.x", "v-1.2.3",
+    "v1.2.3-beta.1", "v1.2.x", "v-1.2.3", "v2026.9.15",
     "v1.2.3-canary.202608311", "v1.2.3-canary.12345678", "v1.2.3-canary.202608311200001",
 ])
 def test_malformed_tags_rejected_by_both_mappings(tag):
@@ -75,7 +68,8 @@ def test_malformed_tags_rejected_by_both_mappings(tag):
 @pytest.mark.parametrize("args,status,output", [
     (["v9.8.7"], 0, "9.8.7-1"),
     (["--channel", "v9.8.7"], 0, "stable"),
-    (["--channel", "v9.8.7-canary.20260831120000"], 0, "canary"),
+    (["--channel", "v9.8.7+canary.20260831T120000Z"], 0, "canary"),
+
     (["v1.2"], 1, ""), (["--channel", "v1.2"], 1, ""),
 ])
 def test_cli_dispatch(args, status, output):
@@ -88,7 +82,7 @@ def test_cli_dispatch(args, status, output):
 
 @pytest.mark.skipif(shutil.which("dpkg") is None, reason="requires native dpkg")
 def test_dpkg_orders_canary_and_numeric_versions():
-    tags = ["v1.2.3-canary.20260831000000", "v1.2.3-canary.20260831235959", "v1.2.3", "v1.2.10"]
+    tags = ["v1.2.3+canary.20260831T000000Z", "v1.2.3+canary.20260831T235959Z", "v1.2.3", "v1.2.10"]
     versions = list(map(deb_version_for_tag, tags))
     for earlier, later in zip(versions, versions[1:]):
         subprocess.run(["dpkg", "--compare-versions", earlier, "lt", later], check=True)

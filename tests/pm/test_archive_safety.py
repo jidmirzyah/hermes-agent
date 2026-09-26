@@ -29,12 +29,8 @@ import pytest
 
 from pm.store import extract, flatten_single_dir
 
-posix_only = pytest.mark.skipif(
-    sys.platform == "win32", reason="POSIX symlink/mode semantics"
-)
-win_only = pytest.mark.skipif(
-    sys.platform != "win32", reason="pins win32 degradation specifically"
-)
+posix_only = pytest.mark.platforms("posix")  # POSIX symlink/mode semantics
+win_only = pytest.mark.platforms("windows")  # pins win32 degradation specifically
 
 
 def _tar(path: Path, members: dict[str, bytes]) -> Path:

@@ -35,7 +35,7 @@ def test_bootstrap_python_reads_pin_independent_of_indentation(tmp_path, indent,
         f"#!{bash}\nset -eu\n"
         f"printf '%s\\n' \"$*\" >> {shlex.quote(str(calls))}\n"
         'case "$*" in\n'
-        f'  "python install --no-bin {py_version}") ;;\n'
+        f'  "python install --no-bin --no-registry {py_version}") ;;\n'
         f'  "python find --managed-python {py_version}") printf \'%s\\n\' {shlex.quote(interpreter)} ;;\n'
         '  *) exit 91 ;;\n'
         'esac\n',

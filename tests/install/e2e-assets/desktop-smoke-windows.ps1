@@ -24,9 +24,18 @@ function Start-DesktopJourneyMock([string]$Node, [string]$Assets, [string]$Work,
     }
 }
 
+function Get-VerifiedDesktopWindows([string]$Exe) {
+    # The detached updater canonicalizes the WorkRoot path while the driver can
+    # retain ``..`` segments. Compare executable identity, not path spelling.
+    $expectedExe = [IO.Path]::GetFullPath($Exe)
+    $rows = @(Get-CimInstance Win32_Process | Where-Object {
+        $_.ExecutablePath -and [IO.Path]::GetFullPath($_.ExecutablePath) -ieq $expectedExe
+    })
+    return @($rows | ForEach-Object { Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue } | Where-Object { $_.MainWindowHandle -ne 0 })
+}
+
 function Close-VerifiedDesktop([string]$Exe, [int]$ProcessId = 0) {
-    $rows = @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $_.ExecutablePath -ieq $Exe })
-    $windows = @($rows | ForEach-Object { Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue } | Where-Object { $_.MainWindowHandle -ne 0 })
+    $windows = @(Get-VerifiedDesktopWindows $Exe)
     if ($ProcessId) { $windows = @($windows | Where-Object { $_.Id -eq $ProcessId }) }
     if ($windows.Count -ne 1) { throw 'Cannot identify exactly one verified desktop window to close normally' }
     $window = $windows[0]

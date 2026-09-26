@@ -6,8 +6,9 @@ Run via ``python -m gateway.run`` or ``python cli.py --gateway``."""
 # hermes_bootstrap must be the very first import (UTF-8 stdio on Windows; no-op on POSIX).
 try:
     import hermes_bootstrap  # noqa: F401
-except ModuleNotFoundError:
-    pass  # a partial ``hermes update`` can leave the bootstrap unregistered; only Windows UTF-8 stdio suffers
+except ModuleNotFoundError as exc:  # a partial ``hermes update`` can leave the bootstrap unregistered
+    if exc.name != "hermes_bootstrap":
+        raise  # the bootstrap exists but cannot load: skipping it would skip PM activation
 
 import asyncio
 import concurrent.futures
@@ -5039,7 +5040,10 @@ def _start_gateway_housekeeping(
             lambda _launch=_launch_sessions_dir(getattr(runner, "config", None)):
                 _housekeeping_state_db_maintenance(_launch))),
         (60, "Auto-archive tick", _housekeeping_auto_archive),
-        (1, "Plugin update check", _housekeeping_plugin_update_check),
+        # Due-gated inside: the first tick after startup runs an overdue check, not tick 60.
+        # Per served profile: plugins dir, last-run marker and plugins.auto_apply are all the
+        # profile's own (get_hermes_home()/load_config_readonly() bind to the scope).
+        (1, "Plugin update check", profile_scoped_chore(runner, _housekeeping_plugin_update_check)),
         (1, "Deferred FTS retry tick", _housekeeping_deferred_fts_retry),
         (1, "gateway housekeeping memory trim", _housekeeping_memory_trim),
         (1, "MCP config reconcile", _mcp_config_reconciler(runner)),

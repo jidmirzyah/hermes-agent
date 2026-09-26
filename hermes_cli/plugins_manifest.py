@@ -6,7 +6,6 @@ Split out of :mod:`hermes_cli.plugins`; validation warns and never fails a load.
 from __future__ import annotations
 
 import hashlib
-import importlib.metadata
 import importlib.util
 import logging
 import re
@@ -395,17 +394,10 @@ _VERSION_COMPARATOR_RE = re.compile(r"^\s*(>=|<=|==|!=|>|<)\s*(.+?)\s*$")
 
 
 def running_hermes_version() -> str:
-    """Version of the Hermes code that is running: ``hermes_cli.__version__``. Distribution metadata is only
-    a fallback — on an editable/source install it is frozen at ``pip install -e`` time and drifts from the
-    checkout after every ``git pull`` (dist said 0.21.0 while the code was 0.21.4), so gating on it skipped
-    plugins that required exactly the release the user was running."""
-    try:
-        from hermes_cli import __version__
-        if __version__:
-            return str(__version__)
-    except Exception:
-        pass
-    return importlib.metadata.version("hermes-agent")
+    """Base release version of the Hermes code that is running."""
+    from hermes_cli.version_info import get_version_info
+
+    return get_version_info().base_version
 
 
 _VERSION_SEGMENT_RE = re.compile(r"^\d+")

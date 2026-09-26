@@ -35,7 +35,7 @@ Prepare the checkout through PM first. With its Python 3.14, build an independen
 test environment at a fresh path:
 
 ```powershell
-python -m pm.build_env --source . --out .venv --extra dev --group test
+python -m pm.build_env --source . --out .venv --group dev --group test
 ```
 
 The output must not exist. Before regeneration, stop its processes and explicitly

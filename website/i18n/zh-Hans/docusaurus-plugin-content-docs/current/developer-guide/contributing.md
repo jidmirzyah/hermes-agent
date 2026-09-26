@@ -45,19 +45,20 @@ Bash：
 
 ```bash
 source ./activate
-python hermes --version
+hermes --version
 ```
 
 PowerShell：
 
 ```powershell
 . .\activate.ps1
-python hermes --version
+hermes --version
 ```
 
 PowerShell 开头的点和空格用于 dot-source，不能省略。
 激活通过 PM 准备工具并同步依赖，但不创建 JS workspaces，也不设置常规 venv 提示符。
-使用 `python hermes` 明确运行当前 checkout，避免命中全局命令或 MSIX 别名。
+激活把 `hermes` 定义成当前 worktree 的函数，因此会盖住全局命令和 MSIX 别名，
+并在离开该 worktree 时拒绝运行。
 `deactivate` 恢复激活前的环境，不卸载依赖或停止已启动的进程。
 
 ### 独立开发和测试环境 {#manual-development-and-test-environment}
@@ -67,7 +68,7 @@ PowerShell 开头的点和空格用于 dot-source，不能省略。
 PM 必须能够启动，才能构建独立测试环境：
 
 ```bash
-python -m pm.build_env --source . --out .venv --extra dev --group test
+python -m pm.build_env --source . --out .venv --group dev --group test
 ```
 
 此命令使用提交的锁文件，创建新环境并检查依赖一致性。输出路径必须不存在。
@@ -79,7 +80,7 @@ PM 不会自动删除已有目录。不要通过原始 pip 或 uv 命令修改 H
 Windows 上通过 Bash 运行 `scripts/run_tests.sh`，并预先准备本机 C++ 编译环境。
 
 独立测试环境不替代 PM 工具存储或应用的依赖选择。不要修改签名应用的载荷。
-运行开发实例前，选择临时的 `HERMES_HOME`，再使用 `python hermes setup` 配置它。
+运行开发实例前，选择临时的 `HERMES_HOME`，再使用 `hermes setup` 配置它。
 不要把生产凭据复制到 checkout。
 
 从仓库根目录运行 `npm ci` 安装 JS workspaces。网站单独使用：

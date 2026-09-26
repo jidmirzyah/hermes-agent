@@ -7,7 +7,6 @@ import os
 import shutil
 import subprocess
 import sys
-import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -24,13 +23,10 @@ def capture(argv: list[str], repo: Path) -> str:
     return subprocess.check_output(argv, cwd=repo, text=True, encoding="utf-8").strip()
 
 
-def release_version(repo: Path, tag: str) -> str:
+def release_version(_repo: Path, tag: str) -> str:
     from scripts.termux.deb_version import channel_for_tag
 
     channel_for_tag(tag)  # shared release tag grammar, not a second version parser
-    version = tomllib.loads((repo / "pyproject.toml").read_text(encoding="utf-8-sig"))["project"]["version"]
-    if "-canary." not in tag and tag != "v" + version:
-        raise ValueError(f"tag {tag} does not match project version {version}")
     return tag[1:]
 
 
@@ -69,6 +65,8 @@ def _build_prepared(prepared, builder_args: list[str], variant: str | None) -> N
     variant = select_variant(prepared, variant)
     repo, node = request.source, str(prepared.node)
     env = build_environment(prepared, variant, os.environ)
+    if request.release_epoch is not None:
+        env["HERMES_RELEASE_EPOCH"] = str(request.release_epoch)
     desktop = repo / "apps/desktop"
     targets = {"win32": ["--win", "msix"], "darwin": ["--mac", "dmg", "zip"], "linux": ["--linux", "AppImage"]}[sys.platform]
     package_args = ["--prepared", str(prepared.packager), "--native-deps", str(prepared.native),
@@ -97,22 +95,11 @@ def _build_prepared(prepared, builder_args: list[str], variant: str | None) -> N
     run([node, "scripts/build/desktop.mjs", "--source", str(repo), "--icons", str(icons),
          "--stamp", str(desktop / "build/install-stamp.json"), "--native-deps", str(prepared.native),
          "--out", str(desktop / "dist")], cwd=repo, env=env)
-    # Windows file-version and MSIX build-number policy remains with its packager.
     version_args = []
-    if sys.platform == "win32":
-        if request.channel_request is not None:
-            metadata = {"file": request.channel_request["windowsVersion"], "build": None}
-        elif request.tag is None:
-            # The plain version needs no canary build-number override.
-            metadata = {"file": None, "build": None}
-        else:
-            script = "const w=require('./apps/desktop/scripts/windows-file-version.mjs');const m=require('./scripts/msix-shared.mjs');console.log(JSON.stringify({file:w.windowsFileVersion(process.argv[1]),build:process.argv[2]!=='store'&&process.argv[1].includes('-canary.')?m.canaryBuildMinutes(process.argv[1],process.cwd()):null}))"
-            metadata = json.loads(capture([node, "-e", script, request.tag, variant], repo))
-        env.pop("BUILD_NUMBER", None)
-        if metadata["build"] is not None and variant != "store":
-            env["BUILD_NUMBER"] = str(metadata["build"])
-        if metadata["file"]:
-            version_args = [f'-c.extraMetadata.shortVersion={metadata["file"]}', f'-c.extraMetadata.shortVersionWindows={metadata["file"]}']
+    if sys.platform == "win32" and request.channel_request is None and request.tag is not None:
+        script = "const m=require('./scripts/msix-shared.mjs');console.log(m.nativeQuad(process.argv[1], Number(process.env.HERMES_RELEASE_EPOCH)))"
+        quad = capture([node, "-e", script, request.tag], repo).strip()
+        version_args = [f'-c.extraMetadata.shortVersion={quad}', f'-c.extraMetadata.shortVersionWindows={quad}']
     require_source(repo, request.commit)
     run([node, "scripts/run-electron-builder.mjs", *package_args, *version_args, *builder_args], cwd=desktop,
         env=packaging_environment(env, os.environ, request.target))
@@ -125,6 +112,7 @@ def main() -> None:
     parser.add_argument("--commit", dest="commit_build", default=None,
                         help="Commit-only build: exact full 40-char SHA the checkout is at; "
                              "version comes from the target pyproject, no tag is referenced")
+    parser.add_argument("--release-commit", help="Admitted commit for a stable tag not created until green")
     parser.add_argument("--channel-request", type=Path, help="Immutable admitted channel request JSON")
     parser.add_argument("--variant", choices=["bundled", "store", "light"])
     parser.add_argument("--repo", type=Path, default=ROOT)
@@ -137,7 +125,8 @@ def main() -> None:
     builder_args = [v for v in args.builder_args if v != "--"]
     try:
         if args.prepared:
-            if args.tag or args.commit_build or args.channel_request or args.prepare_only or args.work or args.cache:
+            if (args.tag or args.commit_build or args.release_commit or args.channel_request
+                    or args.prepare_only or args.work or args.cache):
                 parser.error("--prepared supplies the complete build request")
             build_prepared(args.prepared, builder_args, args.variant)
         else:
@@ -149,7 +138,8 @@ def main() -> None:
                                           cache=args.cache or args.repo / ".cache/desktop-inputs",
                                           bundle_env=decode(os.environ.get("HERMES_BUNDLE_ENV_JSON", "")),
                                           channel_request=json.loads(args.channel_request.read_text(encoding="utf-8-sig"))
-                                          if args.channel_request else None)
+                                          if args.channel_request else None,
+                                          release_commit=args.release_commit)
             if args.prepare_only and builder_args:
                 parser.error("builder arguments belong to the build phase")
             result = prepare(request)

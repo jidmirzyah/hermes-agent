@@ -126,12 +126,15 @@ def _install_browsers(tmp_path, monkeypatch, *, playwright: bool, system: bool):
     roots = tmp_path / "pw"
     roots.mkdir(parents=True)
     monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(roots))
-    monkeypatch.setattr("tools.browser_tool_install._chromium_search_roots", lambda: [str(roots)])
     pw_exe = roots / "chromium-1200" / "chrome-linux" / "chrome"
     if playwright:
         pw_exe.parent.mkdir(parents=True)
         pw_exe.write_text("#!/bin/sh\n", encoding="utf-8")
         pw_exe.chmod(0o755)
+    monkeypatch.setattr(
+        "hermes_cli.browser_runtime.chromium_executable",
+        lambda: str(pw_exe) if playwright else None,
+    )
     sys_exe = tmp_path / "bin" / "chromium"
     if system:
         sys_exe.parent.mkdir(parents=True)
@@ -263,7 +266,7 @@ def test_headed_chromium_spawn_asks_the_screen_to_start_but_the_env_builder_neve
         def wait(self, timeout=None): return 0
     def _fake_popen(argv, env, socket_dir, tag, stdin_payload=None):
         for slot in ("stdout", "stderr"):
-            Path(socket_dir, f"_{slot}_{tag}").write_text("{}" if slot == "stdout" else "")
+            Path(socket_dir, f"_{slot}_{tag}").write_text("{}" if slot == "stdout" else "", encoding="utf-8")
         return _Done()
     monkeypatch.setattr(session, "_popen_agent_browser", _fake_popen)
     monkeypatch.setattr(session, "_prepare_session_socket_dir", lambda name: str(tmp_path))

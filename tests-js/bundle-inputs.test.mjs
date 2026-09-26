@@ -81,7 +81,7 @@ test.each(['windows', 'macos'])('%s rejects malformed and incompatible pairs', p
   expect(() => validateBundleInputs(fixture(platform), platform, 'arm64')).toThrow('architecture')
   const pair = fixture(platform)
   if (platform === 'macos') {
-    pair.new.tag = 'v1.3.0-canary.20260907000000'; pair.new.version = pair.new.tag.slice(1)
+    pair.new.tag = 'v1.3.0+canary.20260907T000000Z'; pair.new.version = pair.new.tag.slice(1)
     expect(() => validateBundleInputs(pair, platform, 'x64')).toThrow('channel')
     pair.new.tag = pair.old.tag; pair.new.version = pair.old.version
     expect(() => validateBundleInputs(pair, platform, 'x64')).toThrow('increase')

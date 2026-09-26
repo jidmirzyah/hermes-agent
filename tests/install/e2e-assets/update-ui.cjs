@@ -104,4 +104,19 @@ async function waitForUpdate(page, { log, shot }) {
   return update
 }
 
-module.exports = { pickAppWindow, openAbout, waitForUpdate }
+async function readManualUpdateCommand(page) {
+  const title = page.getByText(/^Update from your terminal$/i).first()
+  try {
+    await title.waitFor({ state: 'visible', timeout: 5_000 })
+  } catch {
+    return null
+  }
+  const text = await page.locator('code').filter({ hasText: /hermes update/i }).first().textContent()
+  const command = (text || '').trim().replace(/^\$\s*/, '')
+  if (!/^hermes update(?:\s|$)/.test(command)) {
+    throw new Error('manual update card did not present a hermes update command')
+  }
+  return command
+}
+
+module.exports = { pickAppWindow, openAbout, readManualUpdateCommand, waitForUpdate }

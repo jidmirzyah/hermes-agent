@@ -36,7 +36,7 @@ def staged_channel(tmp_path, r2_server, request, monkeypatch):
     from scripts.releases.r2_scope import R2Scope
     base = f"http://127.0.0.1:{r2_server.server_port}/hermes-releases"
     if getattr(request, "param", ""):
-        monkeypatch.setenv("R2_DISPOSABLE_RUN", "98765-1" if request.param == "receiver" else request.param)
+        monkeypatch.setenv("R2_DISPOSABLE_RUN", "98765" if request.param == "receiver" else request.param)
         monkeypatch.setenv("GITHUB_REPOSITORY_ID", "12345")
         monkeypatch.setenv("CLOUDFLARE_R2_PUBLIC_URL", base)
     scope = R2Scope.configured()
@@ -183,7 +183,14 @@ def run_shell(tmp_path, r2_server, script, env, *, cwd=None):
     python.write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} {shlex.quote(str(driver))} "$@"\n', encoding="utf-8")
     python.chmod(0o755)
     gh = tools / "gh"
-    gh.write_text('#!/bin/sh\n[ "$1" = api ] || exit 3\nprintf "write\\n"\n', encoding="utf-8")
+    gh.write_text(
+        '#!/bin/sh\n[ "$1" = api ] || exit 3\n'
+        'case "$2" in\n'
+        '  */actions/runs/*) printf \'{"id":98765,"event":"workflow_dispatch",'
+        '"status":"in_progress","head_branch":"main","head_sha":"%s",'
+        '"created_at":"2026-09-22T01:23:45Z"}\\n\' "$GITHUB_SHA" ;;\n'
+        '  *) printf "write\\n" ;;\n'
+        'esac\n', encoding="utf-8")
     gh.chmod(0o755)
     return subprocess.run(["bash", "-e", "-o", "pipefail", "-c", script], cwd=cwd or tmp_path,
                           env={**os.environ, **env, "PATH": str(tools) + os.pathsep + os.environ["PATH"]},
@@ -248,7 +255,7 @@ def test_workflow_promotion_missing_native_gate_does_not_write(tmp_path, r2_serv
 
 
 @pytest.mark.platforms("posix")
-@pytest.mark.parametrize("staged_channel", ["", "98765-1"], indirect=True)
+@pytest.mark.parametrize("staged_channel", ["", "98765"], indirect=True)
 def test_real_publication_cas_and_manifest_summary(tmp_path, r2_server, staged_channel):
     request, _ = staged_channel
     from scripts.releases.r2_scope import R2Scope
@@ -265,7 +272,8 @@ def test_real_publication_cas_and_manifest_summary(tmp_path, r2_server, staged_c
            "RELEASE_NEEDS": json.dumps({name: {"result": "success"} for name in channel_publish.REQUIRED_JOBS}),
            "DEFAULT_BRANCH": "main", "GITHUB_REF": "refs/heads/main", "GITHUB_EVENT_NAME": "workflow_dispatch",
            "GITHUB_WORKFLOW_REF": "fixture/repo/.github/workflows/desktop-bundled-release.yml@refs/heads/main",
-           "GITHUB_SHA": request["commit"], "GITHUB_ACTOR": "fixture", "GITHUB_TRIGGERING_ACTOR": "fixture"}
+           "GITHUB_SHA": request["commit"], "GITHUB_ACTOR": "fixture", "GITHUB_TRIGGERING_ACTOR": "fixture",
+           "GITHUB_ACTIONS": "true", "GITHUB_RUN_ID": "98765"}
     prefix = scope.prefix + handoff.channel_prefix(request)
     if scope.prefix:
         env["CLOUDFLARE_R2_PUBLIC_URL"] = os.environ["CLOUDFLARE_R2_PUBLIC_URL"]
@@ -304,6 +312,16 @@ def test_real_publication_cas_and_manifest_summary(tmp_path, r2_server, staged_c
         assert result.returncode == 0, result.stdout + result.stderr
         evidence = json.loads((tmp_path / "scoped-smoke/out/download.json").read_text())
         assert evidence["request"] == request
+    else:
+        tag = "v0.0.7+channel.20260922T012345Z.98765"
+        assert _git("tag", "--list", tag, cwd=tmp_path / "clone") == tag
+        receipt = json.loads(_git("tag", "-l", tag, "--format=%(contents)", cwd=tmp_path / "clone"))
+        assert receipt == {
+            "schema": 1, "kind": "channel", "tag": tag, "version": request["version"],
+            "commit": request["commit"], "runId": "98765", "runCreatedAt": "2026-09-22T01:23:45Z",
+            "details": {"buildId": request["buildId"], "channel": request["channel"],
+                        "requestSha256": hashlib.sha256(canonical_json(request)).hexdigest()},
+        }
     # A retired publisher can stage immutable diagnostics, but never revive its pointer.
     retired = {**stored, "state": "retired", "destination": "stable", "minimumVersion": "1.2.3",
                "lastHead": stored["head"], "destinationHead": stored["head"], "receiverProtocol": 1,
@@ -435,7 +453,7 @@ def test_receiver_allocation_uses_official_identity_only_inside_scope(tmp_path):
         pub = publisher(url)
         with pytest.raises(ValueError, match="disposable"):
             allocate_receivers(pub, "a" * 40, "1.2.3", "a" * 40)
-        scope = R2Scope("ci-disposable/12345/17-1/")
+        scope = R2Scope("ci-disposable/12345/17/")
         pub.store.scope = scope
         pub.public_base += "/" + scope.prefix.rstrip("/")
         from hermes_cli.release_channels import ChannelReader

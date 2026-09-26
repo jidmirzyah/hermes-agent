@@ -239,6 +239,38 @@ desktop_checkpoint() { # phase, expected commit, selected method
     --desktop "$EXPECT_DESKTOP" --method "$3"
 }
 
+# Each Playwright phase must own Electron's single-instance lock. Close all
+# other app processes before a phase. Electron otherwise rejects the second
+# instance before Playwright receives an app-ready event.
+close_running_desktop() {
+  local pattern="$INSTALL_DIR/apps/desktop/release"
+  local pid waited=0
+  for pid in $(pgrep -f "$pattern" 2>/dev/null); do
+    kill "$pid" 2>/dev/null || true
+  done
+  while [ "$waited" -lt 30 ]; do
+    pgrep -f "$pattern" >/dev/null 2>&1 || break
+    sleep 0.5
+    waited=$((waited + 1))
+  done
+  if pgrep -f "$pattern" >/dev/null 2>&1; then
+    for pid in $(pgrep -f "$pattern" 2>/dev/null); do
+      kill -KILL "$pid" 2>/dev/null || true
+    done
+    sleep 1
+  fi
+  pgrep -f "$pattern" >/dev/null 2>&1 \
+    && fail "a desktop instance from this install survived termination"
+
+  # The install stamp is logged before requestSingleInstanceLock; a launch that
+  # prints only that stamp is Electron's silent secondary-instance path. After
+  # every matching process is gone, these isolated-route artifacts are stale,
+  # not user data, and must not reject Playwright's lock-owning launch.
+  rm -f "$HERMES_DESKTOP_USER_DATA_DIR/SingletonLock" \
+    "$HERMES_DESKTOP_USER_DATA_DIR/SingletonSocket" \
+    "$HERMES_DESKTOP_USER_DATA_DIR/SingletonCookie"
+}
+
 # The redirect must stay at TRANSPORT level. `hermes update` resolves its
 # update channel from the release archive and validates the record against
 # `git config --get remote.origin.url`; if the configured URL ever looked like
@@ -450,6 +482,7 @@ case "$UPDATE_METHOD" in
     [ -f "$SPEC.captured" ] || fail "hermes desktop exited 0 but no launch was captured at $SPEC"
     ok "captured $(cat "$SPEC.captured") launch spec"
 
+    close_running_desktop
     step "driving the app under Playwright: Settings -> About -> Update now"
     # Use the checkout module closure and current driver Node, not OLD tooling.
     rc=0
@@ -475,48 +508,25 @@ esac
 # the flag inside makes this second call a no-op on those legs.
 collect_install_side_logs
 
-# A pre-handoff release cannot complete inside `hermes update`: its update path
-# has no retired-hook seam to reach, so the update ends with the tree at HEAD
-# and no published launcher. The NEXT ordinary startup is what completes it
-# (hermes_bootstrap -> prepare_launch -> sync PM, publish launchers, re-exec).
-# Drive that startup here, WITHOUT the lazy-install ban, and only when the
-# launcher is missing -- so a healthy update is still judged by the strict
-# checkpoint below, and `--version` probes keep their ban. A probe must never
-# complete an unfinished update; a real startup is exactly how a user does it.
-if ! source_hermes "$INSTALL_DIR" >/dev/null 2>&1; then
-  step "next ordinary startup after the update (completes a pre-handoff release)"
+# The update may publish a launcher before its installed dependency inputs are
+# current. The next non-metadata startup then owns source completion, including
+# rebuilding the packaged desktop app. Launching that app directly first lets
+# its backend replace the live bundle and kills Playwright's renderer target.
+# Desktop legs must therefore drive the ordinary CLI startup even when the
+# launcher exists. No-desktop legs retain the legacy missing-launcher recovery.
+if [ "$EXPECT_DESKTOP" = "present" ] || ! source_hermes "$INSTALL_DIR" >/dev/null 2>&1; then
+  step "next ordinary startup after the update (completes deferred source-update work)"
   STARTUP_HERMES="$(source_hermes_for_startup "$INSTALL_DIR")" \
     || fail "no installed command to start after the update"
   startup_rc=0
-  "$STARTUP_HERMES" status > "$LOG_DIR/post-update-startup.log" 2>&1 || startup_rc=$?
+  source_build_env "$STARTUP_HERMES" status > "$LOG_DIR/post-update-startup.log" 2>&1 || startup_rc=$?
   log_group "post-update startup" "$LOG_DIR/post-update-startup.log"
-  ok "first startup after the update ran (exit $startup_rc); the checkpoint below asserts the launcher it must have published"
+  ok "post-update startup ran (exit $startup_rc); the read-only checks below assert completion"
 fi
 
 assert_checkout "$TARGET_SHA" "$TARGET_LABEL"
 assert_user_shims
 user_state_after_upgrade
-
-# The in-app update leaves the app that drove it running: the smoke clicks
-# "Update now" in that very window, and the updater may relaunch it. The
-# post-update checkpoint then launches its OWN instance, and Electron's
-# single-instance lock makes the second process boot, print its install stamp and
-# exit 0 -- which Playwright reports as "electron.launch: Process failed to
-# launch!" with the ws closing at code 1006 and no error text. The checkpoint
-# must own the only instance, so close anything still running from this install.
-close_running_desktop() {
-  local pattern="$INSTALL_DIR/apps/desktop/release"
-  local pid waited=0
-  for pid in $(pgrep -f "$pattern" 2>/dev/null); do
-    kill "$pid" 2>/dev/null || true
-  done
-  while [ "$waited" -lt 15 ]; do
-    pgrep -f "$pattern" >/dev/null 2>&1 || return 0
-    sleep 0.5
-    waited=$((waited + 1))
-  done
-  printf 'warning: a desktop instance from this install survived 15s of termination\n' >&2
-}
 
 preserve_after_upgrade
 env_key_names "after update"

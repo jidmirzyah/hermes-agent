@@ -31,7 +31,8 @@ jobs:
           # the electron contracts drive real hermes_cli/pm code through
           # HERMES_PYTHON, which needs the application dependencies.
           toolchain: all
-          extras: '["dev"]'
+          extras: '[]'
+          test-environment: 'true'
 
       # The desktop SSH watchdog tests run their probe through a real zsh
       # login shell (#111949). The ubuntu image ships no zsh and the tests

@@ -14,6 +14,7 @@ def test_stamp_uses_built_commit_even_with_dispatch_sha_and_refuses_mismatch(tmp
     repo = tmp_path / 'repo'
     repo.mkdir()
     for relative in ('scripts/write_install_stamp.py', 'scripts/releases/commit_build.py',
+                     'scripts/releases/distance.py', 'scripts/releases/versioning.py',
                      'hermes_cli/__init__.py', 'hermes_cli/update_channel.py', 'hermes_cli/release_channels.py',
                      'pm/paths.py', 'pm/environments.py', 'hermes_cli/steward.py', 'hermes_constants.py'):
         dest = repo / relative
@@ -41,7 +42,8 @@ def test_stamp_uses_built_commit_even_with_dispatch_sha_and_refuses_mismatch(tmp
                 'HERMES_BUILD_COMMIT': feature, 'HERMES_DESKTOP_VARIANT': 'bundled',
                 'HERMES_HOME': str(tmp_path / 'home')})
     command = [sys.executable, '-I', '-S', str(repo / 'scripts/write_install_stamp.py'),
-               '--output', str(out), '--update-mechanism', 'app-installer']
+               '--output', str(out), '--base-version', '0.28.0', '--distance', '0',
+               '--update-mechanism', 'app-installer']
 
     def run(*args, override=None):
         return subprocess.run([*command, *args], cwd=tmp_path, env={**env, **(override or {})},
@@ -51,6 +53,7 @@ def test_stamp_uses_built_commit_even_with_dispatch_sha_and_refuses_mismatch(tmp
     assert result.returncode == 0, result.stderr
     data = json.loads(out.read_text(encoding='utf-8'))
     assert data['commit'] == feature and data['source'] == 'commit-build'
+    assert data['baseVersion'] == data['displayVersion'] == '0.28.0'
     assert data['branch'] is None and data['tag'] is None and data['updateMechanism'] == 'external'
     result = run('--commit', feature)
     assert result.returncode == 0, result.stderr

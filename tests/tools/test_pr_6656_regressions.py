@@ -29,11 +29,9 @@ from tools.skills_hub_install import bundle_content_hash, uninstall_skill
 from tools.skills_hub_models import SkillBundle
 from tools.skills_guard import content_hash
 
-
 # =============================================================================
 # uninstall_skill: path traversal guard
 # =============================================================================
-
 
 class TestUninstallPathTraversal:
     """The ``install_path`` field in ``lock.json`` is attacker-controllable
@@ -162,11 +160,9 @@ class TestUninstallPathTraversal:
         assert ok is True
         assert not legit.exists()
 
-
 # =============================================================================
 # Bundle / disk hash symmetry + filename inclusion
 # =============================================================================
-
 
 class TestBundleHashFilenameSensitivity:
     """Hashes must change when filenames are swapped, even if combined
@@ -192,7 +188,6 @@ class TestBundleHashFilenameSensitivity:
         b = self._make_bundle({"SKILL.md": "world", "scripts/run.sh": "hello"})
         assert bundle_content_hash(a) != bundle_content_hash(b)
 
-
     def test_bundle_and_disk_hash_match(self, tmp_path):
         """Symmetry contract: the same skill, expressed as a SkillBundle
         and as a directory tree, must produce the same digest. If this
@@ -211,9 +206,6 @@ class TestBundleHashFilenameSensitivity:
 
         assert bundle_content_hash(bundle) == content_hash(skill_dir)
 
-
 # =============================================================================
 # PairingStore.list_pending: must hold the lock
 # =============================================================================
-
-

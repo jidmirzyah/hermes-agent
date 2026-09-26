@@ -6,7 +6,7 @@ import type { InstallStamp } from './install-stamp'
 describe('artifact version identity', (): void => {
   it.each([
     ['v1.2.3', 'stable'],
-    ['v1.2.4-canary.20260911010101', 'canary'],
+    ['v1.2.4+canary.20260911T010101Z', 'canary'],
     [null, null]
   ] as const)(
     'reports the client version and fixed channel for %s, not a remote runtime',

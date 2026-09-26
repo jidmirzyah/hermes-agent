@@ -19,7 +19,7 @@ test('fresh-install provenance admits tagless commit stamps without relaxing upd
       ['source', 'git'], ['branch', 'main'], ['dirty', true], ['updateMechanism', 'electron-updater']]) {
       expect(() => verifyBundleStamp({ ...stamp, [key]: value }, { commit, platform })).toThrow(key)
     }
-    const tag = 'v1.2.3-canary.20260913000000'
+    const tag = 'v1.2.3+canary.20260913T000000Z'
     const tagged = { ...stamp, tag, source: 'git', branch: 'main', displayVersion: tag.slice(1),
       updateMechanism: platform === 'darwin' ? 'electron-updater' : 'app-installer' }
     expect(verifyBundleStamp(tagged, { commit, tag, platform })).toBe(tag.slice(1))
@@ -30,7 +30,7 @@ test('fresh-install provenance admits tagless commit stamps without relaxing upd
 
 test('identity uses the production bundled variant and exact input tokens, not inherited build flags', () => {
   const stable = bundleIdentity(commit, 'v1.2.3')
-  const canary = bundleIdentity(commit, 'v1.2.3-canary.20260913000000')
+  const canary = bundleIdentity(commit, 'v1.2.3+canary.20260913T000000Z')
   const tagless = bundleIdentity(commit)
   expect(stable.appId).not.toBe(canary.appId)
   expect(stable.msixIdentity).not.toBe(tagless.msixIdentity)

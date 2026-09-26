@@ -168,7 +168,7 @@ Python 构建全新的调试/测试环境：
 
 ```bash
 source ./activate
-python -m pm.build_env --source . --out .venv --extra dev --group test
+python -m pm.build_env --source . --out .venv --group dev --group test
 .venv/bin/python -c "import debugpy; print(debugpy.__file__)"
 ```
 

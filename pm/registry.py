@@ -9,7 +9,7 @@ import sys
 from types import ModuleType
 from typing import Any
 
-from pm.package import InstallError, Package
+from pm.package import InstallError, Package, StatePackage
 
 _packages: dict[str, Package] = {}
 
@@ -54,6 +54,11 @@ def source_install_packages(names: list[str]) -> list[str]:
     """Select runtime roots; internal tools enter only through dependencies."""
     return [name for name in names
             if not get_package(name).internal and (name == "python" or not get_package(name).optional)]
+
+
+def tool_roots(names: list[str]) -> list[str]:
+    """Packages to publish before a venv sync. The venv is not one of them."""
+    return [name for name in source_install_packages(names) if not isinstance(get_package(name), StatePackage)]
 
 
 def package_definitions(names: list[str] | None = None) -> list[dict[str, Any]]:

@@ -226,9 +226,13 @@ export function maybeNotifyUpdateAvailable(status: DesktopUpdateStatus | null, t
   }
 
   // The package update owner reports availability without a commit SHA.
-  // Git checks must still identify their target commit.
-  const hasTargetIdentity =
-    Boolean(status.targetSha) || status.mechanism === 'app-installer' || status.mechanism === 'microsoft-store'
+  // Git checks must still identify their target commit; a native macOS
+  // (electron-updater) check names its target by release tag instead.
+  const hasTargetIdentity: boolean =
+    Boolean(status.targetSha) ||
+    Boolean(status.latestTag) ||
+    status.mechanism === 'app-installer' ||
+    status.mechanism === 'microsoft-store'
 
   if (!hasTargetIdentity) {
     return

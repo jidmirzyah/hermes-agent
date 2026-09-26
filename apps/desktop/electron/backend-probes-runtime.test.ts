@@ -25,6 +25,7 @@ test('the real bootstrap supplies ruamel-only dependencies and rejects foreign-p
 
   const env: NodeJS.ProcessEnv = {
     ...process.env,
+    HOME: home,
     HERMES_HOME: home,
     HERMES_RUNTIME_DIR: path.join(temp, 'tools'),
     HERMES_DISABLE_LAZY_INSTALLS: '1',
@@ -32,7 +33,8 @@ test('the real bootstrap supplies ruamel-only dependencies and rejects foreign-p
     UV_NO_CONFIG: '1',
     PYTHONPATH: '',
     PYTHONHOME: '',
-    PYTHONDONTWRITEBYTECODE: '1'
+    PYTHONDONTWRITEBYTECODE: '1',
+    USERPROFILE: home
   }
 
   const setup: string = `

@@ -158,6 +158,11 @@ def extra_supported(extra: str, *, environment: dict[str, str] | None = None,
         return True
 
 
+def install_hint(extra: str) -> str:
+    """The one command users are told to run for a missing extra."""
+    return f"hermes pm install --extra {extra}"
+
+
 def ensure_import(extra: str) -> None:
     """Make an extra available: no-op when the anchor imports, otherwise
     sync the venv with the extra enabled. Raises InstallError on failure

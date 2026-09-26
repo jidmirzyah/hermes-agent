@@ -22,9 +22,7 @@ import pytest
 from hermes_cli import _subprocess_compat
 from hermes_cli._subprocess_compat import bounded_git_probe, kill_process_tree
 
-pytestmark = pytest.mark.skipif(
-    sys.platform == "win32", reason="POSIX process-group semantics"
-)
+pytestmark = pytest.mark.platforms("posix")  # POSIX process-group semantics
 
 
 def _write_forking_script(tmp_path, marker_name="child.pid"):

@@ -963,6 +963,12 @@ def _run_post_update_maintenance(
 
     print()
     update_complete = _print_verified_update_completion(completion_message or _update_complete_message(pre_update_version))
+    # A multi-profile host whose gateway came back standalone on a guard says so here too — the
+    # update summary is the one line operators read (the boot log under s6 is not).
+    with suppress(Exception):
+        from hermes_cli.gateway_multiplex_mode import consume_rewritten_notice, recorded_standalone_warning_lines
+        for line in [*consume_rewritten_notice(), *recorded_standalone_warning_lines()]:
+            print(line)
 
     _print_post_update_notices_and_self_heals()
     return update_complete

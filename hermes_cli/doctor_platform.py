@@ -183,38 +183,6 @@ def _report_database_journal_modes(hermes_home: Path | None = None, version_info
         check_info(f"To clear the exposure: {_wal_reset_repair_hint()}")
 
 
-def _read_pyproject_version() -> str | None:
-    """Read the ``[project]`` version from pyproject.toml; None for installed wheels (no pyproject) or unreadable files."""
-    from hermes_cli.doctor import PROJECT_ROOT
-    try:
-        text = (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8-sig")
-    except OSError:
-        return None
-    in_project = False
-    for line in map(str.strip, text.splitlines()):
-        if line.startswith("[") and line.endswith("]"):
-            in_project = line == "[project]"
-        elif in_project and line.startswith("version") and "=" in line:
-            return line.split("=", 1)[1].split("#", 1)[0].strip().strip("\"'") or None
-    return None
-
-
-def _check_version_consistency(issues: list[str]) -> None:
-    """Detect pyproject.toml vs hermes_cli.__version__ drift (a conflict resolution can revert one but not the
-    other). Silent no-op for installed wheels (no pyproject)."""
-    try:
-        from hermes_cli import __version__ as init_version
-    except Exception:
-        return
-    pyproject_version = _read_pyproject_version()
-    if pyproject_version is None:
-        return
-    if pyproject_version == init_version:
-        return check_ok("Version files consistent", f"({init_version})")
-    _fail_and_issue("Version mismatch between source files", f"(pyproject.toml {pyproject_version} != hermes_cli/__init__.py {init_version})",
-                    "Re-sync version files (e.g. run 'hermes update', or set hermes_cli/__init__.py __version__ to match pyproject.toml)", issues)
-
-
 def _check_s6_supervision(issues: list[str]) -> None:
     """Under our s6 /init, report static services and the ONE host gateway slot; no-op elsewhere.
     Counterpart to :func:`_check_gateway_service_linger` (systemd-on-host)."""
@@ -501,7 +469,7 @@ def _check_python_environment(should_fix: bool, f: Finding) -> None:
     # macOS Full Disk Access (issue #52010 follow-up): one grant silences every per-folder prompt
     # permanently. Silent on non-macOS.
     check_macos_full_disk_access()
-    _check_version_consistency(f.issues)
+
     # macOS TCC grant persistence (issue #86385): a locally-built desktop bundle whose DR is cdhash-pinned
     # loses every permission grant on each rebuild; a post-#73681 identifier-pinned DR survives, but grants
     # made to older binaries stay stale (toggle shows ON while macOS re-prompts).

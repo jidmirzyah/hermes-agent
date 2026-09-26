@@ -34,6 +34,13 @@ let
     in
     if found == null then null else if builtins.isList found then found else [ found ];
 
+  # The archive suffixes pm/store.py::extract unpacks. A pin may also list
+  # provenance sidecars (checksums.txt, .sig/.pem/.asc) that pm verifies at
+  # install time; the fixed-output hash already pins the archive here, and
+  # stdenv's unpackPhase has no unpacker for them, so they are left out.
+  isArchive = artifact:
+    lib.any (suffix: lib.hasSuffix suffix artifact.url) [ ".tar.gz" ".tgz" ".tar.xz" ".txz" ".tar.bz2" ".zip" ];
+
   derive = name: pin: artifacts:
     stdenv.mkDerivation {
       pname = name;
@@ -42,7 +49,7 @@ let
       srcs = map (artifact: fetchurl {
         urls = [ artifact.url "${mirror.origin}/${mirror.prefix}${artifact.sha256}" ];
         sha256 = artifact.sha256;
-      }) artifacts;
+      }) (builtins.filter isArchive artifacts);
 
       # pm's store publishes the unpacked tree; mirror that shape. Several
       # archives unpack over one another into the same root, exactly as

@@ -56,29 +56,29 @@ Do not clone into a signed app package or overwrite the packaged runtime.
 
 Read the [developer workflow](../reference/package-management.md#developer-workflow)
 for native build prerequisites and current bootstrap limitations. Select your
-intended `HERMES_HOME` before preparation, then use the checkout's PM bootstrap:
+intended `HERMES_HOME` before preparation, then activate. Activation runs the
+bootstrap itself:
 
 ```bash
-bash setup-hermes.sh
 source ./activate
-python hermes --version
+hermes --version
 ```
 
 On native Windows, use PowerShell:
 
 ```powershell
-.\setup-hermes.ps1
 . .\activate.ps1
-python hermes --version
+hermes --version
 ```
 
 The bootstrap reads tool pins from `pm/lock.json` and delegates installation
 to PM. Current first-party code requires Python 3.14 (`>=3.14,<3.15`).
 The source default is the `all` extra, not the desktop bundle's `--all-extras`.
 
-Activation composes the installed tool environment. `python hermes` explicitly
-runs this checkout and avoids an older `hermes` command or MSIX alias on PATH.
-`deactivate` restores the shell environment when you finish.
+Activation composes the installed tool environment and defines `hermes` as this
+worktree's CLI. The function hides an older `hermes` command or MSIX alias and
+refuses outside the worktree.
+`deactivate` restores the shell environment and removes the function when you finish.
 
 For test dependencies and manual environments, use the
 [development setup](../developer-guide/contributing.md).
@@ -95,23 +95,23 @@ POSIX example:
 
 ```bash
 export HERMES_HOME="$HOME/hermes-source-data"
-python hermes setup
-python hermes
+hermes setup
+hermes
 ```
 
 PowerShell example:
 
 ```powershell
 $env:HERMES_HOME = Join-Path $HOME 'hermes-source-data'
-python hermes setup
-python hermes
+hermes setup
+hermes
 ```
 
 If you change the home after preparing PM state, run the bootstrap for that
 home before relying on its selected dependencies. Do not assume that changing
 the environment variable moves data or copies runtime state.
 
-To build a source desktop, run `python hermes desktop` from the prepared
+To build a source desktop, run `hermes desktop` from the prepared
 checkout. Opening the old packaged app still starts its packaged backend.
 
 ## Docker users
@@ -158,11 +158,11 @@ diagnostics and garbage collection rather than deleting the shared data root.
 
 ## Troubleshooting
 
-- **Wrong version:** inspect command resolution, then use `python hermes --version`
+- **Wrong version:** inspect command resolution, then use `hermes --version`
   from the activated checkout.
 - **Missing dependencies:** run `python -m pm.cli install` from the intended
   source environment, then restart the affected Hermes process.
-- **Gateway already running:** inspect `python hermes gateway status` for the
+- **Gateway already running:** inspect `hermes gateway status` for the
   selected profile. Stop the identified owner; do not kill unrelated processes.
 - **Different skills after first run:** newer code can sync bundled skills into
   the data home. A source checkout is not a read-only view of that home.

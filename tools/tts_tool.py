@@ -8,6 +8,7 @@ Sibling ``tts_tool_*`` modules hold backends/delivery/lifecycle; they read the s
 here (config, provider resolution, lazy SDK importers) through ``_origin()`` at call time.
 """
 
+from pm import install_hint
 import asyncio
 import contextlib
 import datetime
@@ -169,7 +170,7 @@ _FFMPEG_OPUS_PROVIDERS = frozenset({"edge", "neutts", "minimax", "xai", "kittent
 _BUILTIN_DISPATCH: Dict[str, tuple] = {
     "elevenlabs": (lambda: _importable(_import_elevenlabs), "ElevenLabs", "_generate_elevenlabs",
                    "ElevenLabs provider selected but 'elevenlabs' package not installed. Run: "
-                   "python -c \"from pm import sync_venv; sync_venv(['tts-premium'], explicit=True)\""),
+                   f"{install_hint('tts-premium')}"),
     "openai": (lambda: _importable(_import_openai_client), "OpenAI TTS", "_generate_openai_tts",
                "OpenAI provider selected but 'openai' package not installed."),
     "deepinfra": (lambda: _importable(_import_openai_client), "DeepInfra TTS", "_generate_deepinfra_tts",
@@ -220,7 +221,7 @@ def _select_builtin_engine(provider: str) -> tuple:
         return "neutts", None
     return provider, _error_json(
         "No TTS provider available. Enable Edge TTS with: "
-        "python -c \"from pm import sync_venv; sync_venv(['edge-tts'], explicit=True)\" "
+        f"{install_hint('edge-tts')} "
         "or run 'hermes setup tts' and choose NeuTTS for local synthesis.")
 
 

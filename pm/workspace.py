@@ -118,16 +118,49 @@ def _generate_pyproject(plugin_dirs: list[Path] | Mapping[Path, Path], root: Pat
                for identity, source in member_sources(plugin_dirs).items()
                if _is_member_candidate(source)]
 
-    lines = [core_text.rstrip("\n")]
     if members:
-        lines.append("")
-        lines.append("[tool.uv.workspace]")
-        lines.append("members = [" + ", ".join(f'"{m}"' for m in sorted(members)) + "]")
+        import tomllib
 
-    text = "\n".join(lines) + "\n"
+        import tomli_w
+
+        document = tomllib.loads(core_text)
+        _core_release_quarantine(document, source / "uv.lock")
+        document.setdefault("tool", {}).setdefault("uv", {})["workspace"] = {"members": sorted(members)}
+        text = tomli_w.dumps(document)
+    else:
+        # Byte-identical to core: a member-less generation syncs frozen against core's own lock.
+        text = core_text.rstrip("\n") + "\n"
     target = root / "pyproject.toml"
     _copy_core_inputs(source, root)
     target.write_text(text, encoding="utf-8")
+
+
+def _core_release_quarantine(document: dict, core_lock: Path) -> None:
+    """Scope core's ``exclude-newer`` to the packages in core's own lock.
+
+    The quarantine covers Hermes's own dependencies only; a plugin's dependencies
+    follow the plugin's own policy, so a catalog pin floored on a fresh release still
+    installs. A global cutoff would filter plugin-only packages too, so it moves onto
+    every registry package core locks. A plugin still cannot drag one of those past
+    the window, and core's own ``= false`` exemptions stay as written.
+    """
+    import re
+    import tomllib
+
+    settings = document.get("tool", {}).get("uv", {})
+    cutoff = settings.pop("exclude-newer", None)
+    if cutoff is None:
+        return
+
+    def normalized(name: str) -> str:
+        return re.sub(r"[-_.]+", "-", name).lower()
+
+    per_package = {normalized(name): value
+                   for name, value in settings.get("exclude-newer-package", {}).items()}
+    for package in tomllib.loads(core_lock.read_text(encoding="utf-8-sig")).get("package", []):
+        if "registry" in package.get("source", {}):
+            per_package.setdefault(normalized(package["name"]), cutoff)
+    settings["exclude-newer-package"] = per_package
 
 
 def _is_member_candidate(plugin_dir: Path) -> bool:
@@ -170,12 +203,23 @@ def enabled_member_dirs(*, proposed_home=None, enabled=None, disabled=None) -> l
     return members
 
 
+def _member_key(identity: Path) -> str:
+    """``<plugin dir name>-<sha256(path)[:16]>``: the hash keeps two same-named plugins from
+    different homes apart; the name is what a user sees in uv's conflict text
+    (``hermes-plugin-<key> depends on …``) — a bare hash told them nothing to disable."""
+    import re
+
+    digest = hashlib.sha256(str(identity.resolve()).encode()).hexdigest()[:16]
+    name = re.sub(r"[^a-z0-9._-]+", "-", identity.name.lower()).strip("-.") or "plugin"
+    return f"{name}-{digest}"
+
+
 def _workspace_member(plugin_dir: Path, root: Path, *, identity: Path) -> Path:
     """Keep workspace members with their generation, not a temporary install clone."""
     import json
     import tomllib
 
-    key = hashlib.sha256(str(identity.resolve()).encode()).hexdigest()[:16]
+    key = _member_key(identity)
     declaration = read_python_declaration(plugin_dir)
     pyproject = declaration.pyproject
     if pyproject is not None:

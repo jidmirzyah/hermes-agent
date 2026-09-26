@@ -25,6 +25,7 @@ on:
         required: false
         type: boolean
         default: false
+
       ref:
         description: 'Git ref to bundle (default: the triggering commit, github.sha)'
         required: false
@@ -38,7 +39,6 @@ on:
       - '.github/actions/desktop-build-cache/**'
       - 'scripts/windows-build-deps.ps1'
       - 'scripts/build/windows-deps.ps1'
-      - 'scripts/build/windows_deps.py'
       - '.github/actions/setup-windows-build-deps/**'
       - 'uv.lock'
       - 'pyproject.toml'
