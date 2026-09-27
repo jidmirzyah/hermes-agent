@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Mechanical auto-commit + push for the vault git repo. No LLM reasoning -
 # pure git plumbing. Silent when there is nothing new (empty stdout is the
 # intended steady state for a 15-minute no-agent cron job). A push failure

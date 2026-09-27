@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Mechanical auto-commit + push for the skills/cron git repo. No LLM
 # reasoning - pure git plumbing. Deliberately stages only skills/ and
 # cron/jobs.json by explicit path (not `git add -A`) - this repo's root
