@@ -121,7 +121,9 @@ def test_update_rotates_config_yaml_model_mirror(hermes_home):
     _write_env(hermes_home, OPENAI_API_KEY=old)
     _write_config(
         hermes_home,
+        "# keep top-level credential guidance\n"
         "model:\n"
+        "  # keep provider selection guidance\n"
         "  provider: custom\n"
         "  default: my-model\n"
         "  base_url: https://llm.example.test/v1\n"
@@ -137,6 +139,8 @@ def test_update_rotates_config_yaml_model_mirror(hermes_home):
     cfg_text = hermes_home.joinpath("config.yaml").read_text(encoding="utf-8")
     assert old not in cfg_text, "stale old key left in config.yaml (#62269)"
     assert new in cfg_text, "config.yaml mirror not rotated to the new key"
+    assert "# keep top-level credential guidance" in cfg_text
+    assert "# keep provider selection guidance" in cfg_text
 
     from hermes_cli.config import load_env
 
