@@ -69,7 +69,9 @@ jobs:
     needs: [detect]
     # Release runs force the lane: a stable candidate must build the flake
     # no matter what its diff touches.
-    if: needs.detect.outputs.nix == 'true' || inputs.release == true
+    # The personal fork has no access to the paid 32-core runner below. Skip
+    # there instead of queuing until GitHub cancels the job.
+    if: github.repository == 'NousResearch/hermes-agent' && (needs.detect.outputs.nix == 'true' || inputs.release == true)
     # The build compiles the package and its whole dependency closure, so this
     # takes minutes and not seconds when the cache misses. `nix flake check`
     # builds 21 checks, and --max-jobs defaults to the core count. It uses the

@@ -24,6 +24,9 @@ concurrency:
 jobs:
   core:
     name: Desktop core E2E (Linux)
+    # The personal fork has no access to this paid larger runner. A queued job
+    # eventually becomes CANCELLED, which the aggregate gate treats as a failure.
+    if: github.repository == 'NousResearch/hermes-agent'
     runs-on: ubuntu-latest-32-core
     timeout-minutes: 30
     steps:

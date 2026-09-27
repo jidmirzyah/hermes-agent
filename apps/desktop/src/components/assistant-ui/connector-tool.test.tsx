@@ -172,13 +172,10 @@ describe('ConnectorTool operation card', () => {
     await openConnectionDoneLink(REQUEST.opId, navigate, sessionId => sessionId)
 
     expect(navigate).toHaveBeenCalledWith('/session-1')
-    expect(request).toHaveBeenCalledWith(
-      'connectors.operation.wake',
-      {
-        op_id: REQUEST.opId,
-        owner: { session_id: SESSION_ID, type: 'session' }
-      }
-    )
+    expect(request).toHaveBeenCalledWith('connectors.operation.wake', {
+      op_id: REQUEST.opId,
+      owner: { session_id: SESSION_ID, type: 'session' }
+    })
   })
 
   it('Try again mints a fresh link on the open operation and never opens a browser by itself', async () => {
