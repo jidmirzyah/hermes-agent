@@ -180,7 +180,7 @@ def _follow_events_log(
     subsystem: Optional[str] = None,
 ) -> None:
     """Poll events.jsonl for new lines and print matching ones."""
-    with open(path, "r", encoding="utf-8", errors="replace") as f:
+    with open(path, "r", encoding="utf-8-sig", errors="replace") as f:
         f.seek(0, 2)
         while True:
             line = f.readline()

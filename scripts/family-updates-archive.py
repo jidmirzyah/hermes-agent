@@ -78,7 +78,7 @@ def atomic_write(path: Path, content: str) -> None:
 def read_entries(path: Path) -> list[str]:
     if not path.exists():
         return []
-    lines = path.read_text(encoding="utf-8").splitlines()
+    lines = path.read_text(encoding="utf-8-sig").splitlines()
     return [ln for ln in lines if ENTRY_RE.match(ln)]
 
 
@@ -134,7 +134,7 @@ def try_merge_years(year: int) -> None:
     candidates = []
     if MONTHS_DIR.exists():
         for p in sorted(MONTHS_DIR.glob("*.md")):
-            text = p.read_text(encoding="utf-8")
+            text = p.read_text(encoding="utf-8-sig")
             m = re.search(r"^year: (\d+)$", text, re.MULTILINE)
             if m and int(m.group(1)) == year:
                 candidates.append(p)
@@ -145,14 +145,14 @@ def try_merge_years(year: int) -> None:
     marker = YEARS_DIR / f".merged-{year}-from"
     already = set()
     if marker.exists():
-        already = set(marker.read_text(encoding="utf-8").splitlines())
+        already = set(marker.read_text(encoding="utf-8-sig").splitlines())
     pending = [p for p in candidates if p.name not in already]
     if len(pending) < 2:
         return
     pair = pending[:2]
     all_entries = []
     for p in pair:
-        text = p.read_text(encoding="utf-8")
+        text = p.read_text(encoding="utf-8-sig")
         body = text.split("---\n\n", 2)[-1]
         all_entries.extend(ln for ln in body.splitlines() if ENTRY_RE.match(ln))
     all_entries.sort(key=entry_date)
@@ -184,7 +184,7 @@ def main() -> int:
 
     # Idempotency guard for the forced annual reset.
     last_reset_year = (
-        int(STATE_FILE.read_text(encoding="utf-8").strip())
+        int(STATE_FILE.read_text(encoding="utf-8-sig").strip())
         if STATE_FILE.exists()
         else today.year
     )

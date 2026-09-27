@@ -196,7 +196,7 @@ def attempt_repair(*, hermes_home: Path, vault_root: Path, now: datetime) -> str
         # vault held a real 3,064-character brief; a rebuild that trusted the
         # response would have destroyed it. A mismatch is for a human.
         if brief_path.is_file() and normalized_text(
-            brief_path.read_text(encoding="utf-8", errors="replace")
+            brief_path.read_text(encoding="utf-8-sig", errors="replace")
         ):
             return (
                 "(repair skipped: a non-empty brief is already saved -- a "
@@ -230,7 +230,7 @@ def attempt_repair(*, hermes_home: Path, vault_root: Path, now: datetime) -> str
                     hermes_home, job_id, now, "last_run_at is unparseable"
                 )
 
-        brief = extract_brief(output_path.read_text(encoding="utf-8", errors="replace"))
+        brief = extract_brief(output_path.read_text(encoding="utf-8-sig", errors="replace"))
         if not brief:
             return _retrigger(
                 hermes_home,
@@ -244,7 +244,7 @@ def attempt_repair(*, hermes_home: Path, vault_root: Path, now: datetime) -> str
         tmp.write_text(brief, encoding="utf-8")
         tmp.replace(brief_path)
 
-        written = brief_path.read_text(encoding="utf-8", errors="replace")
+        written = brief_path.read_text(encoding="utf-8-sig", errors="replace")
         if normalized_text(written) != normalized_text(brief):
             return "(repair failed: the rebuilt brief did not survive read-back)"
         return (
@@ -290,10 +290,10 @@ def validate(
         problems.append("cron final-response output is missing")
 
     if brief_path.is_file() and output_path is not None:
-        saved = normalized_text(brief_path.read_text(encoding="utf-8", errors="replace"))
+        saved = normalized_text(brief_path.read_text(encoding="utf-8-sig", errors="replace"))
         try:
             delivered = normalized_text(
-                _extract_final_response(output_path.read_text(encoding="utf-8", errors="replace"))
+                _extract_final_response(output_path.read_text(encoding="utf-8-sig", errors="replace"))
             )
         except ValueError as exc:
             problems.append(str(exc))

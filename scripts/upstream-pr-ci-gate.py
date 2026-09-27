@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import fcntl
 import hashlib
 import json
 import os
@@ -178,6 +177,8 @@ def _read_events(path: Path) -> list[dict[str, Any]]:
 
 
 def _append_event(state_dir: Path, event: dict[str, Any]) -> None:
+    import fcntl
+
     state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(state_dir, 0o700)
     path = state_dir / "events.jsonl"

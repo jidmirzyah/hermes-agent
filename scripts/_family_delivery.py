@@ -169,7 +169,7 @@ def _load_telegram_allow_from(hermes_home: Path) -> Optional[list]:
     if not config_path.is_file():
         return None
     try:
-        data = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        data = yaml.safe_load(config_path.read_text(encoding="utf-8-sig")) or {}
         allow_from = ((data.get("telegram") or {}).get("allow_from")) or None
         if allow_from is None:
             return None
@@ -200,7 +200,7 @@ def resolve_telegram_chat_id(
             "— cannot resolve a delivery target for this identity"
         )
     try:
-        text = profile_path.read_text(encoding="utf-8")
+        text = profile_path.read_text(encoding="utf-8-sig")
     except Exception as exc:
         raise DeliveryTargetResolutionError(
             f"could not read {profile_path} for identity={identity!r}: {exc}"

@@ -950,7 +950,7 @@ def _read_action_record(name: str) -> Optional[Dict[str, Any]]:
     if not path.exists():
         return None
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8-sig"))
     except Exception as e:
         _log.warning("Could not read action record %s: %s", path, e)
         return None

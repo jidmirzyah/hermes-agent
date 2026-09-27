@@ -230,8 +230,8 @@ def describe(conflict_path: Path, vault_root: Path) -> str:
         return f"  {rel}  [ambiguous: no live counterpart found at {canonical_path.name}]"
 
     try:
-        conflict_text = conflict_path.read_text(encoding="utf-8")
-        canonical_text = canonical_path.read_text(encoding="utf-8")
+        conflict_text = conflict_path.read_text(encoding="utf-8-sig")
+        canonical_text = canonical_path.read_text(encoding="utf-8-sig")
     except OSError as exc:
         return f"  {rel}  [ambiguous: could not read a file -- {exc}]"
 
@@ -262,8 +262,8 @@ def reconcile(conflict_path: Path, vault_root: Path) -> ReconcileResult | None:
         return None
 
     try:
-        conflict_text = conflict_path.read_text(encoding="utf-8")
-        canonical_text = canonical_path.read_text(encoding="utf-8")
+        conflict_text = conflict_path.read_text(encoding="utf-8-sig")
+        canonical_text = canonical_path.read_text(encoding="utf-8-sig")
     except OSError:
         return None
 

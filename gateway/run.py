@@ -249,7 +249,7 @@ def _reset_oauth_reauth_notify_state(hermes_home: Path, identity: str) -> None:
     state: Dict[str, Any] = {}
     try:
         if state_path.is_file():
-            state = json.loads(state_path.read_text(encoding="utf-8"))
+            state = json.loads(state_path.read_text(encoding="utf-8-sig"))
     except Exception:
         logger.warning(
             "oauth_reauth: could not read notify-state file %s before reset; "

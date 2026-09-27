@@ -78,7 +78,7 @@ def _queue_files(directory: Path, placeholder: str) -> list[Path]:
 
 def _preview(path: Path) -> str:
     try:
-        value = path.read_text(encoding="utf-8", errors="replace")
+        value = path.read_text(encoding="utf-8-sig", errors="replace")
     except OSError as exc:
         return f"[unreadable: {exc}]"
     return value[:MAX_PREVIEW_CHARS] + ("\n[preview truncated]" if len(value) > MAX_PREVIEW_CHARS else "")
@@ -107,7 +107,7 @@ def _family_events(vault_root: Path, since: datetime) -> dict[str, list[str]]:
     if not log_path.is_file():
         return {"folder_activity": [], "handoff_ends": []}
     timestamp_pattern = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2})\s*\|")
-    for line in log_path.read_text(encoding="utf-8", errors="replace").splitlines():
+    for line in log_path.read_text(encoding="utf-8-sig", errors="replace").splitlines():
         match = timestamp_pattern.match(line)
         if not match:
             continue

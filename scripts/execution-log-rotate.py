@@ -86,7 +86,7 @@ def split_header_and_entries(text: str) -> tuple[str, str]:
 def read_last_rotation_date() -> date:
     if STATE_FILE.exists():
         return datetime.strptime(
-            STATE_FILE.read_text(encoding="utf-8").strip(), "%Y-%m-%d"
+            STATE_FILE.read_text(encoding="utf-8-sig").strip(), "%Y-%m-%d"
         ).date()
     # First-ever rotation: no prior boundary recorded. Start the clock now
     # rather than inventing an earlier start date.
@@ -147,7 +147,7 @@ def try_merge_months() -> None:
             wk_start, wk_end = m.group(1), m.group(2)
             first_start = first_start or wk_start
             last_end = wk_end
-            body = strip_weekly_wrapper(p.read_text(encoding="utf-8"))
+            body = strip_weekly_wrapper(p.read_text(encoding="utf-8-sig"))
             sections.append(f"## Week of {wk_start} to {wk_end}\n\n{body.strip()}\n")
 
         month_fname = f"{first_start}-to-{last_end}.md"
@@ -174,7 +174,7 @@ def try_merge_months() -> None:
         try:
             MONTHS_DIR.mkdir(parents=True, exist_ok=True)
             atomic_write(month_path, content)
-            written = month_path.read_text(encoding="utf-8")
+            written = month_path.read_text(encoding="utf-8-sig")
             ok = (
                 written.strip()
                 and f"# Execution Log — {first_start} to {last_end}" in written
@@ -231,7 +231,7 @@ def main() -> int:
             if outcome is not None:
                 append_event(f"PRE-ROTATION RECONCILE | {outcome.message}")
 
-    header, entries_body = split_header_and_entries(PRIMARY.read_text(encoding="utf-8"))
+    header, entries_body = split_header_and_entries(PRIMARY.read_text(encoding="utf-8-sig"))
     last_boundary = read_last_rotation_date()
     today = date.today()
 

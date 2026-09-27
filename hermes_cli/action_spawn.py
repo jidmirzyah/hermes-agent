@@ -140,7 +140,7 @@ def read_exit_code(exit_code_path: Path) -> Optional[int]:
     if not exit_code_path.exists():
         return None
     try:
-        raw = exit_code_path.read_text(encoding="utf-8").strip()
+        raw = exit_code_path.read_text(encoding="utf-8-sig").strip()
     except OSError:
         return None
     if not raw:

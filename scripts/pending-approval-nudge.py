@@ -52,7 +52,7 @@ def _job_id_for_name(hermes_home: Path, job_name: str) -> str | None:
     if not jobs_path.is_file():
         return None
     try:
-        data = json.loads(jobs_path.read_text(encoding="utf-8"))
+        data = json.loads(jobs_path.read_text(encoding="utf-8-sig"))
     except (OSError, json.JSONDecodeError):
         return None
     jobs = data.get("jobs", data if isinstance(data, list) else [])

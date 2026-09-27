@@ -265,7 +265,7 @@ def read_timeline(session_id: str, root: Optional[Path] = None) -> Dict[str, Any
     """
     path = _session_path(session_id, root)
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
     except FileNotFoundError:
         return {"session_id": session_id, "steps": [], "running": False}
     except Exception as exc:

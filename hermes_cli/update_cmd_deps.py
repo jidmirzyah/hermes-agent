@@ -83,7 +83,7 @@ def _editable_finder_mapping_current(cwd) -> bool | None:
     try:
         inventory = _checkout_import_names(root)
         for finder in finders:
-            mapping = _mapping_literal(ast.parse(finder.read_text(encoding="utf-8")))
+            mapping = _mapping_literal(ast.parse(finder.read_text(encoding="utf-8-sig")))
             if not isinstance(mapping, dict) or set(mapping) != inventory:
                 return False
     except (OSError, SyntaxError, ValueError, TypeError, AttributeError):
@@ -548,7 +548,7 @@ def _npm_manifest_paths() -> tuple[Path, ...]:
     root_pkg = _m().PROJECT_ROOT / "package.json"
     paths = [_m().PROJECT_ROOT / "package-lock.json", root_pkg]
     with suppress(OSError, json.JSONDecodeError, TypeError):
-        workspaces = json.loads(root_pkg.read_text(encoding="utf-8")).get("workspaces", [])
+        workspaces = json.loads(root_pkg.read_text(encoding="utf-8-sig")).get("workspaces", [])
         if isinstance(workspaces, dict):  # legacy {"packages": [...]} form
             workspaces = workspaces.get("packages", [])
         for pattern in workspaces:
@@ -601,7 +601,7 @@ def _npm_lock_cache_file(hermes_root: Path, scope: str = "") -> Path:
 def _npm_stamp_matches(hermes_root: Path, current: str, scope: str = "") -> bool:
     """True when the recorded digest for *scope* equals *current*; a missing/unreadable stamp never matches."""
     try:
-        return _npm_lock_cache_file(hermes_root, scope).read_text(encoding="utf-8").strip() == current
+        return _npm_lock_cache_file(hermes_root, scope).read_text(encoding="utf-8-sig").strip() == current
     except OSError:
         return False
 
@@ -898,7 +898,7 @@ def _transitive_sync_would_rewrite(target: str, installed: str, root: Path, base
     from importlib import metadata as _ilmd
     from packaging.utils import canonicalize_name
     from packaging.version import Version
-    packages = tomllib.loads((root / "uv.lock").read_text(encoding="utf-8")).get("package") or []
+    packages = tomllib.loads((root / "uv.lock").read_text(encoding="utf-8-sig")).get("package") or []
     locked = {Version(p["version"]) for p in packages
               if canonicalize_name(p.get("name", "")) == target and p.get("version")}
     if not locked or Version(installed) in locked:
@@ -933,7 +933,7 @@ def _dependency_sync_would_rewrite(dist_name: str) -> bool | None:
     try:
         from packaging.utils import canonicalize_name
         root = _m().PROJECT_ROOT
-        project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8")).get("project") or {}
+        project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8-sig")).get("project") or {}
         base_reqs: list[str] = list(project.get("dependencies") or [])
         req_strings = list(base_reqs)
         for extra_reqs in (project.get("optional-dependencies") or {}).values():

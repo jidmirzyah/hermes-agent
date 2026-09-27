@@ -172,7 +172,7 @@ def read_reauth_recorded_at(entry: dict) -> Optional[float]:
     if not path.is_file():
         return None
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
         return float(data["recorded_at_epoch"])
     except Exception:
         return None
@@ -209,7 +209,7 @@ def load_state(hermes_home: Path) -> Dict[str, Any]:
     if not path.is_file():
         return {}
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8-sig"))
     except Exception:
         return {}
 
