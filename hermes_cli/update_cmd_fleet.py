@@ -699,6 +699,49 @@ def _fleet_restart_skip_reason(plan) -> str | None:
     return None
 
 
+def _apply_pending_fleet_restart_catchup(*, defer: bool = False) -> None:
+    """Finish an owed fleet restart, or leave the obligation visible when deferred."""
+    from hermes_cli.update_cmd import _run_pending_fleet_restart
+
+    if not _pending_fleet_restart_needed():
+        return
+    if defer:
+        print()
+        _warn_pending_fleet_restart()
+        print("  (fleet restart deferred — --no-gateway-restart; marker kept)")
+        print("  Restart separately: `hermes gateway restart` or next non-cron update.")
+        return
+    print()
+    _warn_pending_fleet_restart()
+    print("→ Running the pending fleet restart...")
+    if not _run_pending_fleet_restart():
+        print("  ⚠ Fleet restart incomplete. Recover with: hermes gateway restart")
+        sys.exit(1)
+    if not _pending_fleet_restart_needed():
+        return
+    fleet = _live_fleet_current_rows()
+    if fleet is not None:
+        from hermes_cli.update_receipt import settle_latest_receipt_fleet
+
+        settled = settle_latest_receipt_fleet(
+            fleet,
+            discharges=lambda receipt: not _pending_fleet_restart_needed(
+                receipt=receipt
+            ),
+        )
+        if settled:
+            print(
+                f"  ✓ Update receipt settled: {len(fleet)} gateway(s) serve "
+                "the checkout code."
+            )
+            return
+    print(
+        "  ⚠ Fleet restart ran, but gateways are still off the checkout code. "
+        "Recover with: hermes gateway restart"
+    )
+    sys.exit(1)
+
+
 def _run_pending_fleet_restart() -> bool:
     """Historical retry hook; new retries use the ordinary completion owner."""
     from hermes_cli._old_updater import stop_for_relaunch
