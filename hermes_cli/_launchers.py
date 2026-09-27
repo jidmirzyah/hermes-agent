@@ -501,7 +501,7 @@ def _broadcast_environment_change() -> None:
 
     try:
         ctypes.windll.user32.SendMessageTimeoutW(0xFFFF, 0x1A, 0, "Environment", 0x0002, 5000, None)  # type: ignore[attr-defined]
-    except Exception:  # noqa: BLE001 - never fail an update over the broadcast
+    except Exception:  # noqa: BLE001, S110 - never fail an update over the broadcast
         pass
 
 

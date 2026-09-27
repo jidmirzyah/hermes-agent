@@ -317,4 +317,4 @@ def _init_logging_and_display_from_config() -> None:
         try:
             step()
         except Exception:
-            pass
+            logger.debug("CLI startup side effect failed: %r", step, exc_info=True)

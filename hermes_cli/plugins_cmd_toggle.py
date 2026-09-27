@@ -38,7 +38,7 @@ def _discover_context_engines() -> list[tuple[str, str]]:
         for name, desc, _avail in discover_context_engines():
             engines.setdefault(name, desc)
     except Exception:
-        pass
+        logger.debug("Built-in context engine discovery failed", exc_info=True)
     try:
         from hermes_cli.plugins import discover_plugins, get_plugin_context_engine
         discover_plugins()
@@ -46,7 +46,7 @@ def _discover_context_engines() -> list[tuple[str, str]]:
         if plugin_engine and getattr(plugin_engine, "name", None):
             engines.setdefault(plugin_engine.name, "installed plugin")
     except Exception:
-        pass
+        logger.debug("Plugin context engine discovery failed", exc_info=True)
     return list(engines.items())
 
 

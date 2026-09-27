@@ -86,7 +86,7 @@ def _arm_exit_watchdog(timeout_s: float | None = None, *, from_signal: bool = Fa
                 "(a cleanup step or non-daemon thread is wedged).",
                 timeout_s,
             )
-        except Exception:
+        except Exception:  # noqa: S110 - logging itself failed during forced shutdown
             pass
         _flush_logging_and_stdio()
         # os._exit skips cleanup: a foreground command in its own process group would outlive us.

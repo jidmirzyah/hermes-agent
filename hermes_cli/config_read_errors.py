@@ -95,7 +95,7 @@ def _warn_config_parse_failure(
     try:
         sys.stderr.write(f"⚠️  hermes config: {msg}\n    Details: {_yaml_error_details(exc)}\n")
         sys.stderr.flush()
-    except Exception:
+    except Exception:  # noqa: S110 - the warning was already sent through logging
         pass
 
 

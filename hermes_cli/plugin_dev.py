@@ -105,7 +105,7 @@ def _doctor_runtime(plugin_path: Path):
         try:
             manager.unload()
         except Exception:
-            pass
+            logger.debug("Plugin unload failed during doctor cleanup", exc_info=True)
         entries_after = {entry.name: entry for entry in registry._snapshot_entries()}
         changed_names = {
             name

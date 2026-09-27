@@ -215,4 +215,4 @@ async def _bridge(ws: WebSocket, info: dict) -> None:
         try:
             await ws.close()
         except Exception:  # already closed by the peer or by an eviction
-            pass
+            _log.debug("Display WebSocket close failed", exc_info=True)

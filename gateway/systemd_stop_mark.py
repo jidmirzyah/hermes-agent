@@ -47,7 +47,7 @@ def main(argv: list[str] | tuple[str, ...] | None = None) -> int:
         from gateway.status import write_planned_stop_marker
 
         write_planned_stop_marker(pid)
-    except Exception:
+    except Exception:  # noqa: S110 - ExecStop must never block supervisor shutdown
         pass
     return 0
 

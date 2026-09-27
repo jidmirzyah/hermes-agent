@@ -45,7 +45,7 @@ def _interrupt_agent_for_signal(agent, signum) -> None:
             _grace = _float_env("HERMES_SIGTERM_GRACE", 1.5)
             if _grace > 0:
                 time.sleep(_grace)
-    except Exception:
+    except Exception:  # noqa: S110 - signal handling must remain fail-safe
         pass  # never block signal handling
 
 

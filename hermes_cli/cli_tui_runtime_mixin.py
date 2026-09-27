@@ -223,7 +223,7 @@ class CLITuiRuntimeMixin:
             if _loop is not None:
                 _loop.call_soon_threadsafe(_app.exit)
                 return  # clean unwind — no traceback, no ENTER pause
-        except Exception:
+        except Exception:  # noqa: S110 - signal handling must remain fail-safe
             pass
         raise KeyboardInterrupt()  # fallback for non-prompt_toolkit contexts
 
@@ -262,7 +262,7 @@ class CLITuiRuntimeMixin:
             _welcome_text = _welcome_skin.get_branding("welcome", _welcome_text)
             _welcome_color = _welcome_skin.get_color("banner_text", _welcome_color)
         except Exception:
-            pass
+            logger.debug("Welcome skin lookup failed", exc_info=True)
         self._console_print(f"[{_welcome_color}]{_welcome_text}[/]")
 
         self._tui_startup_prewarm_and_warnings(_welcome_skin)
@@ -326,9 +326,10 @@ class CLITuiRuntimeMixin:
                     from hermes_cli.config import get_config_path as _get_cfg_path_resid
                     mark_seen(_get_cfg_path_resid(), OPENCLAW_RESIDUE_FLAG)
                 except Exception:
-                    pass  # banner fires again next session
+                    logger.debug("Could not persist the OpenClaw residue notice", exc_info=True)
+                    # The banner intentionally fires again next session.
         except Exception:
-            pass
+            logger.debug("OpenClaw residue check failed", exc_info=True)
 
     def _tui_startup_background_maintenance(self):
         """Best-effort startup passes: curator skill maintenance, personal + org skill sync.
@@ -412,7 +413,7 @@ class CLITuiRuntimeMixin:
             if sys.platform == "win32":
                 _signal.signal(_signal.SIGINT, lambda signum, frame: None)
         except Exception:
-            pass  # restricted environments
+            logger.debug("Could not install one or more TUI signal handlers", exc_info=True)
 
     def _tui_stdin_usable(self) -> bool:
         """Validate fd 0 before prompt_toolkit starts; on macOS fall back to a select() loop when kqueue can't watch it (uv-managed Python)."""
