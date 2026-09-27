@@ -9,6 +9,7 @@ import { defineConfig } from 'vite'
  *  ~750 are React-bearing. */
 function compilerPreset() {
   const preset = reactCompilerPreset()
+  preset.rolldown.filter ??= {}
   preset.rolldown.filter.code = /\/>|<\/|from\s*['"][^'"]*react/
 
   return preset
