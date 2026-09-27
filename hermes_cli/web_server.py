@@ -1040,6 +1040,42 @@ def _reconcile_action_status(name: str) -> Dict[str, Any]:
 
     return record  # genuinely still running, or the wrapper hasn't finished yet
 
+
+async def _action_reaper_loop(poll_interval: float = 5.0) -> None:
+    """Reap spawned dashboard actions so status doesn't depend on a client
+    polling /api/actions/<name>/status.
+
+    Covers every action in _ACTION_PROCS (not just durable ones) — this is
+    the fast path for the common case where this process is still the one
+    that spawned it. It is NOT what makes status survive a restart the
+    action itself causes (that's _reconcile_action_status's fallback to the
+    wrapper's independent exit-code file, also exercised here for durable
+    actions so a stale "running" record left over from a previous process
+    is corrected on the very first tick rather than waiting for a request).
+    """
+    while True:
+        try:
+            for name in list(_ACTION_PROCS.keys()):
+                if name in _DURABLE_ACTIONS:
+                    _reconcile_action_status(name)
+                    continue
+                proc = _ACTION_PROCS.get(name)
+                if proc is None:
+                    continue
+                code = proc.poll()
+                if code is not None:
+                    try:
+                        proc.wait(timeout=1)
+                    except Exception as e:
+                        _log.debug("Reap of finished action %r (pid=%s) failed: %s", name, proc.pid, e)
+                    _ACTION_RESULTS[name] = {"exit_code": code, "pid": proc.pid}
+                    _ACTION_PROCS.pop(name, None)
+                    _ACTION_COMMANDS.pop(name, None)
+        except Exception:
+            _log.debug("action reaper tick failed", exc_info=True)
+        await asyncio.sleep(poll_interval)
+
+
 def _terminate_desktop_managed_gateway() -> None:
     """Stop a live gateway restart child when its Desktop backend shuts down."""
     proc = _ACTION_PROCS.get("gateway-restart")
