@@ -552,7 +552,7 @@ def _invalidate_update_cache():
             if cache_file.exists():
                 cache_file.unlink()
         except Exception:
-            pass
+            logger.debug("Could not clear update-check cache %s", cache_file, exc_info=True)
 
 
 def _write_marker_file(path: Path, *, label: str) -> None:

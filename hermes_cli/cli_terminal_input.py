@@ -224,7 +224,7 @@ def _hermes_call_output_screen_diff(
     try:
         if previous_screen is not None and hasattr(previous_screen, "height") and previous_screen.height < screen.height:
             previous_screen.height = screen.height
-    except Exception:
+    except Exception:  # noqa: S110 - repaint recovery must not write into the terminal
         pass
 
     common = (app, output, screen, current_pos, color_depth)
@@ -406,7 +406,7 @@ def _enable_extended_enter_keys(output=None, env: Optional[Mapping[str, str]] = 
             sys.stdout.write(seq)
             sys.stdout.flush()
             return True
-    except Exception:
+    except Exception:  # noqa: S110 - terminal capability negotiation is best effort
         pass
     return False
 

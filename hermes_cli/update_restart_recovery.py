@@ -184,7 +184,7 @@ def _pid_is_live(pid: int) -> bool:
         import psutil
 
         return bool(psutil.pid_exists(pid))
-    except Exception:
+    except Exception:  # noqa: S110 - fall through to the guarded POSIX probe
         pass
     if os.name == "nt":
         return False

@@ -207,7 +207,7 @@ def _query_osc11_background() -> str | None:
                 r, _, _ = select.select([fd], [], [], drain_deadline - time.monotonic())
                 if not r or not os.read(fd, 64):
                     break
-        except Exception:
+        except Exception:  # noqa: S110 - terminal probe cleanup must remain silent
             pass
 
 
