@@ -4,7 +4,7 @@ set -uo pipefail
 # detached from sync-fork.sh (its parent already exited and delivered its
 # notification by the time this runs). Its own failures must be captured
 # into the marker file so hermes-sync-fork-restart-check can alert on
-# them — an uncaught crash into /tmp/hermes-sync-fork-restart-async.log
+# them — an uncaught crash into the detached restart log
 # that nobody reads promptly would just reintroduce the same kind of
 # silent gap this whole change exists to close.
 #
@@ -28,11 +28,16 @@ HERMES_HOME="/home/jiddy/.hermes"
 UV_BIN="/home/jiddy/.local/bin/uv"
 GATEWAY_UNIT="hermes-gateway.service"
 MARKER="$HERMES_HOME/cron/sync_fork_restart_state.json"
+LOG_DIR="$HERMES_HOME/logs"
+DEPS_LOG="$LOG_DIR/sync-fork-deps-reinstall.log"
+SYSTEMCTL_LOG="$LOG_DIR/sync-fork-restart-systemctl.log"
 
 mark_failed() {
   write_marker "failed" "$scheduled_at" "$before_head" "$after_head" "$commit_count" "$1"
   exit 1
 }
+
+mkdir -p "$LOG_DIR" || mark_failed "cannot create log directory $LOG_DIR"
 
 # Give sync-fork.sh's own exit and the scheduler's stdout capture +
 # Telegram delivery a few seconds' head start before anything here
@@ -45,8 +50,8 @@ sleep 5
 
 if [[ "$deps_changed" == "true" ]]; then
   cd "$REPO_DIR" 2>/dev/null || mark_failed "cannot cd into $REPO_DIR for dependency reinstall"
-  if ! "$UV_BIN" pip install -e ".[all]" --python "$REPO_DIR/venv/bin/python" >/tmp/hermes-sync-fork-deps-reinstall.log 2>&1; then
-    mark_failed "dependency reinstall failed after pulling $commit_count commit(s) (before=$before_head after=$after_head) — see /tmp/hermes-sync-fork-deps-reinstall.log. Live checkout is on the new commits but the running gateway is still on old code; restart was not attempted, needs manual intervention"
+  if ! "$UV_BIN" pip install -e ".[all]" --python "$REPO_DIR/venv/bin/python" >"$DEPS_LOG" 2>&1; then
+    mark_failed "dependency reinstall failed after pulling $commit_count commit(s) (before=$before_head after=$after_head) — see $DEPS_LOG. Live checkout is on the new commits but the running gateway is still on old code; restart was not attempted, needs manual intervention"
   fi
 fi
 
@@ -60,8 +65,8 @@ fi
 # environment by design — see sync-fork.sh's original comment on this) is
 # genuinely external to the gateway process, so it doesn't need to touch
 # that self-restart-loop guard.
-if ! systemctl --user restart "$GATEWAY_UNIT" >/tmp/hermes-sync-fork-restart-systemctl.log 2>&1; then
-  mark_failed "gateway restart command failed after pulling $commit_count commit(s) — see /tmp/hermes-sync-fork-restart-systemctl.log. Live checkout is updated on disk but the running process may still be on old code."
+if ! systemctl --user restart "$GATEWAY_UNIT" >"$SYSTEMCTL_LOG" 2>&1; then
+  mark_failed "gateway restart command failed after pulling $commit_count commit(s) — see $SYSTEMCTL_LOG. Live checkout is updated on disk but the running process may still be on old code."
 fi
 
 # Give the new process a moment to actually come up before checking.
