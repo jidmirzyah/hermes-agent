@@ -4,7 +4,12 @@ import { atom } from 'nanostores'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { type SessionView, SessionViewProvider } from '@/app/chat/session-view'
-import { connectionRequestOwnsPart, ConnectorOffer, ConnectorTool } from '@/components/assistant-ui/connector-tool'
+import {
+  connectionRequestOwnsPart,
+  ConnectorOffer,
+  ConnectorTool,
+  openConnectionDoneLink
+} from '@/components/assistant-ui/connector-tool'
 import { I18nProvider } from '@/i18n'
 import {
   $connectionRequests,
@@ -154,6 +159,26 @@ describe('ConnectorTool operation card', () => {
 
     expect(openExternal).toHaveBeenCalledWith('https://connect.example/gmail')
     expect(request).not.toHaveBeenCalledWith('connectors.connect', expect.anything())
+  })
+
+  it('wakes the operation with its session owner after the browser returns', async () => {
+    const request = vi.fn().mockResolvedValue({ status: 'ok' })
+    setPrimaryGateway({ request } as never)
+    setPrimaryGatewayConnectionId('connection-1')
+    setSessionOwnerHint(SESSION_ID, OWNER)
+    setConnectionRequest(REQUEST)
+
+    const navigate = vi.fn()
+    await openConnectionDoneLink(REQUEST.opId, navigate, sessionId => sessionId)
+
+    expect(navigate).toHaveBeenCalledWith('/session-1')
+    expect(request).toHaveBeenCalledWith(
+      'connectors.operation.wake',
+      {
+        op_id: REQUEST.opId,
+        owner: { session_id: SESSION_ID, type: 'session' }
+      }
+    )
   })
 
   it('Try again mints a fresh link on the open operation and never opens a browser by itself', async () => {
