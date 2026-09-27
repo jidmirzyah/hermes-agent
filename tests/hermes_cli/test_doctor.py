@@ -1479,7 +1479,7 @@ class TestDoctorDeprecatedConfigAndEnv:
         assert doctor_config.collect_deprecated_env_vars(None) == []
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_macos_tcc_grant_check_is_silent_off_macos(monkeypatch, capsys, tmp_path):
     """Off macOS the TCC check prints nothing, even with a bundle present."""
     monkeypatch.setattr(doctor_platform, "_desktop_app_bundle", lambda: tmp_path / "Hermes.app")

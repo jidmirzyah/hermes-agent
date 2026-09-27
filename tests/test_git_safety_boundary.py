@@ -8,7 +8,7 @@ import pytest
 
 @pytest.mark.platforms("posix")
 def test_guard_blocks_native_and_shell_git_mutations_without_touching_checkout(tmp_path, monkeypatch):
-    from tests._fixtures import live_system_guard
+    from tests import conftest
 
     def git(repo, *args):
         result = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, check=True)
@@ -22,7 +22,7 @@ def test_guard_blocks_native_and_shell_git_mutations_without_touching_checkout(t
         (repo / "sentinel").write_text("committed", encoding="utf-8")
         git(repo, "add", "sentinel")
         git(repo, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "second")
-    monkeypatch.setattr(live_system_guard, "_LIVE_GUARD_PROTECTED_GIT_ROOTS", (protected,))
+    monkeypatch.setattr(conftest, "_LIVE_GUARD_PROTECTED_GIT_ROOTS", (protected,))
     head = git(protected, "rev-parse", "HEAD")
     (protected / "sentinel").write_bytes(b"uncommitted user data")
     for command in (

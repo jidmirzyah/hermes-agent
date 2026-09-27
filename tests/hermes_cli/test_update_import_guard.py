@@ -23,6 +23,7 @@ import pytest
 
 from hermes_cli import update_cmd
 from hermes_cli import update_cmd_validation
+from hermes_cli import update_cmd_deps
 from hermes_constants import partial_update_hint
 
 def _write_skewed_tree(root: Path, *, skewed: bool) -> None:
@@ -194,7 +195,7 @@ def test_import_guard_rejects_malformed_health_payload(monkeypatch, tmp_path):
         return Result()
 
     monkeypatch.setattr(secrets, "token_hex", lambda _length: "fixed")
-    monkeypatch.setattr(update_cmd_validation.subprocess, "run", malformed)
+    monkeypatch.setattr(update_cmd_deps, "bounded_probe_run", malformed)
 
     ok, module, error = update_cmd._validate_critical_modules_import(tmp_path)
 
@@ -204,9 +205,9 @@ def test_import_guard_rejects_malformed_health_payload(monkeypatch, tmp_path):
 def test_import_guard_reports_probe_timeout(monkeypatch, tmp_path):
 
     def timeout(*_args, **_kwargs):
-        raise update_cmd_validation.subprocess.TimeoutExpired("python", 120)
+        return None
 
-    monkeypatch.setattr(update_cmd_validation.subprocess, "run", timeout)
+    monkeypatch.setattr(update_cmd_deps, "bounded_probe_run", timeout)
 
     ok, module, error = update_cmd._validate_critical_modules_import(tmp_path)
 
@@ -224,14 +225,10 @@ def test_untracked_enumeration_failure_is_visible(monkeypatch, tmp_path, capsys)
 
 @pytest.mark.platforms("posix")
 def test_import_guard_is_non_fatal_when_probe_cannot_run(monkeypatch, tmp_path):
-    """A selected interpreter that exists but cannot be executed must not read as a hung probe:
-    spawn failure stays advisory through the real ``subprocess.run`` path."""
-    selected_python = tmp_path / "pm" / "bin" / "python"
-    selected_python.parent.mkdir(parents=True)
-    selected_python.write_text("#!/bin/sh\nexit 0\n")
-    selected_python.chmod(0o644)  # present, not executable -> Popen raises PermissionError
-    monkeypatch.setattr(update_cmd_validation, "runtime_command",
-                        lambda root, *, code: [str(selected_python), "-I", "-c", code])
+    """A selected interpreter that cannot be spawned must not read as a hung probe:
+    spawn failure stays advisory through the real bounded-subprocess path."""
+    selected_python = tmp_path / "missing-python"
+    monkeypatch.setattr(update_cmd_deps.sys, "executable", str(selected_python))
     assert update_cmd._validate_critical_modules_import(tmp_path) == (True, None, None)
 
 # ---------------------------------------------------------------------------
@@ -256,10 +253,6 @@ def test_hint_stays_silent_for_unrelated_failures(exc):
 def test_import_guard_uses_the_selected_runtime_command(monkeypatch, tmp_path):
     seen: dict = {}
 
-    def fake_runtime_command(root, *, code):
-        assert root == tmp_path
-        return ["/pm/python", "-I", "-c", code]
-
     def fake_run(cmd, **kwargs):
         seen["command"] = cmd
         seen["cwd"] = kwargs["cwd"]
@@ -271,11 +264,18 @@ def test_import_guard_uses_the_selected_runtime_command(monkeypatch, tmp_path):
 
         return R()
 
-    monkeypatch.setattr(update_cmd_validation, "runtime_command", fake_runtime_command)
-    monkeypatch.setattr(update_cmd_validation.subprocess, "run", fake_run)
+    selected_python = tmp_path / "pm" / "bin" / "python"
+    selected_python.parent.mkdir(parents=True)
+    selected_python.touch()
+    monkeypatch.setattr(update_cmd_deps, "project_venv_dir", lambda root: tmp_path / "pm")
+    monkeypatch.setattr(
+        update_cmd_deps, "venv_python_path", lambda _venv, *, windows: selected_python
+    )
+    monkeypatch.setattr(update_cmd_deps, "_editable_finder_files", lambda _venv: [])
+    monkeypatch.setattr(update_cmd_deps, "bounded_probe_run", fake_run)
     update_cmd._validate_critical_modules_import(tmp_path)
 
-    assert seen["command"][:3] == ["/pm/python", "-I", "-c"]
+    assert seen["command"][:2] == [str(selected_python), "-c"]
     assert seen["cwd"] == str(tmp_path)
 
 def test_import_guard_ignores_missing_third_party_dependency(monkeypatch, probe_root):
