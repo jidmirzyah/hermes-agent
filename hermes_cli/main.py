@@ -2414,15 +2414,12 @@ def _this_module():
 
 def __getattr__(name):
     """Resolve the frozen updater surface on first read (see _FROZEN_UPDATER_SURFACE)."""
-    if name == "_write_update_incomplete_marker":
-        from hermes_cli._old_updater import stop_for_relaunch as value
-    else:
-        module = _FROZEN_ATTR_SOURCES.get(name)
-        if module is None:
-            raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-        import importlib
+    module = _FROZEN_ATTR_SOURCES.get(name)
+    if module is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    import importlib
 
-        value = getattr(importlib.import_module(module), name)
+    value = getattr(importlib.import_module(module), name)
     globals()[name] = value  # cache: later accesses skip __getattr__
     return value
 

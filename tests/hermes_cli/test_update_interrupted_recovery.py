@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 
 import hermes_cli.main as m
-from hermes_cli import _early_recovery as er
+from hermes_cli import _early_recovery as er, update_cmd
 from hermes_cli import _install_repair as ir
 from hermes_cli import main_install_repair as mir
 
@@ -29,6 +29,22 @@ def test_marker_round_trip(tmp_path, monkeypatch):
 
     m._clear_update_incomplete_marker()
     assert not marker.exists()
+
+
+def test_marker_writers_use_the_recovery_paths(tmp_path, monkeypatch):
+    monkeypatch.setattr(m, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(m, "_pytest_owns_live_checkout", lambda path: False)
+
+    assert m._write_update_incomplete_marker is update_cmd._write_update_incomplete_marker
+    m._write_update_incomplete_marker()
+    update_marker = m._update_marker_path()
+    assert update_marker.exists()
+    assert "started=" in update_marker.read_text(encoding="utf-8")
+
+    m._write_lazy_refresh_incomplete_marker()
+    lazy_marker = m._lazy_refresh_marker_path()
+    assert lazy_marker.exists()
+    assert "started=" in lazy_marker.read_text(encoding="utf-8")
 
 
 @pytest.fixture

@@ -37,18 +37,22 @@ from hermes_cli.update_cmd_windows import (  # noqa: F401
     _HOLDER_VALUE_FLAGS_FALLBACK,
     _cold_start_windows_gateway_after_update, _desktop_owns_gateway_lifecycle,
     _detect_venv_python_processes, _hermes_holder_subcommand, _holder_value_flags,
-    _holder_value_flags_cache, _looks_like_desktop_control_plane,
+    _handoff_reapable_backend_pids, _holder_value_flags_cache,
+    _ledger_manual_serve_holders, _ledger_reapable_backend_pids,
+    _leftover_pausable_gateway_pids, _looks_like_desktop_control_plane,
+    _orphaned_desktop_backend_pids,
     _pause_windows_gateways_for_update,
     _refresh_bootstrap_cache_scripts, _refresh_windows_gateway_launchers,
     _refuse_gateway_ancestor_tree_kill,
-    _restore_windows_gateway_service, _resume_windows_gateways_after_update,
+    _relaunch_stopped_serves, _restore_windows_gateway_service,
+    _resume_windows_gateways_after_update,
     _resume_windows_gateways_and_merge_outcome, _self_and_non_gateway_ancestor_pids,
-    _start_windows_gateway_service,
-    _stop_windows_gateway_service, _venv_launcher_ancestors,
+    _serve_relaunch_commands, _start_windows_gateway_service,
+    _stop_process_trees, _stop_windows_gateway_service, _venv_launcher_ancestors,
     _wait_for_windows_update_gateway_exit, _write_update_planned_stop_marker)
 from hermes_cli.update_cmd_fleet import (  # noqa: F401
     _FLEET_RESTART_PENDING_NAME, _FRESH_RESTART_SUPERVISORS, _GatewayRestartOutcome,
-    _clear_fleet_restart_pending_marker,
+    _apply_pending_fleet_restart_catchup, _clear_fleet_restart_pending_marker,
     _current_checkout_sha, _drain_or_signal_gateway_for_update, _fleet_probe_expected_runtimes,
     _fleet_restart_pending_marker_path, _fleet_restart_skip_reason, _for_each_systemd_gateway_unit,
     _gateway_recovery_partition, _gateway_service_matches_profile, _pending_fleet_restart_needed,
@@ -88,7 +92,7 @@ from hermes_cli.update_cmd_deps import (  # noqa: F401
     _rebuild_desktop_after_update, _record_npm_lockfile_hash, _refresh_active_lazy_features,
     _reapply_plugin_python_dependencies,
     _refresh_active_memory_provider_dependencies, _refuse_update_if_venv_foreign_owned,
-    _repair_node_deps_on_current_checkout,
+    _repair_node_deps_on_current_checkout, _restore_active_tool_dependencies,
     _sync_python_dependencies_after_pull, _update_node_dependencies,
     _validate_critical_modules_import,
     _venv_core_imports_healthy, _venv_foreign_owned_paths,
@@ -562,6 +566,100 @@ def _write_marker_file(path: Path, *, label: str) -> None:
         )
     except OSError as exc:
         logger.debug("Could not write %s marker: %s", label, exc)
+
+
+def _write_update_incomplete_marker() -> None:
+    """Drop the interrupted core-install breadcrumb. Never raises."""
+    _write_marker_file(_m()._update_marker_path(), label="update-incomplete")
+
+
+def _write_lazy_refresh_incomplete_marker() -> None:
+    """Drop the interrupted lazy-refresh breadcrumb. Never raises."""
+    _write_marker_file(
+        _m()._lazy_refresh_marker_path(), label="lazy-refresh-incomplete"
+    )
+
+
+def _format_concurrent_instances_message(matches, scripts_dir):
+    """Historical holder-gate hook; the fresh updater owns process handling."""
+    stop_for_relaunch()
+
+
+def _classify_concurrent_instance(pid):
+    """Historical holder-gate hook; the fresh updater owns process handling."""
+    stop_for_relaunch()
+
+
+def _filter_non_gateway_concurrent_instances(matches):
+    """Historical holder-gate hook; the fresh updater owns process handling."""
+    stop_for_relaunch()
+
+
+def _format_venv_python_holders_message(matches):
+    """Historical venv-holder hook; PM never mutates a running environment."""
+    stop_for_relaunch()
+
+
+def _log_only_write(text: str) -> None:
+    """Write subprocess output to the update log without echoing it to the terminal."""
+    if not text:
+        return
+    stream = _m().sys.stdout
+    log_file = getattr(stream, "_log", None)
+    with suppress(Exception):
+        if log_file is None:
+            log_path = get_hermes_home() / "logs" / "update.log"
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with log_path.open("a", encoding="utf-8") as fallback:
+                fallback.write(text)
+        else:
+            log_file.write(text)
+            log_file.flush()
+
+
+def _run_logged_subprocess(cmd, *, cwd=None, env=None):
+    """Stream combined child output to update.log and retain it for failures."""
+    import codecs
+    import io
+
+    from hermes_cli._subprocess_compat import kill_process_tree, windows_hide_flags
+
+    child_env = dict(os.environ if env is None else env)
+    child_env.setdefault("PYTHONUNBUFFERED", "1")
+    spawn = (
+        {"creationflags": windows_hide_flags()}
+        if os.name == "nt"
+        else {"process_group": 0}
+    )
+    proc = subprocess.Popen(
+        cmd,
+        cwd=cwd,
+        env=child_env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        **spawn,
+    )
+    decoder = io.IncrementalNewlineDecoder(
+        codecs.getincrementaldecoder("utf-8")("replace"), True
+    )
+    output = []
+    try:
+        while True:
+            chunk = proc.stdout.read1(8192)
+            text = decoder.decode(chunk, final=not chunk)
+            output.append(text)
+            _log_only_write(text)
+            if not chunk:
+                break
+        return subprocess.CompletedProcess(cmd, proc.wait(), stdout="".join(output))
+    except BaseException:
+        kill_process_tree(proc)
+        with suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=5)
+        raise
+    finally:
+        proc.stdout.close()
 
 
 def _cmd_update_check(branch: str = "main", *, branch_explicit: bool = False):
