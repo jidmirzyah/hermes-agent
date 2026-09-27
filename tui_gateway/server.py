@@ -36,7 +36,7 @@ from agent.skill_commands import describe_skill_invocation  # noqa: F401
 from agent.conversation_loop import INTERRUPT_WAITING_FOR_MODEL_PREFIX  # noqa: F401
 from tui_gateway import git_probe
 from tui_gateway._env import env_float, env_int
-from tui_gateway.turn_marker import clear_turn_marker, read_turn_marker, record_turn_start  # noqa: F401
+from tui_gateway.turn_marker import clear_turn_marker, marker_writer_state, read_turn_marker, record_turn_start  # noqa: F401
 from tui_gateway.contracts import registry as _contracts
 # User-facing copy shared with the split method modules (they close over this namespace).
 from tui_gateway.user_messages import (  # noqa: F401
@@ -625,27 +625,6 @@ def _profile_configured_cwd(profile_home: Path | None) -> str | None:
         from hermes_cli.config_effective import load_user_config_effective
         p = Path(profile_home) / "config.yaml"
         return _configured_cwd_from_cfg(load_user_config_effective(p)) if p.exists() else None
-    return None
-
-
-def _profile_terminal_backend(profile_home: Path | None) -> str | None:
-    """A non-launch profile's ``terminal.backend`` from ITS config.yaml (fail-open → None).
-
-    Same reason as :func:`_profile_configured_cwd`: at ``session.create`` the multiplex gateway has NOT yet
-    rebound HERMES_HOME to the target profile, so ``_effective_terminal_backend()`` reads the LAUNCH profile
-    (usually ``local``). A session bound to an ``ssh``/``docker`` profile then loses the non-local cwd
-    exemption and its remote workspace is dropped to the launch dir. Read the bound profile's own backend.
-    """
-    if profile_home is None:
-        return None
-    with contextlib.suppress(Exception):
-        from hermes_cli.config_effective import load_user_config_effective
-        p = Path(profile_home) / "config.yaml"
-        if p.exists():
-            cfg = load_user_config_effective(p)
-            terminal_cfg = cfg.get("terminal") if isinstance(cfg, dict) else None
-            if isinstance(terminal_cfg, dict):
-                return str(terminal_cfg.get("backend") or "").strip().lower() or None
     return None
 
 
@@ -2569,7 +2548,7 @@ def _make_agent(
         checkpoints_enabled=is_truthy_value(os.environ.get("HERMES_TUI_CHECKPOINTS")),
         pass_session_id=is_truthy_value(os.environ.get("HERMES_TUI_PASS_SESSION_ID")),
         skip_context_files=ignore_rules, skip_memory=ignore_rules, fallback_model=_load_fallback_model(),
-        **_agent_cbs(sid))
+        prefill_messages=_load_prefill_messages() or None, **_agent_cbs(sid))
     if context_cwd_is_launch_artifact is None:
         context_cwd_is_launch_artifact = _context_cwd_is_launch_artifact(session)
     agent._context_cwd_is_launch_artifact = bool(context_cwd_is_launch_artifact)
@@ -2597,13 +2576,14 @@ def _hydrate_session_cwd(sid: str, key: str, session_db, profile_home: str | Non
         if db is not None:
             row = db.get_session(key) if hasattr(db, "get_session") else None
             if row and row.get("cwd"):
+                # An ssh session's stored cwd is its workspace: explicit, so the remote terminal uses it instead of
+                # the profile's ~. Other backends keep main's semantics (resolved outside the sessions lock: I/O).
+                remote = _cwd_is_remote(profile_home)
                 with _sessions_lock:
                     if sid in _sessions:
-                        # A persisted row cwd is the session's authoritative workspace (a project session, or a
-                        # settled dir), not a launch artifact: mark it explicit so the ssh/remote terminal uses it
-                        # instead of falling back to the profile's ~ (session_workdir._terminal_task_cwd_with_source).
                         _sessions[sid]["cwd"] = row["cwd"]
-                        _sessions[sid]["explicit_cwd"] = True
+                        if remote:
+                            _sessions[sid]["explicit_cwd"] = True
             elif hasattr(db, "update_session_cwd"):
                 try:
                     _persist_session_cwd_and_schedule_git_meta(_sessions[sid], _sessions[sid]["cwd"], db=db)
