@@ -33,7 +33,8 @@ PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from hermes_cli.config import detect_install_method, get_hermes_home, load_config
+from hermes_cli import config as _config
+from hermes_cli.config import get_hermes_home, load_config
 from hermes_cli.web_server_memory import _field_is_set, _field_value
 from plugins.memory.config_schema import ProviderField
 from hermes_cli.web_routers.chat_ws import _CONSOLE_PROMPT
@@ -1307,14 +1308,14 @@ def _preflight_durable_action(name: str) -> Dict[str, Any]:
     """
     from hermes_cli.update_lock import read_live_update
     from tools import update_approval as _ua
-    from cli import _worktree_is_dirty
+    from hermes_cli.worktree_ops import _worktree_is_dirty
 
     holder = read_live_update()
     lock_held = holder is not None
     will_stage = _ua.apply_approval_enabled() and not _ua.approval_bypass_active()
     checkout_dirty = _worktree_is_dirty(str(PROJECT_ROOT))
     pending_exists = bool(_ua.list_pending())
-    install_method = detect_install_method(PROJECT_ROOT)
+    install_method = _config.detect_install_method(PROJECT_ROOT)
 
     result: Dict[str, Any] = {
         "name": name,

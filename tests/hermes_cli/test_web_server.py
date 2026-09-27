@@ -1478,7 +1478,7 @@ CONFIG_SCHEMA = ProviderConfigSchema(
         import hermes_cli.web_server as web_server
 
         monkeypatch.setattr(web_server, "_dashboard_local_update_managed_externally", lambda: False)
-        monkeypatch.setattr(web_server, "detect_install_method", lambda _root: "git")
+        monkeypatch.setattr(_cfg_mod, "detect_install_method", lambda _root: "git")
         from tools import update_approval as ua
         monkeypatch.setattr(ua, "apply_approval_enabled", lambda: False)
 
@@ -1498,7 +1498,7 @@ CONFIG_SCHEMA = ProviderConfigSchema(
         import hermes_cli.web_server as web_server
 
         monkeypatch.setattr(web_server, "_dashboard_local_update_managed_externally", lambda: False)
-        monkeypatch.setattr(web_server, "detect_install_method", lambda _root: "git")
+        monkeypatch.setattr(_cfg_mod, "detect_install_method", lambda _root: "git")
         from tools import update_approval as ua
         monkeypatch.setattr(ua, "apply_approval_enabled", lambda: True)
         monkeypatch.setattr(ua, "approval_bypass_active", lambda: False)
@@ -1515,7 +1515,7 @@ CONFIG_SCHEMA = ProviderConfigSchema(
         import hermes_cli.web_server as web_server
 
         monkeypatch.setattr(web_server, "_dashboard_local_update_managed_externally", lambda: False)
-        monkeypatch.setattr(web_server, "detect_install_method", lambda _root: "git")
+        monkeypatch.setattr(_cfg_mod, "detect_install_method", lambda _root: "git")
         from tools import update_approval as ua
         monkeypatch.setattr(ua, "apply_approval_enabled", lambda: True)
         monkeypatch.setattr(ua, "approval_bypass_active", lambda: True)
@@ -1532,7 +1532,7 @@ CONFIG_SCHEMA = ProviderConfigSchema(
         from hermes_cli.update_lock import UpdateHolder
 
         monkeypatch.setattr(web_server, "_dashboard_local_update_managed_externally", lambda: False)
-        monkeypatch.setattr(web_server, "detect_install_method", lambda _root: "git")
+        monkeypatch.setattr(_cfg_mod, "detect_install_method", lambda _root: "git")
         from tools import update_approval as ua
         monkeypatch.setattr(ua, "apply_approval_enabled", lambda: False)
 
@@ -1553,7 +1553,7 @@ CONFIG_SCHEMA = ProviderConfigSchema(
         import hermes_cli.web_server as web_server
 
         monkeypatch.setattr(web_server, "_dashboard_local_update_managed_externally", lambda: False)
-        monkeypatch.setattr(web_server, "detect_install_method", lambda _root: "git")
+        monkeypatch.setattr(_cfg_mod, "detect_install_method", lambda _root: "git")
         from tools import update_approval as ua
         monkeypatch.setattr(ua, "apply_approval_enabled", lambda: False)
         ua.stage_update({"branch": "main"}, summary="test pending update")
@@ -1571,7 +1571,7 @@ CONFIG_SCHEMA = ProviderConfigSchema(
         import hermes_cli.web_server as web_server
 
         monkeypatch.setattr(web_server, "_dashboard_local_update_managed_externally", lambda: False)
-        monkeypatch.setattr(web_server, "detect_install_method", lambda _root: "docker")
+        monkeypatch.setattr(_cfg_mod, "detect_install_method", lambda _root: "docker")
 
         result = web_server._preflight_durable_action("hermes-update")
 
@@ -1586,7 +1586,7 @@ CONFIG_SCHEMA = ProviderConfigSchema(
         import hermes_cli.web_server as web_server
 
         monkeypatch.setattr(web_server, "_dashboard_local_update_managed_externally", lambda: True)
-        monkeypatch.setattr(web_server, "detect_install_method", lambda _root: "pip")
+        monkeypatch.setattr(_cfg_mod, "detect_install_method", lambda _root: "pip")
 
         result = web_server._preflight_durable_action("hermes-update")
 
@@ -1602,10 +1602,10 @@ CONFIG_SCHEMA = ProviderConfigSchema(
 
         monkeypatch.setattr(web_server, "_dashboard_local_update_managed_externally", lambda: False)
 
-        monkeypatch.setattr(web_server, "detect_install_method", lambda _root: "nix")
+        monkeypatch.setattr(_cfg_mod, "detect_install_method", lambda _root: "nix")
         reason_install_method = web_server._preflight_durable_action("hermes-update")["reason"]
 
-        monkeypatch.setattr(web_server, "detect_install_method", lambda _root: "git")
+        monkeypatch.setattr(_cfg_mod, "detect_install_method", lambda _root: "git")
         monkeypatch.setattr(ua, "apply_approval_enabled", lambda: False)
         holder = UpdateHolder(pid=555, age_seconds=10.0)
         monkeypatch.setattr("hermes_cli.update_lock.read_live_update", lambda: holder)
@@ -1631,7 +1631,7 @@ CONFIG_SCHEMA = ProviderConfigSchema(
 
         monkeypatch.setattr(web_server, "PROJECT_ROOT", repo)
         monkeypatch.setattr(web_server, "_dashboard_local_update_managed_externally", lambda: False)
-        monkeypatch.setattr(web_server, "detect_install_method", lambda _root: "git")
+        monkeypatch.setattr(_cfg_mod, "detect_install_method", lambda _root: "git")
         from tools import update_approval as ua
         monkeypatch.setattr(ua, "apply_approval_enabled", lambda: False)
 
@@ -1644,7 +1644,7 @@ CONFIG_SCHEMA = ProviderConfigSchema(
         import hermes_cli.web_server as web_server
 
         monkeypatch.setattr(web_server, "_dashboard_local_update_managed_externally", lambda: False)
-        monkeypatch.setattr(web_server, "detect_install_method", lambda _root: "git")
+        monkeypatch.setattr(_cfg_mod, "detect_install_method", lambda _root: "git")
         from tools import update_approval as ua
         monkeypatch.setattr(ua, "apply_approval_enabled", lambda: False)
 
@@ -1671,7 +1671,7 @@ CONFIG_SCHEMA = ProviderConfigSchema(
         from tools import update_approval as ua
 
         monkeypatch.setattr(web_server, "_dashboard_local_update_managed_externally", lambda: False)
-        monkeypatch.setattr(web_server, "detect_install_method", lambda _root: "git")
+        monkeypatch.setattr(_cfg_mod, "detect_install_method", lambda _root: "git")
 
         marker = update_marker_path()
         pending_dir = ua._pending_dir()
