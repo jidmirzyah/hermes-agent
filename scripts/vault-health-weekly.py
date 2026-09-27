@@ -62,7 +62,7 @@ def _notes(root: Path) -> list[Path]:
 
 
 def _frontmatter(path: Path) -> tuple[dict | None, str | None]:
-    text = path.read_text(encoding="utf-8", errors="replace")
+    text = path.read_text(encoding="utf-8-sig", errors="replace")
     lines = text.splitlines()
     if not lines or lines[0].strip() != "---":
         return None, None
@@ -123,7 +123,7 @@ def scan(root: Path) -> dict[str, object]:
 
     for path in notes:
         relative = _relative(path, root)
-        text = path.read_text(encoding="utf-8", errors="replace")
+        text = path.read_text(encoding="utf-8-sig", errors="replace")
         for raw_link in LINK_PATTERN.findall(text):
             target = raw_link.split("|", 1)[0].split("#", 1)[0].strip()
             if not target or "://" in target:

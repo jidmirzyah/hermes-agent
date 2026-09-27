@@ -216,7 +216,7 @@ def _check_fork_upstream_drift(should_fix: bool, f: Finding) -> None:
         import json
         import datetime
         try:
-            ts = json.loads(cache_file.read_text(encoding="utf-8")).get("ts")
+            ts = json.loads(cache_file.read_text(encoding="utf-8-sig")).get("ts")
             if ts:
                 when = datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
                 check_info(f"Last update check: {when} (not necessarily last applied update)")

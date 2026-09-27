@@ -113,7 +113,7 @@ def try_merge_years() -> list[str]:
             month = MONTHLY_NAME_RE.match(p.name).group(1)
             first_month = first_month or month
             last_month = month
-            body = strip_month_wrapper(p.read_text(encoding="utf-8"))
+            body = strip_month_wrapper(p.read_text(encoding="utf-8-sig"))
             sections.append(f"## {month}\n\n{body.strip()}\n")
 
         year_fname = f"Backlog-{first_month}-to-{last_month}.md"
@@ -140,7 +140,7 @@ def try_merge_years() -> list[str]:
         try:
             YEARS_DIR.mkdir(parents=True, exist_ok=True)
             atomic_write(year_path, content)
-            written = year_path.read_text(encoding="utf-8")
+            written = year_path.read_text(encoding="utf-8-sig")
             ok = (
                 written.strip()
                 and f"# Backlog — Archived, {first_month} to {last_month}" in written
@@ -185,7 +185,7 @@ def main() -> int:
         print(f"ERROR: primary backlog not found at {PRIMARY}", file=sys.stderr)
         return 1
 
-    text = PRIMARY.read_text(encoding="utf-8")
+    text = PRIMARY.read_text(encoding="utf-8-sig")
     header_through_marker, closed_body = split_at_closed(text)
 
     summaries: list[str] = []
@@ -202,7 +202,7 @@ def main() -> int:
         try:
             ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
             if archive_path.exists():
-                existing = archive_path.read_text(encoding="utf-8")
+                existing = archive_path.read_text(encoding="utf-8-sig")
                 content = existing.rstrip("\n") + "\n\n" + new_section
             else:
                 content = (
@@ -218,7 +218,7 @@ def main() -> int:
                     + new_section
                 )
             atomic_write(archive_path, content)
-            written = archive_path.read_text(encoding="utf-8")
+            written = archive_path.read_text(encoding="utf-8-sig")
             ok = stripped in written
         except OSError as exc:
             msg = (

@@ -47,7 +47,7 @@ EXCLUSION_FILE = Path("/home/jiddy/.hermes/cron/skill_sync_exclusions.txt")
 def load_exclusions() -> set[str]:
     excl = set()
     if EXCLUSION_FILE.exists():
-        for line in EXCLUSION_FILE.read_text(encoding="utf-8").splitlines():
+        for line in EXCLUSION_FILE.read_text(encoding="utf-8-sig").splitlines():
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
@@ -102,7 +102,7 @@ def validate_live_frontmatter(live_root: Path) -> list[str]:
     for skill_md in sorted(live_root.rglob("SKILL.md")):
         rel = skill_md.relative_to(live_root)
         try:
-            raw = skill_md.read_text(encoding="utf-8", errors="replace")
+            raw = skill_md.read_text(encoding="utf-8-sig", errors="replace")
         except OSError as e:
             problems.append(f"{rel}: unreadable: {e}")
             continue

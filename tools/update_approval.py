@@ -154,7 +154,7 @@ def list_pending() -> List[Dict[str, Any]]:
     records: List[Dict[str, Any]] = []
     for p in d.glob("*.json"):
         try:
-            records.append(json.loads(p.read_text(encoding="utf-8")))
+            records.append(json.loads(p.read_text(encoding="utf-8-sig")))
         except Exception:
             logger.warning("Skipping unreadable pending update record: %s", p)
     records.sort(key=lambda r: r.get("created_at", 0))
@@ -167,7 +167,7 @@ def get_pending(pending_id: str) -> Optional[Dict[str, Any]]:
     if not path.exists():
         return None
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8-sig"))
     except Exception:
         return None
 

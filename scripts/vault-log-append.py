@@ -61,8 +61,8 @@ def _reconcile_for_file(target_path: Path, vault_root: Path) -> list[str]:
                 canonical = _vault_conflict_lib.canonical_path_for(conflict_path)
                 if canonical.is_file():
                     result = _vault_conflict_lib.classify_conflict(
-                        conflict_path.read_text(encoding="utf-8"),
-                        canonical.read_text(encoding="utf-8"),
+                        conflict_path.read_text(encoding="utf-8-sig"),
+                        canonical.read_text(encoding="utf-8-sig"),
                     )
                     messages.append(
                         f"left untouched (ambiguous): {conflict_path.name} -- "
@@ -83,7 +83,7 @@ def append_entry(target_path: Path, vault_root: Path, entry_text: str) -> list[s
     reconcile messages (empty if nothing was pending)."""
     messages = _reconcile_for_file(target_path, vault_root)
 
-    current = target_path.read_text(encoding="utf-8") if target_path.is_file() else ""
+    current = target_path.read_text(encoding="utf-8-sig") if target_path.is_file() else ""
     entry_text = entry_text.strip("\n") + "\n"
     if current and not current.endswith("\n"):
         current += "\n"
@@ -112,7 +112,7 @@ def main() -> int:
     target_path = args.vault_root / args.file
 
     if args.entry_file is not None:
-        entry_text = args.entry_file.read_text(encoding="utf-8")
+        entry_text = args.entry_file.read_text(encoding="utf-8-sig")
     else:
         entry_text = args.entry_text
 

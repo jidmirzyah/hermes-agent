@@ -57,7 +57,7 @@ def check(*, marker_path: Path, now: datetime) -> list[str]:
 
     problems: list[str] = []
     try:
-        data = json.loads(marker_path.read_text(encoding="utf-8"))
+        data = json.loads(marker_path.read_text(encoding="utf-8-sig"))
     except Exception as exc:
         problems.append(f"could not read/parse {marker_path}: {type(exc).__name__}: {exc}")
         _archive(marker_path, now)
