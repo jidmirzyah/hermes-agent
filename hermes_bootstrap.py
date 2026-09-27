@@ -1,5 +1,5 @@
 """Process bootstrap for Hermes entry points: Windows UTF-8 stdio and ANSI console, import-path
-hardening, durable lazy-install target, and dual-stack (Happy Eyeballs) connects.
+hardening, PM dependency activation, and dual-stack (Happy Eyeballs) connects.
 
 Windows binds stdio to the console code page (cp1252), so ``print("café")`` raises
 ``UnicodeEncodeError``, and Python children inherit the same default unless
@@ -9,8 +9,8 @@ point (``hermes``, ``hermes-agent``, ``hermes-acp``, ``gateway.run``, ``batch_ru
 process still needs an explicit ``encoding="utf-8"`` (ruff ``PLW1514``). POSIX is left
 alone deliberately — users' ``LANG``/``LC_*`` choices are respected.
 
-Stdlib only: entry points import this before ``harden_import_path()`` runs, so nothing
-here may pull in a Hermes package that a project-local directory could shadow.
+The bootstrap primitives are stdlib-only until ``harden_import_path()`` pins the Hermes
+root; PM and recovery modules are imported only after that boundary.
 """
 
 from __future__ import annotations
@@ -453,23 +453,6 @@ def harden_import_path(src_root: str | None = None) -> None:
     sys.path.insert(0, root)
 
 
-def activate_durable_lazy_target() -> None:
-    """Put the durable lazy-install dir (``HERMES_LAZY_INSTALL_TARGET``) on ``sys.path``.
-
-    Immutable Docker images seal the venv and redirect lazy installs to the data volume;
-    packages installed there on a previous run must be importable before any backend
-    imports its SDK. Appends to the END of ``sys.path`` so the core venv always wins name
-    collisions (see ``tools.lazy_deps``). Never raises; unset target is a no-op.
-    """
-    if not os.environ.get("HERMES_LAZY_INSTALL_TARGET", "").strip():
-        return
-    try:
-        from tools import lazy_deps
-        lazy_deps.activate_durable_lazy_target()
-    except Exception:
-        pass  # a failed activation just leaves the backend reporting itself unavailable
-
-
 def export_scratch_tmp_env() -> None:
     """Point ``TMPDIR``/``TMP``/``TEMP`` at ``HERMES_HOME/cache/scratch`` unless the user set them.
 
@@ -485,11 +468,87 @@ def export_scratch_tmp_env() -> None:
         pass  # a missing/unwritable home just leaves the system temp dir in place
 
 
-# Apply on import — entry points only need ``import hermes_bootstrap`` first.
+# Apply on import - entry points only need ``import hermes_bootstrap`` first.
 apply_windows_utf8_bootstrap()
 enable_windows_vt()
 suppress_platform_ver_console()
 install_never_free_environ()
-activate_durable_lazy_target()
+
+# Every entry point imports this module before its dependency graph. Put the root on
+# sys.path before the first Hermes import: a pre-PM editable install does not know the
+# pm package and otherwise cannot reach the updater that repairs it.
+from pathlib import Path
+
+_root = Path(__file__).resolve().parent
+try:
+    os.getcwd()
+except FileNotFoundError:
+    os.chdir(_root)
+
+
+def _legacy_post_swap_invocation(argv: list[str]) -> tuple[Path, list[str]] | None:
+    """Recognize the exact fresh-checkout command emitted by shipped updaters."""
+    if not argv or argv[0] != "update":
+        return None
+    try:
+        marker = argv.index("--post-swap", 1)
+    except ValueError:
+        return None
+    if marker + 2 != len(argv):
+        return None
+    return Path(argv[marker + 1]), argv[1:marker]
+
+
+harden_import_path(str(_root))
+
+_legacy_post_swap = _legacy_post_swap_invocation(sys.argv[1:])
+if _legacy_post_swap is not None:
+    from hermes_cli.update_handoff import _continue_legacy_post_swap
+
+    _handoff_path, _argv_tail = _legacy_post_swap
+    raise SystemExit(
+        _continue_legacy_post_swap(_handoff_path, argv_tail=_argv_tail)
+    )
+
+from hermes_cli._parser import command_argv
+from hermes_cli._early_recovery import recover_if_needed
+from pm.environments import activate_dependencies
+
+# Repair needs only stdlib. Do not activate a damaged dependency generation to reach it.
+_pm_repair = command_argv(sys.argv[1:])[:2] == ["pm", "repair"]
+if not _pm_repair:
+    from hermes_cli.venv_sync import prepare_launch, relaunch_command
+
+    try:
+        _launch_python = prepare_launch(_root, sys.argv[1:])
+        if _launch_python is not None:
+            _main_spec = getattr(sys.modules.get("__main__"), "__spec__", None)
+            _command = relaunch_command(
+                _launch_python,
+                _root,
+                sys.argv,
+                sys.orig_argv,
+                getattr(_main_spec, "name", None),
+            )
+            if os.name == "nt":
+                import subprocess
+
+                raise SystemExit(subprocess.call(_command))
+            os.execv(str(_launch_python), _command)
+    except Exception as exc:
+        print(
+            "hermes: source-update completion failed: "
+            f"{exc}; running with the previous dependencies - "
+            "run `hermes update` to finish it",
+            file=sys.stderr,
+        )
+    recover_if_needed(_root)
+    try:
+        activate_dependencies(_root)
+    except (RuntimeError, OSError) as exc:
+        if command_argv(sys.argv[1:])[:1] != ["pm"]:
+            print(f"hermes: {exc}; run `hermes pm repair`", file=sys.stderr)
+            raise SystemExit(1) from None
+
 install_happy_eyeballs_socket_connect()
 export_scratch_tmp_env()

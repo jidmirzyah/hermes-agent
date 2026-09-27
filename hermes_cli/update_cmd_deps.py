@@ -283,10 +283,11 @@ def _upgrade_pip_before_lazy_refresh(
 
 
 def _capture_active_lazy_features() -> list[str]:
-    """Snapshot active lazy backends before a managed runtime is replaced."""
+    """Snapshot the PM extras selected before a managed runtime is replaced."""
     try:
-        from tools import lazy_deps
-        return lazy_deps.active_features()
+        import pm
+
+        return pm.enabled_extras()
     except Exception as exc:
         logger.debug("Could not snapshot active lazy features: %s", exc)
         return []
@@ -370,83 +371,37 @@ def _clip(reason: str, limit: int = 200) -> str:
 def _refresh_active_lazy_features(
     install_cmd_prefix: list[str] | None = None, *, env: dict[str, str] | None = None,
     features: list[str] | None = None) -> bool:
-    """Refresh previously-activated lazy backends (cold ones untouched): the core install never
-    touches them, so a bumped :data:`LAZY_DEPS` pin would leave them stale forever. Returns True
-    when the venv is safe (refreshed / nothing active / import repair succeeded), False when a
-    failed lazy install left broken core imports repair couldn't fix. Never raises.
+    """Re-sync the PM extras selected before the source update. Never raises.
 
-    See #57828.
+    ``install_cmd_prefix`` and ``env`` remain accepted for old updater frames that
+    cross the post-swap compatibility boundary; PM owns the environment now.
     """
-    from hermes_cli.update_cmd import _m
+    del install_cmd_prefix, env
     try:
-        from tools import lazy_deps
+        import pm
     except Exception as exc:
-        logger.debug("Lazy refresh skipped (import failed): %s", exc)
+        logger.debug("PM extras refresh skipped (import failed): %s", exc)
         return True
 
     active = features
     if active is None:
         try:
-            active = lazy_deps.active_features()
+            active = pm.enabled_extras()
         except Exception as exc:
-            logger.debug("Lazy refresh skipped (active_features failed): %s", exc)
+            logger.debug("PM extras refresh skipped (enabled_extras failed): %s", exc)
             return True
     if not active:
         return True
 
     print()
-    print(f"→ Refreshing {len(active)} active lazy backend(s)...")
-
-    unexpected_failure = False
+    print(f"→ Refreshing {len(active)} selected optional feature(s)...")
     try:
-        results = (
-            lazy_deps.refresh_active_features(prompt=False) if features is None
-            else lazy_deps.restore_features(active))
+        pm.sync_venv(active, explicit=True)
     except Exception as exc:
-        # refresh_active_features is never-raise by contract; defend anyway.
-        print(f"  ⚠ Lazy refresh failed unexpectedly: {exc}")
-        results = {}
-        unexpected_failure = True
-
-    refreshed = [f for f, s in results.items() if s in {"refreshed", "restored"}]
-    current = [f for f, s in results.items() if s == "current"]
-    failed = [(f, s) for f, s in results.items() if s.startswith("failed:")]
-    skipped = [(f, s) for f, s in results.items() if s.startswith("skipped:")]
-
-    if refreshed:
-        print(f"  ↑ {len(refreshed)} refreshed: {', '.join(refreshed)}")
-    if current:
-        print(f"  ✓ {len(current)} already current")
-    if skipped:
-        # Usually security.allow_lazy_installs=false; informational, not an error.
-        names = ", ".join(f for f, _ in skipped)
-        reason = skipped[0][1].split(": ", 1)[-1]
-        print(f"  · {len(skipped)} skipped ({reason}): {names}")
-
-    if not failed and not unexpected_failure:
-        return True
-
-    for feature, status in failed:
-        print(f"  ⚠ {feature} failed to refresh: {_clip(status.split(': ', 1)[-1])}")
-
-    if install_cmd_prefix is None:
-        print("  ⚠ Lazy refresh failed; rerun `hermes update` once resolved.")
+        print(f"  ⚠ Optional feature refresh failed: {_clip(str(exc))}")
+        print("  Rerun `hermes update` once the dependency issue is resolved.")
         return False
-
-    # Import-based recovery: metadata-only verifiers miss dist-info intact but import files
-    # wiped. Unavailable probes are indeterminate, not healthy — keep the lazy marker.
-    # See #57828.
-    status = _m()._repair_venv_via_import_probes(install_cmd_prefix, env=env)
-    if status == "repaired":
-        print("  Lazy backend(s) keep their previous version until refresh succeeds.")
-        return True
-    if status == "healthy":
-        print("  Lazy backend(s) keep their previous version; probed packages look intact.")
-        print("  Rerun `hermes update` once the upstream issue is resolved.")
-        return True
-    if status == "indeterminate":
-        print("  ⚠ Leaving `.lazy-refresh-incomplete` until import probes can confirm health.")
-    return False
+    return True
 
 
 def _refresh_active_memory_provider_dependencies() -> None:
