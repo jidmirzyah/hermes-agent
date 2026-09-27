@@ -2594,91 +2594,10 @@ def _emit_approval_event(subsystem: str, outcome: str, action_id: str, detail: s
         pass
 
 
-def cmd_update(args, *, approved: bool = False):
-    """Update Hermes Agent to the latest version.
-
-    Thin wrapper around ``_cmd_update_impl``: installs hangup protection,
-    runs the update, then restores stdio on the way out (even on
-    ``sys.exit`` or unhandled exceptions).
-
-    ``approved`` is set by the approve-replay path below when re-invoking
-    this function for an already-approved pending update — it's the
-    explicit, non-leaking counterpart to ``update_approval.approval_bypass()``
-    / ``BYPASS_ENV``. See tools/update_approval.py's BYPASS_ENV comment for
-    why the explicit param exists.
-    """
-    from hermes_cli.config import (
-        is_managed,
-        managed_error,
-        read_raw_config,
-        recommended_update_command_for_method,
-        save_config,
-    )
-    from hermes_cli.update_approval_commands import (
-        handle_pending_subcommand,
-        resolve_approve_target,
-    )
-    from tools import update_approval as ua
-
-    action = getattr(args, "update_action", None)
-    value = getattr(args, "update_value", None)
-
-    def _set_apply_approval(enabled: bool) -> None:
-        cfg = read_raw_config()
-        updates = cfg.get("updates")
-        if not isinstance(updates, dict):
-            updates = {}
-        updates["apply_approval"] = bool(enabled)
-        cfg["updates"] = updates
-        save_config(cfg, merge_existing=True)
-
-    if action in {"pending", "reject", "deny", "drop", "approval", "mode"}:
-        out = handle_pending_subcommand(
-            [action] + ([value] if value is not None else []),
-            set_mode_fn=_set_apply_approval,
-        )
-        print(out or "Unknown update subcommand.")
-        return
-
-    if action in {"approve", "apply"}:
-        target, err = resolve_approve_target([value] if value is not None else [])
-        if err or target is None:
-            print(err or "Usage: hermes update approve <id>")
-            return
-        rec = ua.get_pending(target)
-        if not rec:
-            print(f"No pending update with id '{target}'.")
-            return
-        payload = rec.get("payload", {}) if isinstance(rec, dict) else {}
-        replay_args = argparse.Namespace(
-            gateway=bool(getattr(args, "gateway", False)),
-            check=False,
-            no_backup=bool(payload.get("no_backup", False)),
-            backup=bool(payload.get("backup", False)),
-            yes=bool(getattr(args, "yes", False)),
-            branch=payload.get("branch"),
-            force=bool(payload.get("force", False)),
-            force_venv=bool(payload.get("force_venv", False)),
-            no_gateway_restart=bool(payload.get("no_gateway_restart", False)),
-            update_action=None,
-            update_value=None,
-        )
-        with ua.approval_bypass():
-            try:
-                cmd_update(replay_args, approved=True)
-            except BaseException:
-                raise
-            else:
-                try:
-                    ua.discard_pending(target)
-                    _emit_approval_event("updates", "approved", target, "applied and cleared")
-                except RuntimeError as e:
-                    print(
-                        f"Warning: update applied, but could not clear pending record "
-                        f"'{target}' ({e}). It may still appear under 'hermes update pending'."
-                    )
-                    _emit_approval_event("updates", "approved", target, f"applied but cleanup failed: {e}")
-        return
+def _update_preflight_handled(args) -> bool:
+    """Managed-install refusal, --plan, admission gate, --check. True = nothing more to do."""
+    from hermes_cli.config import is_managed, managed_error
+    from hermes_cli.update_channel import handle_metadata_args
 
     if handle_metadata_args(args, PROJECT_ROOT):
         sys.exit(0)
@@ -2743,19 +2662,127 @@ def cmd_update(args, *, approved: bool = False):
             branch_explicit=bool(getattr(args, "branch", None)),
             **({"channel": args.channel} if getattr(args, "channel", None) else {}),
         )
-        return None
+        return True
+    return False
 
 
 from hermes_cli.update_receipt import update_receipt_scope
 
 
 @update_receipt_scope()
-def cmd_update(args):
-    """Update Hermes Agent: hangup protection + update lock around ``_cmd_update_impl``."""
+def cmd_update(args, *, approved: bool = False):
+    """Update Hermes Agent to the latest version.
+
+    Thin wrapper around ``_cmd_update_impl``: installs hangup protection,
+    runs the update, then restores stdio on the way out (even on
+    ``sys.exit`` or unhandled exceptions).
+
+    ``approved`` is set by the approve-replay path below when re-invoking
+    this function for an already-approved pending update — it's the
+    explicit, non-leaking counterpart to ``update_approval.approval_bypass()``
+    / ``BYPASS_ENV``. See tools/update_approval.py's BYPASS_ENV comment for
+    why the explicit param exists.
+    """
+    from hermes_cli.config import read_raw_config, save_config
+    from hermes_cli.update_approval_commands import (
+        handle_pending_subcommand,
+        resolve_approve_target,
+    )
     from hermes_cli.update_owning_install import retarget_to_owning_install
+    from tools import update_approval as ua
+
+    action = getattr(args, "update_action", None)
+    value = getattr(args, "update_value", None)
+
+    def _set_apply_approval(enabled: bool) -> None:
+        cfg = read_raw_config()
+        updates = cfg.get("updates")
+        if not isinstance(updates, dict):
+            updates = {}
+        updates["apply_approval"] = bool(enabled)
+        cfg["updates"] = updates
+        save_config(cfg, merge_existing=True)
+
+    if action in {"pending", "reject", "deny", "drop", "approval", "mode"}:
+        out = handle_pending_subcommand(
+            [action] + ([value] if value is not None else []),
+            set_mode_fn=_set_apply_approval,
+        )
+        print(out or "Unknown update subcommand.")
+        return
+
+    if action in {"approve", "apply"}:
+        target, err = resolve_approve_target([value] if value is not None else [])
+        if err or target is None:
+            print(err or "Usage: hermes update approve <id>")
+            return
+        rec = ua.get_pending(target)
+        if not rec:
+            print(f"No pending update with id '{target}'.")
+            return
+        payload = rec.get("payload", {}) if isinstance(rec, dict) else {}
+        replay_args = argparse.Namespace(
+            gateway=bool(getattr(args, "gateway", False)),
+            check=False,
+            no_backup=bool(payload.get("no_backup", False)),
+            backup=bool(payload.get("backup", False)),
+            yes=bool(getattr(args, "yes", False)),
+            branch=payload.get("branch"),
+            force=bool(payload.get("force", False)),
+            force_venv=bool(payload.get("force_venv", False)),
+            no_gateway_restart=bool(payload.get("no_gateway_restart", False)),
+            update_action=None,
+            update_value=None,
+        )
+        with ua.approval_bypass():
+            try:
+                cmd_update(replay_args, approved=True)
+            except BaseException:
+                raise
+            else:
+                try:
+                    ua.discard_pending(target)
+                    _emit_approval_event("updates", "approved", target, "applied and cleared")
+                except RuntimeError as e:
+                    print(
+                        f"Warning: update applied, but could not clear pending record "
+                        f"'{target}' ({e}). It may still appear under 'hermes update pending'."
+                    )
+                    _emit_approval_event("updates", "approved", target, f"applied but cleanup failed: {e}")
+        return
 
     retarget_to_owning_install(PROJECT_ROOT)
     if _update_preflight_handled(args):
+        return
+
+    if ua.apply_approval_enabled() and not approved and not ua.approval_bypass_active():
+        try:
+            record = ua.stage_update(
+                ua.payload_from_args(args),
+                summary=ua.update_summary(ua.payload_from_args(args)),
+            )
+        except Exception as e:
+            print(f"Could not stage the update for approval ({e}). No changes were applied.")
+            sys.exit(1)
+        _emit_approval_event("updates", "staged", record["id"], record.get("summary", ""))
+        print("⚕ Update staged for approval.")
+        print(f"  Pending id: {record['id']}")
+        print("  Review:     /update pending")
+        print(f"  Approve:    /update approve {record['id']}")
+        print(f"  Reject:     /update reject {record['id']}")
+        print()
+        print("No changes were applied yet.")
+        # Distinct exit code so nothing that only checks "did this exit 0"
+        # (dashboard status poll, gateway chat notification) mistakes a
+        # staged-for-approval request for a completed update.
+        from hermes_cli.update_lock import UPDATE_EXIT_STAGED_FOR_APPROVAL
+        sys.exit(UPDATE_EXIT_STAGED_FOR_APPROVAL)
+        # Defense-in-depth: a real sys.exit() always raises SystemExit, so
+        # this return never runs in production. It exists so that if
+        # anything ever stops sys.exit() from propagating — e.g. code under
+        # test wholesale-mocking `hermes_cli.main.sys`, which turns the call
+        # above into a no-op — execution still cannot fall through into
+        # applying an update the approval gate was supposed to block.
         return
 
     if not ua.apply_approval_enabled():
