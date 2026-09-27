@@ -112,7 +112,7 @@ export async function openConnectionDoneLink(
   try {
     await requestGatewayForAgent(owner.connectionId, owner.profile, 'connectors.operation.wake', {
       op_id: op,
-      session_id: request.sessionId
+      owner: { session_id: request.sessionId, type: 'session' }
     })
   } catch {
     // The wake only shortens the wait. The operation can settle and leave the live registry between
@@ -133,8 +133,8 @@ export async function reissueConnectionTarget(
     'connectors.connect',
     {
       connectors: [name],
-      reconnect: true,
-      session_id: request.sessionId
+      owner: { session_id: request.sessionId, type: 'session' },
+      reconnect: true
     },
     45000
   )
@@ -226,8 +226,7 @@ export const CONNECTOR_CARD_PHASES = {
   initiated: { mark: 'waiting', resolved: false, settled: notConnected, verb: 'open' },
   not_connected: { mark: 'idle', resolved: false, settled: notConnected, verb: 'none' },
   pending: { mark: 'idle', resolved: false, settled: notConnected, verb: 'open' },
-  skipped: { mark: 'idle', resolved: true, settled: skipped, verb: 'none' },
-  unavailable: { mark: 'idle', resolved: true, settled: notConnected, verb: 'none' }
+  skipped: { mark: 'idle', resolved: true, settled: skipped, verb: 'none' }
 } satisfies Record<ConnectionTargetState, ConnectorCardPhase>
 
 // A disabled verb (a working row, a waiting row with no link yet) refuses focus, and the keyboard

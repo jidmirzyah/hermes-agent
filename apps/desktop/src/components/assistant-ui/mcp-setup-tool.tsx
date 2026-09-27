@@ -72,8 +72,7 @@ const MCP_VERBS = {
   initiated: 'open',
   not_connected: 'none',
   pending: 'approve',
-  skipped: 'none',
-  unavailable: 'none'
+  skipped: 'none'
 } satisfies Record<ConnectionTargetState, McpVerb>
 
 // Two states read differently per action. A pending authorize is the backend still minting the link,
