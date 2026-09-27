@@ -42,8 +42,9 @@ HERMES_HOME="/home/jiddy/.hermes"
 UV_BIN="/home/jiddy/.local/bin/uv"
 GATEWAY_UNIT="hermes-gateway.service"
 MARKER="$HERMES_HOME/cron/sync_fork_restart_state.json"
-RESTART_LOG="/tmp/hermes-sync-fork-restart-async.log"
-PULL_LOG="/tmp/hermes-sync-fork-pull.log"
+LOG_DIR="$HERMES_HOME/logs"
+RESTART_LOG="$LOG_DIR/sync-fork-restart-async.log"
+PULL_LOG="$LOG_DIR/sync-fork-pull.log"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./sync-fork-common.sh
@@ -56,6 +57,8 @@ fail() {
 }
 
 trap 'fail "unexpected error at line $LINENO"' ERR
+
+mkdir -p "$LOG_DIR" || fail "cannot create log directory $LOG_DIR"
 
 cd "$REPO_DIR" || fail "cannot cd into $REPO_DIR"
 
