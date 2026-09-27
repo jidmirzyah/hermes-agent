@@ -43,8 +43,8 @@ def checked_store(tmp_path, monkeypatch, served):
     checks = []
     real_check = engine.check
 
-    def counted_check():
-        problems = real_check()
+    def counted_check(**kwargs):
+        problems = real_check(**kwargs)
         checks.append(problems)
         return problems
 

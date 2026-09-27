@@ -15,7 +15,6 @@ test('desktop development composition reuses prepared icon pixels instead of pro
   put(join(input.icons, 'apps/desktop/assets/icon.ico'), 'prepared packaging icon')
   const commands = []
   buildSourceDesktop({ source: input.source, icons: input.icons,
-    generate: () => { throw new Error('prepared icons must not regenerate') },
     run: (command, args) => commands.push([command, ...args]),
   })
   expect(readFileSync(join(input.source, 'apps/desktop/assets/icon.ico'), 'utf8')).toBe('prepared packaging icon')

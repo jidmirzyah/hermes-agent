@@ -221,7 +221,9 @@ On ARM64, PM prepares Visual Studio C++ tools, Clang, native Rust, and static
 OpenSSL development libraries before every dependency build from a checkout:
 setup, `activate.ps1`, `install.ps1`, `hermes update`, and repair alike. It
 reuses existing installations and installs missing prerequisites. Missing
-Visual Studio components require an Administrator PowerShell. OpenSSL uses
+Visual Studio components need administrator rights: an interactive install
+asks through a UAC prompt, while CI, ssh and scheduled runs need an
+Administrator PowerShell. OpenSSL uses
 vcpkg's `arm64-windows-static-md` triplet. A damaged shared installation
 produces a repair error, not automatic deletion. Compiler and OpenSSL
 environment variables apply only to PM's dependency build, never to your shell.

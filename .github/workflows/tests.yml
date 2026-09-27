@@ -49,7 +49,7 @@ jobs:
       - name: Set up locked Python and test dependencies
         uses: ./.github/actions/setup-pm
         with:
-          extras: '["all", "anthropic", "bedrock", "mistral", "fal", "modal", "daytona", "hindsight", "parallel-web"]'
+          extras: '["all", "anthropic", "bedrock", "mistral", "fal", "modal", "daytona", "parallel-web"]'
           test-environment: 'true'
           prune-python-cache: true
 
@@ -148,7 +148,7 @@ jobs:
         uses: ./.github/actions/setup-pm
         with:
           toolchain: all
-          extras: '["all", "anthropic", "bedrock", "mistral", "fal", "modal", "daytona", "hindsight", "parallel-web"]'
+          extras: '["all", "anthropic", "bedrock", "mistral", "fal", "modal", "daytona", "parallel-web"]'
           test-environment: 'true'
           prune-python-cache: true
 
@@ -201,8 +201,9 @@ jobs:
           # 32 files at once the hosted run starved live children before their
           # ready frames (empty stderr, still alive) and hit 60–120s deadlines
           # across unrelated SQLite, tenancy, provider and terminal suites.
-          # Bound the trees, not the child readiness/turn timeouts.
-          HERMES_TEST_WORKERS: "4"
+          # Bound the trees, not the child readiness/turn timeouts. At 4 the
+          # PTY turn and serve-SIGTERM deadlines still starved intermittently.
+          HERMES_TEST_WORKERS: "3"
           # Multi-process episodes (torture chamber, compaction kill -9,
           # gateway liveness, delivery exactly-once through a real gateway,
           # the cron virtual-clock soak) legitimately run past the 300 s default.
@@ -314,6 +315,9 @@ jobs:
           source .venv/bin/activate
           scripts/run_tests.sh --include-integration tests/e2e/core/upgrade
         env:
+          # Each file drives real installs/updaters (process trees plus uv and
+          # git I/O); cpu_count of them at once starves their deadlines.
+          HERMES_TEST_WORKERS: "4"
           HERMES_TEST_FILE_TIMEOUT: "3000"
           OPENROUTER_API_KEY: ""
           OPENAI_API_KEY: ""

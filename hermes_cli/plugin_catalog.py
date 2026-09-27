@@ -32,6 +32,8 @@ CATALOG_TIERS = ("official", "community")
 CATALOG_CATEGORIES = ("desktop", "memory", "platform", "web", "tools", "voice", "automation", "models", "general")
 LIVE_CATALOG_URL = "https://hermes-agent.nousresearch.com/docs/api/plugin-catalog.json"
 LIVE_CATALOG_TTL_SECONDS = 6 * 60 * 60
+# Offline pins expire, but cached removals remain a permanent kill list.
+LIVE_CATALOG_MAX_STALE_SECONDS = 24 * 60 * 60
 LIVE_CATALOG_FAILURE_TTL_SECONDS = 60.0
 _REQUEST_TIMEOUT = 5.0
 _MAX_LIVE_BYTES = 2 * 1024 * 1024
@@ -285,9 +287,17 @@ _live_fetch_failed_until = 0.0
 
 
 def _stale_live_cache(cache: Path) -> Optional[Dict[str, Any]]:
-    """A previously fetched copy still beats the in-tree one when the network is down."""
+    """A previously fetched copy still beats the in-tree one when the network is down — for
+    :data:`LIVE_CATALOG_MAX_STALE_SECONDS`. Past that its pins may trail the checkout's own catalog
+    (a 90-day-old cache outranked a freshly updated in-tree pin), so the entries are dropped and the
+    caller falls back to in-tree; the removals are kept."""
     try:
-        return json.loads(cache.read_text(encoding="utf-8-sig")) if cache.is_file() else None
+        if not cache.is_file():
+            return None
+        data = json.loads(cache.read_text(encoding="utf-8-sig"))
+        if time.time() - cache.stat().st_mtime > LIVE_CATALOG_MAX_STALE_SECONDS:
+            data = {**data, "entries": []}
+        return data
     except Exception:
         return None
 
@@ -325,6 +335,60 @@ def fetch_live_catalog(*, force: bool = False) -> Optional[Dict[str, Any]]:
         logger.debug("Plugin catalog: live fetch failed: %s", exc)
         _live_fetch_failed_until = time.time() + LIVE_CATALOG_FAILURE_TTL_SECONDS
         return _stale_live_cache(cache)
+
+
+_in_tree_catalog_time: Optional[float] = -1.0  # -1 = not resolved yet; None = no git checkout
+
+
+def in_tree_catalog_time() -> Optional[float]:
+    """Commit time (epoch) of the last change to this checkout's ``plugin-catalog/``, or ``None`` when
+    the install is not a git checkout (a release/pip install cannot be newer than the published doc).
+    Resolved once per process."""
+    global _in_tree_catalog_time
+    if _in_tree_catalog_time != -1.0:
+        return _in_tree_catalog_time
+    root = get_catalog_dir().parent
+    resolved: Optional[float] = None
+    if (root / ".git").exists():
+        try:
+            import subprocess
+            out = subprocess.run(["git", "-C", str(root), "log", "-1", "--format=%ct", "--", "plugin-catalog"],
+                                 capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10, stdin=subprocess.DEVNULL)
+            resolved = float(out.stdout.strip()) if out.returncode == 0 and out.stdout.strip() else None
+        except Exception as exc:
+            logger.debug("Plugin catalog: could not date the in-tree catalog: %s", exc)
+    _in_tree_catalog_time = resolved
+    return resolved
+
+
+def _live_generated_time(data: Dict[str, Any]) -> Optional[float]:
+    raw = data.get("generated_at")
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        from datetime import datetime, timezone
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        return (parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)).timestamp()
+    except ValueError:
+        return None
+
+
+def _prefer_in_tree_entry(tree: PluginCatalogEntry, live: PluginCatalogEntry, tree_is_newer: Optional[bool]) -> bool:
+    """For one entry present in both sources with a different pin: the newer catalog wins. Newer is
+    decided by the checkout's catalog commit time vs the doc's ``generated_at`` when both resolve;
+    otherwise by the entries' ``version`` labels when both parse; otherwise the live doc wins (a release
+    install's in-tree copy is frozen at release time)."""
+    if tree.sha == live.sha:
+        return False
+    if tree_is_newer is not None:
+        return tree_is_newer
+    if tree.version and live.version:
+        try:
+            from packaging.version import Version
+            return Version(tree.version) > Version(live.version)
+        except Exception:
+            return False
+    return False
 
 
 def load_catalog_live() -> List[PluginCatalogEntry]:

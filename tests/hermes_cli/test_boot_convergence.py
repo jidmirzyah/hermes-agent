@@ -32,8 +32,8 @@ def test_each_start_checks_pm_once_before_dispatch(surface, tmp_path, monkeypatc
     checked = []
     real_check = pm.check
 
-    def check():
-        problems = real_check()
+    def check(**kwargs):
+        problems = real_check(**kwargs)
         assert problems
         checked.append(problems)
         return problems

@@ -203,7 +203,7 @@ def ensure(name, *, base_env=None, explicit=False, progress=None, pause_event=No
 
 
 def sync_venv(extras=None, *, explicit=False, plugins: PluginInput | None = None, repair=False,
-              project_root: Path | None = None) -> None:
+              project_root: Path | None = None, evict_incompatible_plugins: bool = False) -> None:
     from pm.environments import running_from_selected_environment
 
     if extras and not explicit and not repair and not running_from_selected_environment(
@@ -225,9 +225,33 @@ def sync_venv(extras=None, *, explicit=False, plugins: PluginInput | None = None
     foreign = project_root is not None and Path(project_root).resolve() != paths.repo_root().resolve()
     if is_runtime() and not foreign:
         from pm.install import sync_venv as direct
-        return direct(extras, explicit=explicit, plugins=plugins, repair=repair)
+        return direct(extras, explicit=explicit, plugins=plugins, repair=repair,
+                      evict_incompatible_plugins=evict_incompatible_plugins)
     _request("sync_venv", {"extras": extras, "explicit": explicit, "repair": repair,
-                          "plugins": plugin_inputs.encode(plugins)}, project_root=project_root)
+                          "plugins": plugin_inputs.encode(plugins),
+                          "evict_incompatible_plugins": evict_incompatible_plugins}, project_root=project_root)
+
+
+def ensure_tools_for_sync() -> None:
+    """Publish every required tool in this tree's lockfile, then put them on PATH.
+
+    Updates call this before the venv sync: the sync only pulls uv/python in
+    through its own dependency, so a bumped ripgrep/ffmpeg/node pin was never
+    installed and activation skipped the managed tool dirs on every start.
+    Publishing tools first also lets native builds resolve compilers and git
+    from the pinned store instead of the host (as `hermes pm install` does).
+    An update is an explicit user action, so the lazy-install policy does not
+    gate it; a failed download fails the update.
+    """
+    from pm.install import activate
+    from pm.lock import Lockfile
+    from pm.registry import tool_roots
+
+    for name in tool_roots(Lockfile(paths.lockfile_path()).names()):
+        ensure(name, explicit=True)
+    problems = activate(allow_incomplete=True)
+    if problems:
+        raise RuntimeError(f"tools not on PATH before venv sync: {'; '.join(problems)}")
 
 
 def stage_only(name, target, *, progress=None) -> Path:

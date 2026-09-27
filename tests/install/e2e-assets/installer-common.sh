@@ -74,10 +74,15 @@ run_source_installer() {
   text="$(git -C "$repo" show "$ref:scripts/install.sh")" || return
   git -C "$repo" show "$ref:scripts/install.sh" > "$script" || return
   local flags=(--skip-setup)
-  # Rejection messages also mention --skip-browser. Only pass it when this
-  # version's public help advertises the flag as supported.
+  # Historical (pre-PM) installers ran their own Playwright/npm browser
+  # install, which is slow and can prompt for sudo; skip it there. A PM
+  # installer (it enters `pm.cli`) gets no flag: its default install carries
+  # agent-browser + Chromium, which is what users get, so the leg exercises it.
+  # Rejection messages also mention --skip-browser, so trust only the help.
   help_text="$(bash "$script" --help < /dev/null 2>/dev/null)" || help_text=""
-  if grep -qF -- --skip-browser <<< "$help_text"; then flags+=(--skip-browser); fi
+  if grep -qF -- --skip-browser <<< "$help_text" && ! grep -qF 'pm.cli' <<< "$text"; then
+    flags+=(--skip-browser)
+  fi
   if [ "$desktop" = desktop ]; then
     grep -qF -- --include-desktop <<< "$text" \
       || { fail "ref $ref does not support --include-desktop; this leg cannot mean what it claims"; return 1; }

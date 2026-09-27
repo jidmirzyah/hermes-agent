@@ -36,13 +36,9 @@ She renders in front of the border, clipped only to the outer rounded silhouette
 Only nodes near her bottom edge extend to the border; the fitted face and hair stay fixed.
 Standalone wordmarks remain centered and have no border.
 
-GENERATED OUTPUTS ARE NOT COMMITTED. Everything this script writes is
-gitignored and regenerated on demand by the consuming pipelines (website
-prebuild, desktop prebuild/predev, installer prebuild, web prebuild — via
-scripts/generate-icons.mjs). The freshness lane (icons-freshness-check.yml)
-runs --check, which regenerates in memory and asserts structural invariants
-(sizes, transparency, container frame sets) — there are no committed bytes to
-byte-compare against.
+GENERATED OUTPUTS ARE COMMITTED. Regular builds and installs consume them and
+never render; flavored release bundles (canary/commit) render to a product dir.
+icons-freshness-check.yml regenerates, runs --check, and fails on any diff.
 
 Rendering: resvg (resvg-py) for SVG -> PNG fidelity at every size.
 Containers: Pillow for multi-size .ico and .icns.
