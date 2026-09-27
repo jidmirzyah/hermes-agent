@@ -994,6 +994,9 @@ def _ensure_current_event_loop(request):
 
 _LIVE_SYSTEM_GUARD_BYPASS_MARK = "live_system_guard_bypass"
 
+# Tests may designate a temporary repo to exercise the real guard safely.
+_LIVE_GUARD_PROTECTED_GIT_ROOTS = (PROJECT_ROOT,)
+
 
 # ── Import-time destructive-git guard (#git-mutation, 2026-08-12) ──────────
 #
@@ -1375,72 +1378,8 @@ def pytest_unconfigure(config):  # noqa: D401 — pytest hook
     _remove_relocated_basetemp(config)
 
 
+
 @pytest.hookimpl(trylast=True)  # after _pytest.tmpdir has built config._tmp_path_factory
-def _platform_machine() -> str:
-    import platform as _platform
-
-    machine = (_platform.machine() or "").lower()
-    return {"amd64": "x86_64", "x86": "x86_64", "aarch64": "arm64"}.get(machine, machine)
-
-
-def _host_matches_platforms(conditions, arch=None, arch_negate=False):
-    """Evaluate a platforms() marker payload against the running host.
-
-    Returns ``(ok, skip_reason)``.
-    """
-    host = sys.platform.lower()
-    machine = _platform_machine()
-    specs = [str(c).strip().lower() for c in conditions if str(c).strip()]
-    if not specs:
-        return True, "platforms() with no specs matches every host"
-    for spec in specs:
-        negate = spec.startswith("not ")
-        leaf = spec[4:].strip() if negate else spec
-        if leaf not in _PLATFORM_ALIASES:
-            return False, f"platforms(): unknown spec {spec!r}"
-        wanted = _PLATFORM_ALIASES[leaf]
-        matched = (not wanted) or host in wanted
-        if negate:
-            matched = not matched
-        if matched:
-            break
-    else:
-        return False, f"platforms({', '.join(specs)}); host is {sys.platform}"
-    if arch is not None:
-        arch_l = str(arch).lower()
-        arch_hit = machine == arch_l or (
-            arch_l in {"arm64", "aarch64"} and machine == "arm64"
-        )
-        if arch_negate:
-            arch_hit = not arch_hit
-        if not arch_hit:
-            return False, (
-                f"platforms(arch={'not ' if arch_negate else ''}{arch}); "
-                f"host machine is {machine or 'unknown'}"
-            )
-    return True, ""
-
-
-def _platforms_gate_reason(item):
-    """Skip reason when the item's platforms() gating excludes this host."""
-    for mark in item.iter_markers("platforms"):
-        kwargs = dict(mark.kwargs)
-        conds = list(mark.args)
-        ok, reason = _host_matches_platforms(
-            conds,
-            arch=kwargs.pop("arch", None),
-            arch_negate=kwargs.pop("arch_negate", False),
-        )
-        if kwargs:
-            raise pytest.UsageError(
-                f"{item.nodeid}: platforms() got unexpected keyword(s) "
-                f"{sorted(kwargs)} — valid: arch, arch_negate"
-            )
-        if not ok:
-            return reason
-    return None
-
-
 def pytest_configure(config):  # noqa: D401 — pytest hook
     """Register markers used by hermetic conftest."""
     refusal = _live_checkout_refusal(PROJECT_ROOT, Path.home(), os.environ)
@@ -1906,14 +1845,14 @@ def _live_system_guard(request, monkeypatch):
         # webhook port. 2026-09-03: 39 such orphans lived 6 days after a
         # sibling refactor moved the spawn seam and left tests patching the
         # facade. The canonical matcher, never an argv substring.
-        from gateway.status import _gateway_command_subcommand
+        from gateway.status import gateway_spawn_intent_subcommand
         # A gateway launched INSIDE a container (`docker exec … hermes gateway start`) cannot
         # reach the host's systemd unit or webhook port; tests/docker/ exists to exercise it.
         in_container = _first_token_basename(cmd_str) in _CONTAINER_RUNTIMES
         if (
             not lookalike_ok
             and not in_container
-            and _gateway_command_subcommand(cmd_str) in ("run", "start", "restart")
+            and gateway_spawn_intent_subcommand(cmd_str) in ("run", "start", "restart")
         ):
             raise RuntimeError(
                 f"tests/conftest.py live-system guard: blocked "
