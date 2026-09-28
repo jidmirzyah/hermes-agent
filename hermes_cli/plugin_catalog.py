@@ -14,6 +14,7 @@ cached copy regardless of age, then falls back to the in-tree copy when no valid
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import re
@@ -87,7 +88,10 @@ class PluginCatalogEntry:
     screenshots: List[str] = field(default_factory=list)  # GitHub-hosted https URLs; gallery on /docs/plugins/<name>
     readme: bool = False         # docs site renders the README from the pinned commit on the entry's page
     platforms: List[str] = field(default_factory=list)  # empty = all OSes
+    title: str = ""              # human name ("NVIDIA App"); empty = derived from ``name``
+    onboarding: bool = False     # curated: offered on the desktop onboarding card
     capabilities: CatalogCapabilities = field(default_factory=CatalogCapabilities)
+    known_issues: List[str] = field(default_factory=list)  # #124058: informational; drivers come from plugin-catalog/*.yaml
 
     @property
     def install_identifier(self) -> str:
@@ -102,11 +106,12 @@ class PluginCatalogEntry:
             "requires_hermes": self.requires_hermes,
             "subdir": self.subdir, "docs_url": self.docs_url, "version": self.version, "image": self.image,
             "screenshots": list(self.screenshots), "readme": self.readme,
-            "platforms": list(self.platforms),
+            "platforms": list(self.platforms), "title": self.title, "onboarding": self.onboarding,
             "capabilities": {
                 "provides_tools": list(caps.provides_tools), "provides_hooks": list(caps.provides_hooks),
                 "provides_middleware": list(caps.provides_middleware), "requires_env": list(caps.requires_env),
             },
+            "known_issues": list(self.known_issues),
         }
 
 
@@ -163,6 +168,8 @@ def entry_from_mapping(data: Any, label: str) -> Optional[PluginCatalogEntry]:
         subdir=str(data.get("subdir") or "").strip(), docs_url=str(data.get("docs_url") or "").strip(),
         version=version, image=image, screenshots=screenshots, readme=data.get("readme") is not False,
         platforms=_str_list(data.get("platforms")),
+        title=str(data.get("title") or "").strip(), onboarding=data.get("onboarding") is True,
+        known_issues=_str_list(data.get("known_issues")),
         capabilities=CatalogCapabilities(
             provides_tools=_str_list(caps.get("provides_tools")), provides_hooks=_str_list(caps.get("provides_hooks")),
             provides_middleware=_str_list(caps.get("provides_middleware")),
@@ -232,8 +239,26 @@ def search_catalog(query: str) -> List[PluginCatalogEntry]:
 
 # ── Removed / blocklist ──────────────────────────────────────────────────────
 
+_SCP_URL_RE = re.compile(r"^(?:[^@/\s]+@)?([^:/\s]+):(?!//)(.+)$")  # git@host:owner/repo
+
+
 def _normalize_repo(url: str) -> str:
-    return url.strip().rstrip("/").removesuffix(".git").lower()
+    """Canonical ``host/path`` for a repo URL: scheme, user, ``www.``, ``.git`` and trailing slashes are
+    spelling, not identity — the kill list must match ``git@github.com:Evil/Bad.git`` when it names
+    ``https://github.com/evil/bad``."""
+    from urllib.parse import urlsplit
+    text = url.strip()
+    scp = _SCP_URL_RE.match(text)
+    if scp:
+        host, path = scp.group(1), scp.group(2)
+    elif "://" in text:
+        parts = urlsplit(text)
+        host, path = parts.hostname or "", parts.path
+    else:
+        host, path = "", text
+    host = host.lower().removeprefix("www.")
+    path = path.strip("/").removesuffix(".git").rstrip("/").lower()
+    return f"{host}/{path}" if host else path
 
 
 def find_removed(name_or_repo: str, catalog_dir: Optional[Path] = None) -> Optional[RemovedEntry]:
@@ -255,6 +280,13 @@ def resolved_removed_entries() -> List[RemovedEntry]:
     — e.g. a plugins-hub rebuild annotating every installed plugin — resolve the list once instead
     of paying a live-catalog fetch per candidate."""
     return load_removed_list() + live_removed_list()
+
+
+def cached_removed_entries() -> List[RemovedEntry]:
+    """In-tree list UNION the last fetched live copy, with NO network round-trip — for the load-time and
+    ``enable`` checks that run in every process and must never block on a dead catalog host."""
+    cached = _stale_live_cache(_live_cache_path()) or {}
+    return load_removed_list() + _removed_from_list(cached.get("removed"))
 
 
 def match_removed(
@@ -336,6 +368,7 @@ def fetch_live_catalog(*, force: bool = False) -> Optional[Dict[str, Any]]:
     try:
         import httpx
         from hermes_constants import mkdir_under_hermes_home
+        from utils import atomic_write_text
 
         resp = httpx.get(LIVE_CATALOG_URL, timeout=_REQUEST_TIMEOUT, follow_redirects=True)
         resp.raise_for_status()
@@ -345,7 +378,9 @@ def fetch_live_catalog(*, force: bool = False) -> Optional[Dict[str, Any]]:
         if not isinstance(data, dict) or not isinstance(data.get("entries"), list):
             raise ValueError("unexpected live catalog payload")
         mkdir_under_hermes_home(cache.parent)
-        cache.write_text(json.dumps(data), encoding="utf-8")
+        # Atomic: a concurrent reader (gateway, TUI, a second CLI) must never see a half-written
+        # document, which would read as a fetch failure and start its own 60 s failure window.
+        atomic_write_text(cache, json.dumps(data), tmp_prefix=f"{cache.name}.tmp-")
         return data
     except Exception as exc:
         logger.debug("Plugin catalog: live fetch failed: %s", exc)
@@ -408,14 +443,37 @@ def _prefer_in_tree_entry(tree: PluginCatalogEntry, live: PluginCatalogEntry, tr
 
 
 def load_catalog_live() -> List[PluginCatalogEntry]:
-    """Entries from the live (or cached) catalog, else the in-tree catalog."""
+    """Entries from the live (or cached) catalog, else the in-tree catalog. When both name an entry at
+    different pins the NEWER source supplies it — right after ``hermes update`` bumps an in-tree pin,
+    a cache fetched before the bump must not re-install the old one (see :func:`_prefer_in_tree_entry`)."""
     data = fetch_live_catalog()
-    if data is not None:
-        entries = [e for i, raw in enumerate(data["entries"])
-                   if (e := entry_from_mapping(raw, f"{LIVE_CATALOG_URL}#{i}")) is not None]
-        if entries:
-            return entries
-    return load_catalog()
+    if data is None:
+        return load_catalog()
+    entries = [e for i, raw in enumerate(data["entries"])
+               if (e := entry_from_mapping(raw, f"{LIVE_CATALOG_URL}#{i}")) is not None]
+    if not entries:
+        return load_catalog()
+    in_tree = {e.name: e for e in load_catalog()}
+    live_t, tree_t = _live_generated_time(data), in_tree_catalog_time()
+    tree_is_newer = (tree_t > live_t) if (live_t is not None and tree_t is not None) else None
+    raw_by_name = {str(raw.get("name")): raw for raw in data["entries"] if isinstance(raw, dict)}
+    return [in_tree[e.name] if e.name in in_tree and _prefer_in_tree_entry(in_tree[e.name], e, tree_is_newer)
+            else _with_curated_fields(e, in_tree.get(e.name), raw_by_name.get(e.name) or {})
+            for e in entries]
+
+
+# Curated display fields a published doc older than the field does not carry. ``generated_at`` is the
+# docs build time, not the content time, so a rebuild of an older catalog outranks a checkout that added
+# the field; a doc that has the key (even ``false``) decides.
+_CURATED_FIELDS = ("onboarding", "title")
+
+
+def _with_curated_fields(live: PluginCatalogEntry, tree: Optional[PluginCatalogEntry], raw: Dict[str, Any]
+                         ) -> PluginCatalogEntry:
+    if tree is None or tree.sha != live.sha:
+        return live
+    missing = {key: getattr(tree, key) for key in _CURATED_FIELDS if key not in raw}
+    return dataclasses.replace(live, **missing) if missing else live
 
 
 def live_removed_list() -> List[RemovedEntry]:
@@ -443,4 +501,9 @@ def entry_capability_summary(entry: PluginCatalogEntry) -> str:
         bits.append(f"Platforms: {', '.join(entry.platforms)}.")
     if entry.requires_hermes:
         bits.append(f"Requires Hermes {entry.requires_hermes}.")
+    if entry.known_issues:
+        # #124058: informational — the catalog documents traps (unsupported
+        # install-method/mode combinations); surface them at install prompts
+        # without blocking the install.
+        bits.append(f"Known issues: {'; '.join(entry.known_issues)}.")
     return " ".join(bits)
