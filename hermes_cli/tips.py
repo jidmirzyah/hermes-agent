@@ -1,6 +1,15 @@
-"""Random tips shown at CLI session start to help users discover features."""
+"""Random tips shown at CLI session start to help users discover features.
+
+The tip text lives in the i18n catalog (``locales/<lang>.yaml`` under ``tips.tNNN`` and
+``tips.placeholder.pNN``), so language packs translate it like every other user-facing string.
+The English catalog is the source of truth for HOW MANY tips exist (key parity is enforced by
+tests/agent/test_i18n.py); the pickers resolve each key through ``t()`` for the active language.
+"""
+
+from __future__ import annotations
 
 import random
+import threading
 
 # One-liners covering slash commands, CLI flags, config, keybindings, tools, gateway, skills.
 TIPS = [
@@ -429,26 +438,15 @@ TIPS = [
 
 
 def get_random_tip(exclude_recent: int = 0) -> str:
-    """Return a random tip string."""
-    return random.choice(TIPS)
-
-
-# Task-oriented example prompts for the empty composer. Kept generic — Hermes is
-# not a coding-only agent, so they must fit any project or none.
-COMPOSER_PLACEHOLDERS = [
-    "Ask anything, or type / for commands…",
-    "Summarize what's in this folder",
-    "Draft a reply to the last email in my inbox",
-    "Plan a feature, then build it step by step",
-    "Find and fix a failing test",
-    "Research this topic and write me a brief",
-    "What changed in this repo recently?",
-    "Turn these notes into a to-do list",
-    "Explain this error and how to fix it",
-    "Set a reminder or schedule a recurring task",
-    "Type / to browse commands, or Ctrl+P for the palette"]
+    """Return a random tip string in the active language ("" if the catalog has none)."""
+    keys = tip_keys()
+    return t(random.choice(keys)) if keys else ""
 
 
 def get_random_composer_placeholder() -> str:
-    """Return a rotating task-oriented placeholder for the empty composer."""
-    return random.choice(COMPOSER_PLACEHOLDERS)
+    """Return a rotating task-oriented placeholder for the empty composer, in the active language.
+
+    Kept generic — Hermes is not a coding-only agent, so the prompts must fit any project or none.
+    """
+    keys = composer_placeholder_keys()
+    return t(random.choice(keys)) if keys else ""
