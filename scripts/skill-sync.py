@@ -64,7 +64,7 @@ def load_exclusions() -> set[str]:
 def find_skill_dirs(root: Path) -> dict[str, Path]:
     out = {}
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d != "__pycache__"]
+        dirnames[:] = [d for d in dirnames if d not in ("__pycache__", ".venv")]
         if "SKILL.md" in filenames:
             rel = os.path.relpath(dirpath, root)
             out[rel] = Path(dirpath)
@@ -74,7 +74,7 @@ def find_skill_dirs(root: Path) -> dict[str, Path]:
 def all_files(base: Path) -> dict[str, Path]:
     files = {}
     for dirpath, dirnames, filenames in os.walk(base):
-        dirnames[:] = [d for d in dirnames if d != "__pycache__"]
+        dirnames[:] = [d for d in dirnames if d not in ("__pycache__", ".venv")]
         for fn in filenames:
             if fn.endswith(".pyc"):
                 continue
