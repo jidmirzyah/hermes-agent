@@ -216,7 +216,15 @@ def test_approve_refuses_staged_remove_whose_entry_changed(hermes_home, shape):
     from tools import write_approval as wa
     store, pid = _review_stages_remove(shape)
     newer = "Staging DB: pg-staging-3 (migrated 2026-09-20, creds in vault 'stg')"
-    assert json.loads(memory_tool(action="replace", old_text="pg-staging-2", content=newer, store=store))["success"]
+    # This replace simulates a write that already landed elsewhere (the live agent
+    # editing the entry directly), independent of this test's own approval flow --
+    # so it must apply immediately rather than itself stage under the gate's
+    # (fork-only) default-on setting.
+    _set_approval("memory", False)
+    try:
+        assert json.loads(memory_tool(action="replace", old_text="pg-staging-2", content=newer, store=store))["success"]
+    finally:
+        _set_approval("memory", True)
 
     out = handle_pending_subcommand(wa.MEMORY, ["approve", pid], memory_store=load_on_disk_store())
 
