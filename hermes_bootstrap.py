@@ -512,7 +512,7 @@ if _legacy_post_swap is not None:
 
 from hermes_cli._parser import command_argv
 from hermes_cli._early_recovery import recover_if_needed
-from pm.environments import activate_dependencies
+from pm.environments import activate_dependencies, install_state_permission_message
 
 # Repair needs only stdlib. Do not activate a damaged dependency generation to reach it.
 _pm_repair = command_argv(sys.argv[1:])[:2] == ["pm", "repair"]
@@ -536,16 +536,23 @@ if not _pm_repair:
                 raise SystemExit(subprocess.call(_command))
             os.execv(str(_launch_python), _command)
     except Exception as exc:
-        print(
-            "hermes: source-update completion failed: "
-            f"{exc}; running with the previous dependencies - "
-            "run `hermes update` to finish it",
-            file=sys.stderr,
-        )
-    recover_if_needed(_root)
+        if isinstance(exc, PermissionError) and (message := install_state_permission_message(_root, exc)):
+            print(f"hermes: {message}", file=sys.stderr)
+            raise SystemExit(1) from None
+        # Degrade, never brick the CLI: the previous dependency generation is still selected
+        # (a failed sync commits nothing), so an offline or half-finished update leaves a
+        # usable Hermes plus a warning. Activation below is the real gate — a tree whose
+        # dependencies cannot load still exits with the repair remedy.
+        print(f"hermes: source-update completion failed: {exc}; "
+              "running with the previous dependencies — run `hermes update` to finish it",
+              file=sys.stderr)
     try:
+        recover_if_needed(_root)
         activate_dependencies(_root)
     except (RuntimeError, OSError) as exc:
+        if isinstance(exc, PermissionError) and (message := install_state_permission_message(_root, exc)):
+            print(f"hermes: {message}", file=sys.stderr)
+            raise SystemExit(1) from None
         if command_argv(sys.argv[1:])[:1] != ["pm"]:
             print(f"hermes: {exc}; run `hermes pm repair`", file=sys.stderr)
             raise SystemExit(1) from None

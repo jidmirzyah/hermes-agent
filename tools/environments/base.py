@@ -736,7 +736,23 @@ class BaseEnvironment(ABC):
         """Pass the command through unchanged (see _transform_sudo_command)."""
         from tools.terminal_tool import _transform_sudo_command
 
-        return _transform_sudo_command(command)
+        return _transform_sudo_command(command, sudo_nopasswd_check=self._sudo_nopasswd_works)
+
+    _SUDO_PROBE_TIMEOUT_S = 3
+    # Fail-closed default for backends that don't set this (only local.py currently does):
+    # an unknown probe capability means "assume a password is needed", not a crash.
+    _sudo_nopasswd_probe_supported = False
+
+    def _sudo_nopasswd_works(self) -> bool:
+        """``sudo -n true`` inside THIS backend (host sudo state must not leak into a sandbox).
+        Fails closed: any error or a timed-out probe means "assume a password is needed"."""
+        if not self._sudo_nopasswd_probe_supported:
+            return False
+        try:
+            proc = self._run_bash("sudo -n true", timeout=self._SUDO_PROBE_TIMEOUT_S)
+            return self._wait_for_process(proc, timeout=self._SUDO_PROBE_TIMEOUT_S).get("returncode") == 0
+        except Exception:
+            return False
 
 
 # ---- BEGIN PLUGIN-COMPAT (revert-scheduled; see COMPAT_MANIFEST.md) ----
