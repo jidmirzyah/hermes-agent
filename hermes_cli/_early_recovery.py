@@ -176,6 +176,21 @@ _GIT_OPERATION_IN_PROGRESS = ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "
 _REGULAR_FILE_MODES = ("100644", "100755")
 
 
+def git_operation_in_progress(root: Path) -> str | None:
+    """Return the active Git operation currently controlling *root*, if any."""
+    git_dir = _git_dir(root)
+    for marker in _GIT_OPERATION_IN_PROGRESS:
+        state = git_dir / marker
+        if not state.exists():
+            continue
+        if marker == "rebase-apply":
+            return "am" if (state / "applying").exists() else "rebase"
+        if marker == "rebase-merge":
+            return "rebase"
+        return marker.removesuffix("_HEAD").lower().replace("_", "-")
+    return None
+
+
 def _git_dir(root: Path) -> Path:
     """``root``'s git dir: ``.git`` itself, or where a linked worktree's ``.git`` file points."""
     dot_git = root / ".git"
@@ -570,6 +585,10 @@ def recover_if_needed(project_root: Path | None = None, argv: list[str] | None =
         return True
     except Exception as exc:
         import json
+        from pm.environments import install_state_permission_message
+
+        if isinstance(exc, PermissionError) and install_state_permission_message(root, exc):
+            raise  # The bootstrap or PM CLI reports the access error once.
 
         for marker in markers:
             try:
