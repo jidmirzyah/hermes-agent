@@ -42,6 +42,12 @@ import yaml
 REPO_SKILLS = Path("/home/jiddy/.hermes/hermes-agent/skills")
 LIVE_SKILLS = Path("/home/jiddy/.hermes/skills")
 EXCLUSION_FILE = Path("/home/jiddy/.hermes/cron/skill_sync_exclusions.txt")
+# Full itemized detail for the three routine, potentially-large categories below
+# (updated/orphaned/never_installed) goes here instead of stdout -- a big upstream
+# sync can touch dozens of skill files, and Telegram auto-splits any message over
+# ~4000 chars into that many separate notifications. Overwritten every run, same
+# ephemeral pattern as hermes-sync-fork's own PULL_LOG; not delivered anywhere.
+DETAIL_LOG = Path("/tmp/hermes-skill-sync-detail.log")
 
 
 def load_exclusions() -> set[str]:
@@ -213,25 +219,31 @@ def main() -> int:
     if not updated and not orphaned and not never_installed:
         return 0  # nothing to do, nothing to say
 
+    detail_sections: list[str] = []
     if updated:
-        print(f"hermes-skill-sync: updated {len(updated)} file(s):")
-        for u in updated:
-            print(f"  - {u}")
+        print(f"hermes-skill-sync: updated {len(updated)} file(s) -- full list: {DETAIL_LOG}")
+        detail_sections.append("updated file(s):\n" + "\n".join(f"  - {u}" for u in updated))
     if orphaned:
         print(
-            f"hermes-skill-sync: {len(orphaned)} orphaned live file(s) with no "
-            f"repo counterpart (NOT deleted -- review and decide manually):"
+            f"hermes-skill-sync: {len(orphaned)} orphaned live file(s) with no repo "
+            f"counterpart (NOT deleted -- review and decide manually) -- full list: {DETAIL_LOG}"
         )
-        for o in orphaned:
-            print(f"  - {o}")
+        detail_sections.append(
+            "orphaned live file(s) with no repo counterpart:\n"
+            + "\n".join(f"  - {o}" for o in orphaned)
+        )
     if never_installed:
         print(
-            f"hermes-skill-sync: {len(never_installed)} repo skill(s) never "
-            f"installed live at all (not auto-installed -- first-install is a "
-            f"decision, not a routine sync):"
+            f"hermes-skill-sync: {len(never_installed)} repo skill(s) never installed live "
+            f"(not auto-installed -- first-install is a decision, not a routine sync) -- "
+            f"full list: {DETAIL_LOG}"
         )
-        for n in never_installed:
-            print(f"  - {n}")
+        detail_sections.append(
+            "repo skill(s) never installed live:\n"
+            + "\n".join(f"  - {n}" for n in never_installed)
+        )
+    if detail_sections:
+        DETAIL_LOG.write_text("\n\n".join(detail_sections) + "\n", encoding="utf-8")
 
     return 0
 
