@@ -200,7 +200,21 @@ async def _generate_edge_tts(text: str, output_path: str, tts_config: Dict[str, 
     kwargs = {"voice": edge_config.get("voice", DEFAULT_EDGE_VOICE)}
     if speed != 1.0:
         kwargs["rate"] = f"{round((speed - 1.0) * 100):+d}%"
-    await edge_tts.Communicate(text, **kwargs).save(output_path)
+    try:
+        await edge_tts.Communicate(text, **kwargs).save(output_path)
+    except (ConnectionResetError, OSError):
+        # speech.platform.bing.com resets some hosts' IPv4 connections
+        # (observed on datacenter/cloud IP ranges) while IPv6 to the same
+        # endpoint succeeds. Retry once forcing IPv6 before giving up.
+        # Restored 2026-09-29: silently dropped by the 09-06 merge that moved
+        # this function from tools/tts_tool.py into this file (original fix:
+        # d2d91820ae, Aug 21).
+        import socket
+
+        import aiohttp
+
+        connector = aiohttp.TCPConnector(family=socket.AF_INET6)
+        await edge_tts.Communicate(text, connector=connector, **kwargs).save(output_path)
     return output_path
 
 
