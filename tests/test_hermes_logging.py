@@ -1,6 +1,7 @@
 """Tests for hermes_logging — centralized logging setup."""
 import importlib.util
 import io
+import json
 import logging
 import os
 import stat
@@ -12,6 +13,7 @@ from unittest.mock import patch
 import pytest
 
 import hermes_logging
+from hermes_logging import emit_event
 # Use whatever RotatingFileHandler class hermes_logging actually resolved so
 # the autouse fixture's isinstance checks (which strip rotating handlers
 # between tests) match the real handlers on every platform. hermes_logging
@@ -863,3 +865,35 @@ class TestRolloverPreservesLogOwnership:
         monkeypatch.setattr(os, "chown", _refuse)
         self._rolled_handler(log_path)
         assert log_path.exists()
+
+
+class TestEmitEvent:
+    """Regression coverage for emit_event()/events.jsonl.
+
+    _ensure_events_handler() had a stray positional argument (a leftover ``logging.getLogger()``
+    from before _add_rotating_handler's signature changed to path-only) that made every call to
+    emit_event() raise TypeError -- silently, because every real call site wraps emit_event() in
+    a bare ``except Exception: pass``. events.jsonl went dark for the whole system on 2026-09-16
+    and nothing noticed for weeks, because nothing tested this path. Restored 2026-09-29."""
+
+    def test_emit_event_writes_a_line_to_events_jsonl(self, hermes_home):
+        hermes_logging._reset_events_handler_state()
+        emit_event("diagnostic.test", subsystem="diagnostic", outcome="succeeded", detail="regression check")
+        # QueueListener.stop() drains the queue before returning, so this guarantees the async
+        # write has actually landed on disk before we read the file back.
+        hermes_logging._stop_queue_listener()
+        events_path = hermes_home / "logs" / "events.jsonl"
+        assert events_path.exists(), "emit_event() must create events.jsonl on first call"
+        lines = events_path.read_text(encoding="utf-8").strip().splitlines()
+        assert len(lines) == 1
+        record = json.loads(lines[0])
+        assert record["event"] == "diagnostic.test"
+        assert record["subsystem"] == "diagnostic"
+        assert record["outcome"] == "succeeded"
+        assert record["detail"] == "regression check"
+
+    def test_emit_event_never_raises(self, hermes_home):
+        """Every real call site relies on emit_event() itself being safe to call unguarded --
+        this is the behavior the bare except:pass call sites depend on staying true."""
+        hermes_logging._reset_events_handler_state()
+        emit_event("diagnostic.test", subsystem="diagnostic", outcome="succeeded")

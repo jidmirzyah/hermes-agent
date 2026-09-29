@@ -947,7 +947,6 @@ def _ensure_events_handler(max_bytes: int = _EVENTS_MAX_BYTES,
         log_dir.mkdir(parents=True, exist_ok=True)
 
         _add_rotating_handler(
-            logging.getLogger(),
             log_dir / "events.jsonl",
             level=logging.INFO,
             max_bytes=max_bytes,
