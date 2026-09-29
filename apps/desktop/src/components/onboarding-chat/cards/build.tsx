@@ -94,7 +94,6 @@ export function HandoffCard({ attrs, locked }: CardProps) {
   const plan = parseHandoffPlan(attrs.plan)
   const state = useStore($setupHandoff)
 
-
   const receipt = useMemo(() => {
     try {
       return {
@@ -118,7 +117,6 @@ export function HandoffCard({ attrs, locked }: CardProps) {
     void resolveSessionOwner(storedId)
       .then(owner => {
         assertSessionOwnerResolved(owner, { method: 'onboarding.handoff', sessionId: storedId })
-
 
         if (!cancelled) {
           requestSetupHandoff(task, brief, plan, {

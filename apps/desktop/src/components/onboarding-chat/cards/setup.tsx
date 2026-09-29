@@ -232,7 +232,6 @@ export function LayoutCard({ locked }: CardProps) {
     $chatLayoutPicked.set(true)
     setOnboardingAnswers({ layout: id })
 
-
     const preset = registry.getArea('layouts').find(contribution => contribution.id === id)
 
     if (!preset?.data) {
