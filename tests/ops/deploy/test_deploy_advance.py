@@ -106,18 +106,51 @@ def topology(tmp_path):
     }
 
 
+def _fake_systemd_run_bin(tmp_path: Path) -> Path:
+    """A stub `systemd-run` on PATH ahead of the real one, so a test that reaches the
+    restart-launch step can NEVER touch the real systemd session -- no environment-variable
+    correctness, no --setenv flag, no assumption about this script's own behavior is trusted to
+    keep that true. The stub only records its own argv (for asserting the real script called it
+    with the right --setenv values) and exits 0; it never executes the wrapped command at all, so
+    deploy-advance-restart-async.sh itself never runs during a test no matter what.
+
+    Real-incident context (2026-09-29): an earlier version of this test suite had no such stub,
+    trusted DEPLOY_* env vars to reach the detached restart step through systemd-run, and did
+    not -- systemd-run spawns its unit via the systemd --user manager, not as a forked child of
+    this process, so it never inherited this test's environment at all. Two of this file's own
+    happy-path tests restarted the REAL live hermes-gateway.service (and, once, re-synced its real
+    dependencies) before that was caught. This stub makes that class of incident structurally
+    impossible from this test file again, independent of whether deploy-advance.sh's own
+    --setenv fix (added the same day) is correct.
+    """
+    bin_dir = tmp_path / "fake_bin"
+    bin_dir.mkdir(exist_ok=True)
+    log_path = tmp_path / "fake_systemd_run_calls.log"
+    stub = bin_dir / "systemd-run"
+    stub.write_text(
+        "#!/bin/bash\n"
+        f"printf '%s\\n' \"$*\" >> {log_path}\n"
+        "exit 0\n"
+    )
+    stub.chmod(0o755)
+    return bin_dir
+
+
 def _run(topology_paths, tmp_path, *, approved_base="v1.0.0", extra_lines=(), env_overrides=None):
     approved_base_file = tmp_path / "approved-base.txt"
     approved_base_file.write_text("\n".join([approved_base, *extra_lines]) + "\n")
 
     hermes_home = tmp_path / "hermes_home"
     hermes_home.mkdir(exist_ok=True)
+    fake_bin = _fake_systemd_run_bin(tmp_path)
 
     env = {
         **os.environ,
+        "PATH": f"{fake_bin}:{os.environ.get('PATH', '')}",
         "DEPLOY_REPO_DIR": str(topology_paths["repo_dir"]),
         "DEPLOY_HERMES_HOME": str(hermes_home),
         "DEPLOY_UV_BIN": os.environ.get("DEPLOY_TEST_UV_BIN", "uv"),
+        "DEPLOY_GATEWAY_UNIT": "this-unit-must-never-be-real.service",
         "DEPLOY_APPROVED_BASE_FILE": str(approved_base_file),
         "DEPLOY_PREFLIGHT_SCRATCH": str(tmp_path / "scratch"),
         "DEPLOY_OFFLINE_CHECKLIST_TESTS": "tests/test_trivial.py",
@@ -218,6 +251,29 @@ class TestHappyPath:
         assert receipt["before_head"] == topology["c_root"]
         assert receipt["after_head"] == topology["c_base"]
         assert receipt["commit_count"] == 1
+
+    def test_restart_launch_forwards_env_via_setenv(self, topology, tmp_path):
+        """The actual regression test for the 2026-09-29 incident: systemd-run does not inherit
+        this process's environment, so the real script MUST pass DEPLOY_* through explicitly via
+        --setenv, or the detached restart step silently falls back to ITS OWN production
+        defaults (the real live checkout, the real gateway unit) regardless of what this script
+        was told. Asserts on the fake systemd-run stub's own recorded argv -- not on any real
+        restart happening, which the stub makes impossible by design."""
+        hermes_home = tmp_path / "hermes_home_setenv"
+        hermes_home.mkdir()
+        env = {"DEPLOY_HERMES_HOME": str(hermes_home)}
+        result = _run(topology, tmp_path, env_overrides=env)
+        assert result.returncode == 0, result.stdout
+
+        call_log = tmp_path / "fake_systemd_run_calls.log"
+        assert call_log.exists(), "deploy-advance.sh never invoked systemd-run at all"
+        calls = call_log.read_text().strip().splitlines()
+        assert len(calls) == 1, calls
+        invocation = calls[0]
+        assert f"--setenv=DEPLOY_REPO_DIR={topology['repo_dir']}" in invocation
+        assert f"--setenv=DEPLOY_HERMES_HOME={hermes_home}" in invocation
+        assert "--setenv=DEPLOY_GATEWAY_UNIT=this-unit-must-never-be-real.service" in invocation
+        assert "--setenv=DEPLOY_UV_BIN=" in invocation
 
     def test_declared_residual_patch_allowed(self, topology, tmp_path):
         _git(topology["origin"], "checkout", "--quiet", "deploy")

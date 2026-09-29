@@ -239,8 +239,21 @@ echo "deploy-advance: advanced $commit_count commit(s) ($before_head -> $after_h
 # script's whole cgroup, so a synchronously-run restart step would kill
 # itself mid-flight; a transient systemd-run --user unit lands outside that
 # cgroup and survives).
+#
+# --setenv is mandatory here, not cosmetic: systemd-run's new unit is spawned
+# by the systemd --user manager itself, not forked from this shell, so it
+# does NOT inherit this process's environment the way a plain subprocess
+# (the setsid fallback below) would. Without these, the restart script
+# silently falls back to ITS OWN hardcoded production defaults --
+# ~/.hermes/hermes-agent and hermes-gateway.service -- regardless of
+# whatever DEPLOY_* overrides this script was given. Found the hard way:
+# an early test run of this exact script restarted the real live gateway
+# and re-synced its real dependencies, twice, because of exactly this gap
+# (2026-09-29 Gate A rehearsal).
 restart_unit="deploy-advance-restart-$(date -u +%Y%m%d%H%M%S)-$$"
 if ! systemd-run --user --collect --quiet --unit="$restart_unit" \
+    --setenv=DEPLOY_REPO_DIR="$REPO_DIR" --setenv=DEPLOY_HERMES_HOME="$HERMES_HOME" \
+    --setenv=DEPLOY_UV_BIN="$UV_BIN" --setenv=DEPLOY_GATEWAY_UNIT="$GATEWAY_UNIT" \
     --property=StandardOutput="file:$RESTART_LOG" \
     --property=StandardError="append:$RESTART_LOG" \
     bash "$RESTART_SCRIPT" "$scheduled_at" "$before_head" "$after_head" "$commit_count" "$deps_changed"
