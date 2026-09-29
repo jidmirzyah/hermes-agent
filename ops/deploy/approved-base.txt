@@ -1,0 +1,24 @@
+# deploy-advance.sh's reachability declaration (MOORING Step 1.3).
+#
+# Line 1 (required, uncommented): the upstream tag or SHA that origin/deploy
+# is currently approved to be built from -- an upstream `stable` release tag
+# per JID's Step 1.1 tracking-policy decision, or a pinned SHA only for an
+# emergency security pick.
+#
+# Every remaining uncommented line: one full 40-char SHA of a residual patch
+# commit (from Phase 6.0's disposition table) that is layered ON TOP of that
+# base and allowed to also be present on origin/deploy. As of Step 1.3, the
+# known-broken-baseline disposition table (Step 0.3) needs zero residual
+# patches -- edge-tts and events.jsonl were fixed upstream-side-equivalent or
+# on the fork directly, and the cron force-run fix is superseded by upstream's
+# own manual_run_at mechanism -- so this file ships with no residual-patch
+# lines. Phase 4/6 add lines here only if a later disposition genuinely can't
+# be upstreamed and must ride along as a carried patch.
+#
+# deploy-advance.sh fails closed (refuses to advance) if line 1 is missing,
+# blank, or still reads the placeholder below -- an unconfigured reachability
+# check must never silently pass everything through.
+#
+# UNCONFIGURED -- replace the line below with the real approved base once the
+# candidate pin is chosen (see the MOORING plan's Phase 4/5).
+REPLACE_ME_WITH_APPROVED_BASE_TAG_OR_SHA
