@@ -210,14 +210,19 @@ def _system(hermes_home: Path, primary_backup_dir: Path, now: datetime) -> dict[
     archive = newest_matching(primary_backup_dir, "hermes-backup-*.tar.age")
     pending_dir = hermes_home / "pending/upstream_fix"
     pending = sorted(path.name for path in pending_dir.glob("*.json")) if pending_dir.is_dir() else []
-    heartbeat = hermes_home / "scripts/.upstream-check-last-success"
+    # upstream_check_heartbeat_age_hours removed 2026-09-29: it tracked whether the
+    # hermes-upstream-main-check job itself had run recently, not whether the fork
+    # was actually behind upstream -- those diverged the moment manual reconciliation
+    # sessions (batches 12-14) started doing the syncing instead of that job, and the
+    # field kept reporting "stale" for days while the fork was in fact fully current.
+    # operations-health.py already carries the same (deliberately kept) stale-job
+    # alert; no need for a second, equally-misleading copy of it here.
     return {
         "backup": {
             "archive": archive.name if archive else None,
             "age_hours": round(age_hours(archive, now), 2) if archive else None,
             "under_48_hours": bool(archive and age_hours(archive, now) < 48),
         },
-        "upstream_check_heartbeat_age_hours": round(age_hours(heartbeat, now), 2) if heartbeat.exists() else None,
         "pending_upstream_fix_count": len(pending),
         "pending_upstream_fix_records": pending[:10],
     }
