@@ -1,0 +1,7 @@
+name: jid-update-guard
+version: "0.1.0"
+description: "Blocks agent tool calls that would mutate Hermes's own live checkout (git commands, package installs into its venv, direct file writes) or trigger `hermes update`/`/update` outside JID's deploy-branch approval flow. L2 of the MOORING self-update-gate replacement (deployment-layer backstop; the in-code approval gate and L3 drift detection are the other layers)."
+author: "JID / Claude Code"
+provides_hooks:
+  - pre_tool_call
+  - pre_gateway_dispatch
