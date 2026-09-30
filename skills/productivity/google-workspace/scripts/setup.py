@@ -494,7 +494,15 @@ def revoke():
 
 
 def main():
-    _reexec_under_dedicated_venv_if_needed()
+    # _reexec_under_dedicated_venv_if_needed() used to run here, mirroring
+    # google_api.py's own copy -- but the supporting pieces it depends on
+    # (_DEDICATED_VENV, REQUIRED_PACKAGES, a version-pinned package check)
+    # were never actually added to this file, so the call was dead: it could
+    # only ever raise NameError, never help. Removed rather than reconstructed
+    # (2026-09-29) -- the main venv already has the google extra installed
+    # directly, so there is nothing for a dedicated-venv reexec to do right
+    # now. Rebuilding that mechanism properly is separate follow-up work, not
+    # blocking this fix.
     parser = argparse.ArgumentParser(description="Google Workspace OAuth setup for Hermes")
     parser.add_argument(
         "--identity",
