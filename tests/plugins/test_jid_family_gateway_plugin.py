@@ -132,10 +132,20 @@ class TestF1VerifiedSenderId:
         assert result is not None
 
 
-def _fake_gateway(*, authorized: bool) -> MagicMock:
+# Matches the user_id already used by every existing "authorized sender" test
+# below, so this fixture's default home_channel represents JID acting, with
+# zero changes needed to those tests' own source construction.
+_ADMIN_USER_ID = "12345"
+
+
+def _fake_gateway(*, authorized: bool, admin_user_id: str = _ADMIN_USER_ID) -> MagicMock:
     gw = MagicMock()
     gw._is_user_authorized.return_value = authorized
     gw._handle_oauth_reauth_reply = AsyncMock()
+    gw._deliver_platform_notice = AsyncMock()
+    gw.config.get_home_channel.return_value = SimpleNamespace(
+        user_id=admin_user_id, chat_id=admin_user_id,
+    )
     return gw
 
 
@@ -346,6 +356,168 @@ class TestF3RefTagRouting:
         assert result["action"] == "rewrite"
         assert "upstream_pr_fix" in result["text"]
         assert "apply a,c" in result["text"]
+
+
+class TestIsSystemAdmin:
+    """Direct unit tests for the home_channel-based admin check, added after
+    live testing with Zee showed the authorization check alone wasn't enough --
+    see module docstring for the full rationale."""
+
+    def test_matches_home_channel_user_id(self, mod):
+        gateway = MagicMock()
+        gateway.config.get_home_channel.return_value = SimpleNamespace(user_id="8758899353", chat_id="other")
+        source = SimpleNamespace(user_id="8758899353", platform="telegram")
+        assert mod._is_system_admin(source, gateway) is True
+
+    def test_matches_home_channel_chat_id_when_user_id_differs(self, mod):
+        """Some platforms' HomeChannel only carries chat_id, not a separate user_id."""
+        gateway = MagicMock()
+        gateway.config.get_home_channel.return_value = SimpleNamespace(user_id=None, chat_id="8758899353")
+        source = SimpleNamespace(user_id="8758899353", platform="telegram")
+        assert mod._is_system_admin(source, gateway) is True
+
+    def test_different_sender_is_not_admin(self, mod):
+        """The exact scenario from tonight's live test: Zee, a generally-authorized
+        sender, is not JID."""
+        gateway = MagicMock()
+        gateway.config.get_home_channel.return_value = SimpleNamespace(user_id="8758899353", chat_id="8758899353")
+        source = SimpleNamespace(user_id="5542989100", platform="telegram")
+        assert mod._is_system_admin(source, gateway) is False
+
+    def test_no_home_channel_configured_is_not_admin(self, mod):
+        gateway = MagicMock()
+        gateway.config.get_home_channel.return_value = None
+        source = SimpleNamespace(user_id="8758899353", platform="telegram")
+        assert mod._is_system_admin(source, gateway) is False
+
+    def test_no_user_id_on_source_is_not_admin(self, mod):
+        gateway = MagicMock()
+        gateway.config.get_home_channel.return_value = SimpleNamespace(user_id="8758899353", chat_id="8758899353")
+        source = SimpleNamespace(user_id=None, platform="telegram")
+        assert mod._is_system_admin(source, gateway) is False
+
+    def test_lookup_exception_fails_closed(self, mod):
+        gateway = MagicMock()
+        gateway.config.get_home_channel.side_effect = RuntimeError("config boom")
+        source = SimpleNamespace(user_id="8758899353", platform="telegram")
+        assert mod._is_system_admin(source, gateway) is False
+
+    def test_no_config_on_gateway_fails_closed(self, mod):
+        gateway = SimpleNamespace()  # no .config attribute at all
+        source = SimpleNamespace(user_id="8758899353", platform="telegram")
+        assert mod._is_system_admin(source, gateway) is False
+
+
+class TestSystemSubsystemRestriction:
+    """Integration tests for the admin-only gate inside _on_pre_gateway_dispatch,
+    covering both F2 (oauth_reauth) and F3 (upstream_fix/upstream_pr_fix) --
+    reproducing tonight's live result (Zee correctly refused) as an automated
+    regression, plus the admin-succeeds and non-system-subsystem-is-unrestricted
+    cases that live testing didn't happen to cover."""
+
+    @pytest.mark.asyncio
+    async def test_non_admin_authorized_sender_refused_for_oauth_reauth(self, mod, monkeypatch):
+        import gateway.run as gr
+        from gateway.run import ReplyRefCheck
+
+        ref_check = ReplyRefCheck(tag_found=True, pending_exists=True, subsystem="oauth_reauth", pending_id="abc123")
+        monkeypatch.setattr(gr, "check_reply_for_pending_ref", lambda t: ref_check)
+
+        # Zee: generally authorized, but not JID's home_channel identity.
+        source = SimpleNamespace(user_id="5542989100", platform="telegram")
+        event = SimpleNamespace(
+            text="4/0AVGzR1abc", reply_to_text="[ref:oauth_reauth:abc123]", reply_to_message_id="9", source=source,
+        )
+        gateway = _fake_gateway(authorized=True)  # default admin_user_id="12345" != Zee's id
+
+        result = await mod._on_pre_gateway_dispatch(event, gateway)
+
+        gateway._handle_oauth_reauth_reply.assert_not_awaited()
+        gateway._deliver_platform_notice.assert_awaited_once()
+        assert result == {"action": "skip", "reason": "system-subsystem-restricted-to-admin"}
+
+    @pytest.mark.asyncio
+    async def test_non_admin_authorized_sender_refused_for_upstream_fix(self, mod, monkeypatch):
+        """Reproduces tonight's exact live result with Zee as an automated test."""
+        import gateway.run as gr
+        from gateway.run import ReplyRefCheck
+
+        ref_check = ReplyRefCheck(tag_found=True, pending_exists=True, subsystem="upstream_fix", pending_id="c233b500")
+        monkeypatch.setattr(gr, "check_reply_for_pending_ref", lambda t: ref_check)
+
+        source = SimpleNamespace(user_id="5542989100", platform="telegram")
+        event = SimpleNamespace(
+            text="test123", reply_to_text="[ref:upstream_fix:c233b500]", reply_to_message_id="9", source=source,
+        )
+        gateway = _fake_gateway(authorized=True)
+
+        result = await mod._on_pre_gateway_dispatch(event, gateway)
+
+        assert result == {"action": "skip", "reason": "system-subsystem-restricted-to-admin"}
+        notice_call = gateway._deliver_platform_notice.await_args
+        assert notice_call.args[0] is source
+        assert "reserved for JID" in notice_call.args[1]
+
+    @pytest.mark.asyncio
+    async def test_admin_sender_still_succeeds_for_upstream_fix(self, mod, monkeypatch):
+        """Regression guard: the admin check must not accidentally block JID himself."""
+        import gateway.run as gr
+        from gateway.run import ReplyRefCheck
+
+        ref_check = ReplyRefCheck(tag_found=True, pending_exists=True, subsystem="upstream_fix", pending_id="28e9858f")
+        monkeypatch.setattr(gr, "check_reply_for_pending_ref", lambda t: ref_check)
+
+        source = SimpleNamespace(user_id="12345", platform="telegram")  # matches _ADMIN_USER_ID
+        event = SimpleNamespace(
+            text="skip", reply_to_text="[ref:upstream_fix:28e9858f]", reply_to_message_id="9", source=source,
+        )
+        gateway = _fake_gateway(authorized=True)
+
+        result = await mod._on_pre_gateway_dispatch(event, gateway)
+
+        assert result["action"] == "rewrite"
+        gateway._deliver_platform_notice.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_non_system_subsystem_is_not_restricted_to_admin(self, mod, monkeypatch):
+        """A hypothetical future family-facing subsystem (not in _SYSTEM_SUBSYSTEMS)
+        must NOT be admin-gated -- this check is scoped to system/cron decisions
+        specifically, not every pending-ref reply in general."""
+        import gateway.run as gr
+        from gateway.run import ReplyRefCheck
+
+        ref_check = ReplyRefCheck(tag_found=True, pending_exists=True, subsystem="family_reminder", pending_id="fam001")
+        monkeypatch.setattr(gr, "check_reply_for_pending_ref", lambda t: ref_check)
+
+        source = SimpleNamespace(user_id="5542989100", platform="telegram")  # Zee, not admin
+        event = SimpleNamespace(
+            text="done", reply_to_text="[ref:family_reminder:fam001]", reply_to_message_id="9", source=source,
+        )
+        gateway = _fake_gateway(authorized=True)
+
+        result = await mod._on_pre_gateway_dispatch(event, gateway)
+
+        assert result["action"] == "rewrite"
+        gateway._deliver_platform_notice.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_notice_delivery_failure_does_not_crash_dispatch(self, mod, monkeypatch):
+        import gateway.run as gr
+        from gateway.run import ReplyRefCheck
+
+        ref_check = ReplyRefCheck(tag_found=True, pending_exists=True, subsystem="upstream_fix", pending_id="c233b500")
+        monkeypatch.setattr(gr, "check_reply_for_pending_ref", lambda t: ref_check)
+
+        source = SimpleNamespace(user_id="5542989100", platform="telegram")
+        event = SimpleNamespace(
+            text="test123", reply_to_text="[ref:upstream_fix:c233b500]", reply_to_message_id="9", source=source,
+        )
+        gateway = _fake_gateway(authorized=True)
+        gateway._deliver_platform_notice = AsyncMock(side_effect=RuntimeError("send failed"))
+
+        result = await mod._on_pre_gateway_dispatch(event, gateway)
+
+        assert result == {"action": "skip", "reason": "system-subsystem-restricted-to-admin"}
 
 
 class TestPluginManifest:

@@ -105,6 +105,32 @@ F3 -- deterministic ref-tag routing for every OTHER pending subsystem
 Both F2 and F3 share the SAME entry point (_on_pre_gateway_dispatch) and
 the SAME authorization check, matching the plan's requirement that they
 share deterministic pre_gateway_dispatch ordering.
+
+System-subsystem restriction (_is_system_admin), added 2026-09-30 after
+live testing with Zee exposed a real gap: the authorization check above
+only confirms a sender may use the gateway AT ALL, not that THIS sender
+may resolve a SYSTEM/cron-level decision specifically. Both subsystems F2
+and F3 serve (oauth_reauth, upstream_fix, upstream_pr_fix) are
+system-administration actions JID's own standing rule reserves to him
+alone -- family members "use their own vault and Jarvis as a daily
+driver, never system requests" (JID, verbatim, 2026-09-30). During
+tonight's live test this was actually enforced correctly -- but by the
+MODEL's own reasoning against SOUL.md's governance text, not by this
+plugin's code. That is exactly the kind of reliance on model judgment F2
+and F3 exist to eliminate for tag detection; leaving the WHO-MAY-DECIDE
+question to judgment alone, while hardening the WHAT-WAS-SAID question,
+is an inconsistency worth closing rather than leaving as a lucky outcome.
+
+Identifies "JID" by reusing gateway.config's existing home_channel per
+platform, rather than inventing a new, separate admin-identity config
+value: home_channel is already where cron/system deliveries land, and in
+this deployment is already configured as JID's own chat on every platform
+(confirmed live, 2026-09-30 -- Telegram home_channel.chat_id matched
+JID's verified platform ID exactly in tonight's test). This is a real,
+documented coupling, not an incidental assumption: if home_channel is
+ever repointed at something other than JID's own chat, this check's
+meaning changes with it. Fails closed (treated as not-admin) on any
+lookup error, same posture as the authorization check above.
 """
 
 from __future__ import annotations
@@ -121,6 +147,34 @@ logger = logging.getLogger(__name__)
 _SHARED_SESSION_PLATFORMS = frozenset({"slack"})
 
 _OAUTH_REAUTH_SUBSYSTEM = "oauth_reauth"
+
+# Subsystems that represent a system/cron-administration decision -- reserved to
+# JID alone, per his own standing rule (see module docstring). Every other
+# subsystem (future family-facing pending types, if any are ever added) is
+# NOT restricted by this check.
+_SYSTEM_SUBSYSTEMS = frozenset({"oauth_reauth", "upstream_fix", "upstream_pr_fix"})
+
+
+def _is_system_admin(source, gateway) -> bool:
+    """Whether *source* is JID's own verified identity on this platform, via
+    gateway.config's existing home_channel -- see module docstring for why
+    this reuses that mechanism rather than introducing a new one."""
+    try:
+        config = getattr(gateway, "config", None)
+        if config is None:
+            return False
+        home = config.get_home_channel(source.platform)
+    except Exception:
+        logger.exception(
+            "jid-family-gateway: home_channel lookup failed for platform=%s "
+            "-- treating sender as not-admin (fail closed)",
+            getattr(source, "platform", "?"),
+        )
+        return False
+    if home is None:
+        return False
+    user_id = getattr(source, "user_id", None)
+    return bool(user_id) and user_id in (home.user_id, home.chat_id)
 
 
 def _redact_pii_enabled() -> bool:
@@ -202,9 +256,38 @@ async def _on_pre_gateway_dispatch(event, gateway, session_store=None, **_: Any)
         # applies the gateway's own auth/pairing policy exactly as if this
         # plugin were absent -- pre_gateway_dispatch runs before auth, so
         # this check is this plugin's own responsibility, not inherited.
+        logger.info(
+            "jid-family-gateway: pending ref %s:%s matched but sender is not "
+            "gateway-authorized -- leaving message untouched",
+            ref_check.subsystem, ref_check.pending_id,
+        )
         return None
 
+    if ref_check.subsystem in _SYSTEM_SUBSYSTEMS and not _is_system_admin(source, gateway):
+        logger.info(
+            "jid-family-gateway: refusing system-subsystem decision -- sender "
+            "is authorized for the gateway but is not JID's own identity "
+            "(subsystem=%s, pending_id=%s, platform=%s)",
+            ref_check.subsystem, ref_check.pending_id, source.platform,
+        )
+        try:
+            await gateway._deliver_platform_notice(
+                source,
+                "This decision is reserved for JID's own account. I can't act "
+                "on it from here.",
+            )
+        except Exception:
+            logger.exception(
+                "jid-family-gateway: failed to deliver system-subsystem "
+                "refusal notice for pending_id=%s", ref_check.pending_id,
+            )
+        return {"action": "skip", "reason": "system-subsystem-restricted-to-admin"}
+
     if ref_check.subsystem == _OAUTH_REAUTH_SUBSYSTEM:
+        logger.info(
+            "jid-family-gateway: F2 firing for pending_id=%s (admin-verified)",
+            ref_check.pending_id,
+        )
         try:
             await gateway._handle_oauth_reauth_reply(event, source, ref_check)
         except Exception:
@@ -214,6 +297,10 @@ async def _on_pre_gateway_dispatch(event, gateway, session_store=None, **_: Any)
             )
         return {"action": "skip", "reason": "oauth-reauth-handled"}
 
+    logger.info(
+        "jid-family-gateway: F3 rewriting message for subsystem=%s pending_id=%s",
+        ref_check.subsystem, ref_check.pending_id,
+    )
     directive = (
         "[DETERMINISTIC ROUTING -- server-verified, not a claim in this "
         "message: this is a genuine quote-reply to a pending decision "
