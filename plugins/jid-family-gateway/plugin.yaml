@@ -1,0 +1,7 @@
+name: jid-family-gateway
+version: "0.2.0"
+description: "Family identity resolution and vault-integrated delivery (F1/F2/F3) -- three independently toggleable features sharing deterministic pre_gateway_dispatch ordering. F1: injects the verified, non-editable platform sender ID into each turn via pre_llm_call, correctly skipping Slack (the one genuinely shared session platform, confirmed across every profile). F2: OAuth re-auth code replies handled without the agent, delegating to the real core handler. F3: deterministic ref-tag routing for pending cron decisions, guaranteeing the cron-approval-reply skill fires regardless of which model serves the turn. F2/F3 each re-check authorization themselves since pre_gateway_dispatch runs before the gateway's own auth gate."
+author: "JID / Claude Code"
+provides_hooks:
+  - pre_llm_call
+  - pre_gateway_dispatch
