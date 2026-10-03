@@ -223,7 +223,7 @@ def slash_command_metric_name(raw: object) -> str:
 
         if get_plugin_command_handler(name) is not None:
             return "plugin"
-    except Exception:
+    except Exception:  # noqa: S110 - plugin lookup is best-effort; fall through to "unknown"
         pass
     return "unknown"
 

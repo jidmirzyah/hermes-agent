@@ -240,6 +240,37 @@ def _check_directory_structure(should_fix: bool, f: Finding) -> None:
             check_info(f"{fname} not created yet (will be created when the agent first writes a memory)")
 
 
+# Cache-root entries at least this big that no pruner covers get a doctor warning.
+# Restored 2026-10-01 alongside unpruned_cache_hogs() below -- present upstream
+# (hermes_cli/doctor_state.py), missing from this fork; _check_scratch_dir here never
+# warned about unpruned cache growth at all (upstream's own comment: "95 GB on one
+# host"). Found via the monthly cron audit's CI investigation (test_doctor_cache_hogs.py
+# collection failure), not a crash like update_cmd.py's missing function -- this one was
+# just a silently-missing diagnostic, since nothing called the function at all.
+_UNPRUNED_CACHE_WARN_BYTES = 1 << 30
+_PRUNED_CACHE_DIRS = frozenset({"scratch", "terminal"})
+
+
+def unpruned_cache_hogs(hermes_home: Path, min_bytes: int = _UNPRUNED_CACHE_WARN_BYTES) -> list[tuple[str, int]]:
+    """``(name, bytes)`` for ``cache/`` entries outside the pruned dirs that exceed *min_bytes*.
+
+    Finished campaign trees parked at the cache root sat for weeks (95 GB on one host)
+    because only ``scratch/`` and ``terminal/`` are reaped; doctor is where that shows."""
+    from hermes_constants import scratch_dir_usage_bytes
+
+    cache = hermes_home / "cache"
+    hogs: list[tuple[str, int]] = []
+    try:
+        entries = [e for e in cache.iterdir() if e.is_dir() and not e.is_symlink() and e.name not in _PRUNED_CACHE_DIRS]
+    except OSError:
+        return hogs
+    for entry in entries:
+        size = scratch_dir_usage_bytes(entry)
+        if size >= min_bytes:
+            hogs.append((entry.name, size))
+    return sorted(hogs, key=lambda item: -item[1])
+
+
 def _check_scratch_dir(hermes_home: Path, _DHH: str) -> None:
     """Report the scratch dir (TMPDIR target) and its size; a user-set TMPDIR elsewhere is shown, not judged."""
     from hermes_constants import (
@@ -250,6 +281,12 @@ def _check_scratch_dir(hermes_home: Path, _DHH: str) -> None:
     tmpdir = os.environ.get("TMPDIR", "")
     if tmpdir and tmpdir != os.environ.get(SCRATCH_DIR_MARKER_ENV, ""):
         check_info(f"TMPDIR={tmpdir} is set by you or the OS, so Hermes leaves it alone")
+    for name, nbytes in unpruned_cache_hogs(hermes_home):
+        check_warn(
+            f"{_DHH}/cache/{name}/ is {_human_bytes(nbytes)} and outside every pruner "
+            f"(only cache/scratch/ and cache/terminal/ are reaped) -- move task files under "
+            f"cache/scratch/<task>/ or delete it"
+        )
 
 
 def _session_count(state_db_path: Path):

@@ -3,6 +3,7 @@
 These tests exercise the retained scan, not the retired update admission gate.
 """
 
+import pytest
 import sys
 import types
 from unittest.mock import MagicMock, patch
@@ -123,94 +124,3 @@ def test_detect_venv_python_keeps_external_interpreter_fallback(tmp_path):
     assert [match[0] for match in matches] == [103]
     external.cmdline.assert_called_once_with()
     external.cwd.assert_called_once_with()
-
-
-
-
-# ---------------------------------------------------------------------------
-# --force vs --force-venv gating of the venv-holder guard
-# ---------------------------------------------------------------------------
-
-
-def _update_args(**overrides):
-    defaults = dict(
-        gateway=False,
-        check=False,
-        no_backup=True,
-        backup=False,
-        yes=True,
-        branch=None,
-        force=False,
-        force_venv=False,
-    )
-    defaults.update(overrides)
-    return SimpleNamespace(**defaults)
-
-
-def _run_update_until_guard(args):
-    """Drive _cmd_update_impl just far enough to hit the venv-holder guard.
-
-    Everything before the guard is stubbed; the guard firing is observed via
-    SystemExit(2). The first statement AFTER the guard is
-    ``git_dir = PROJECT_ROOT / ".git"`` — a PROJECT_ROOT sentinel whose
-    ``__truediv__`` raises marks 'guard passed'."""
-
-    # Resolve ``hermes_cli.main`` from sys.modules at CALL time, shadowing the
-    # module-level binding above. tests/hermes_cli/test_skills_subparser.py
-    # evicts 'hermes_cli.main' from sys.modules and re-imports it, which
-    # creates a NEW module object. A stale module-level ``cli_main`` then
-    # refers to a dead module and EVERY patch.object below — including the
-    # PROJECT_ROOT sentinel — silently misses, while production code
-    # (update_cmd._m()) resolves the live module and runs a REAL
-    # `git stash push` against this repo. See Operations.md.
-    from hermes_cli import main as cli_main
-
-    class _PastGuard(Exception):
-        pass
-
-    class _RootSentinel:
-        def __truediv__(self, _other):
-            raise _PastGuard
-
-    with patch.object(cli_main, "_is_windows", return_value=True), patch.object(
-        cli_main, "_venv_scripts_dir", return_value=None
-    ), patch.object(cli_main, "_run_pre_update_backup"), patch.object(
-        cli_main, "_pause_windows_gateways_for_update", return_value=None
-    ), patch.object(
-        cli_main, "_resume_windows_gateways_after_update"
-    ), patch(
-        "hermes_cli.update_cmd_windows._detect_venv_python_processes",
-        return_value=[(101, "python.exe", "python.exe -m hermes_cli.main serve")],
-    ), patch.object(
-        # Pin the orphan classifier: this test exercises --force/--force-venv
-        # gating, not orphan detection (covered in
-        # test_update_orphan_backend_reap.py). None = "not provably orphaned"
-        # → the guard refuses exactly as before the orphan-reap addition.
-        cli_main, "_orphaned_desktop_backend_pids", return_value=None
-    ), patch.object(
-        cli_main, "PROJECT_ROOT", _RootSentinel()
-    ):
-        try:
-            update_cmd._cmd_update_impl(args, gateway_mode=False)
-        except _PastGuard:
-            return "past_guard"
-        except SystemExit as exc:
-            return f"exit_{exc.code}"
-    return "returned"
-
-
-@pytest.mark.parametrize(
-    "force,force_venv,expected",
-    [
-        (False, False, "exit_2"),   # guard fires
-        (True, False, "exit_2"),    # plain --force does NOT bypass the venv guard
-        (False, True, "past_guard"),  # --force-venv is the explicit escape hatch
-        (True, True, "past_guard"),
-    ],
-)
-def test_venv_holder_guard_force_semantics(force, force_venv, expected, capsys):
-    result = _run_update_until_guard(_update_args(force=force, force_venv=force_venv))
-    assert result == expected, capsys.readouterr().out
-
-
-# ---------------------------------------------------------------------------

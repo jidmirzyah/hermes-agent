@@ -1456,8 +1456,12 @@ def _current_branch_name(git_cmd, *, check: bool = False) -> str:
 
 def _handle_update_called_process_error(
     e, args, gateway_mode: bool, had_desktop_app_before_update: bool,
-    _windows_gateway_resume=None, *, target_sha: str | None = None, target_repository: str | None = None) -> None:
+    _windows_gateway_resume=None, *, target_sha: str | None = None, target_repository: str | None = None,
+    completion_request=None) -> None:
     """Git/installer failure: ZIP-fallback when safe, else report and ``sys.exit(1)``."""
+    # completion_request restored 2026-10-01, matching upstream: missing here while the ZIP
+    # fallback below still only completes a real handoff when this is non-None (same root
+    # cause as the direct _update_via_zip call site fixed below).
     if unrestored := _unrestored_autostash_notice():
         print(unrestored)  # a stash taken this run that no settle step reported (#122557)
     stage = _format_update_failure_stage(e)
@@ -1467,10 +1471,12 @@ def _handle_update_called_process_error(
         print()
         _update_via_zip(
             args, had_desktop_app_before_update=had_desktop_app_before_update,
-            target_sha=target_sha,
+            target_sha=target_sha, completion_request=completion_request,
             **({"target_repository": target_repository} if target_repository else {}))
-        if gateway_mode:
-            _write_gateway_update_exit_code(desktop_build_ok)
+        # desktop_build_ok removed 2026-10-01: upstream's current main no longer writes a
+        # gateway exit code from this branch either (dropped in a later refactor than the one
+        # that introduced it here, never merged into this fork) -- matching upstream exactly
+        # rather than inventing a replacement value.
     else:
         if _called_process_error_is_python_dep_install(e):
             print(f"✗ {stage} (the code update itself succeeded).")
@@ -1762,6 +1768,22 @@ def _finish_pulled_update(
         node_failures=node_failures, update_complete=update_complete)
 
 
+def _source_update_channel(args=None, *, channel=None, branch_explicit=False) -> str:
+    """Explicit branches win; otherwise transient channel, then this install's record."""
+    if branch_explicit or getattr(args, "branch", None):
+        return "main"
+    transient = channel if channel is not None else getattr(args, "channel", None)
+    if transient is not None:
+        from hermes_cli.release_channels import validate_name
+        return validate_name(transient)
+    from hermes_cli.update_channel import resolve_update_channel
+
+    from hermes_cli.config import get_config_path, require_readable_config_before_write
+
+    config = require_readable_config_before_write(get_config_path())
+    return resolve_update_channel(config, _m().PROJECT_ROOT)
+
+
 def _cmd_update_impl(args, gateway_mode: bool):
     """Apply the update; the command boundary owns errors, receipts and stdio."""
     # Marks this frame as the CURRENT updater for
@@ -1868,7 +1890,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
         try:
             _update_via_zip(
                 args, had_desktop_app_before_update=had_desktop_app_before_update,
-                target_sha=release_sha,
+                target_sha=release_sha, completion_request=completion_request,
                 **({"target_repository": target_repository} if target_repository else {}))
         finally:
             if _windows_gateway_resume and _windows_gateway_resume.get("resume_needed"):
