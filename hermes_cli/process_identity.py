@@ -438,11 +438,11 @@ def _kill_process_tree_windows(proc) -> None:
     for child in descendants:
         try:
             child.terminate()
-        except Exception:  # noqa: BLE001 - raced away or refused; keep going
+        except Exception:  # noqa: BLE001, S110 - raced away or refused; keep going
             pass
     try:
         proc.terminate()
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001, S110
         pass
     try:
         _, alive = psutil.wait_procs(descendants + [proc], timeout=2.0)
@@ -451,7 +451,7 @@ def _kill_process_tree_windows(proc) -> None:
     for survivor in alive:
         try:
             survivor.kill()
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001, S110
             pass
 
 
