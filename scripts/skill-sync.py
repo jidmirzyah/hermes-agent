@@ -47,7 +47,7 @@ EXCLUSION_FILE = Path("/home/jiddy/.hermes/cron/skill_sync_exclusions.txt")
 # sync can touch dozens of skill files, and Telegram auto-splits any message over
 # ~4000 chars into that many separate notifications. Overwritten every run, same
 # ephemeral pattern as hermes-sync-fork's own PULL_LOG; not delivered anywhere.
-DETAIL_LOG = Path("/tmp/hermes-skill-sync-detail.log")
+DETAIL_LOG = Path("/tmp/hermes-skill-sync-detail.log")  # no-tmp: ok - ephemeral, overwritten every run, never read back; script is hardcoded to one Linux host
 
 
 def load_exclusions() -> set[str]:
