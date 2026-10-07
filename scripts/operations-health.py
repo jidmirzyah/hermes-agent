@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -154,6 +155,121 @@ def skill_registry_alerts(hermes_home: Path) -> list[str]:
     return alerts
 
 
+DEPLOY_DRIFT_URGENT_DAYS = 7.0
+
+
+def deploy_drift_alerts(
+    hermes_home: Path, now: datetime, *, urgent_days: float = DEPLOY_DRIFT_URGENT_DAYS,
+) -> tuple[list[str], dict[str, object]]:
+    """L3 drift detection and pin-staleness report (MOORING Step 1.4).
+
+    Replaces the old behind-``main`` commit count, which is meaningless once
+    the live checkout tracks a pinned ``deploy`` branch instead of continuously
+    reconciled upstream history (see the MOORING plan's Phase 1). Reports:
+
+      * live ``HEAD`` against ``origin/deploy`` (an unadvanced approved pin)
+      * days since ``deploy-advance.sh``'s last recorded advance
+      * the newest upstream ``stable``-pattern tag available, and whether
+        ``origin/deploy`` already includes it
+
+    ``URGENT`` when the pin is more than ``urgent_days`` days stale by either
+    measure, or the newest available tag's own message matches an
+    obvious security keyword (best-effort only: a plain ``git tag -n99``
+    read of the annotation text, not a GitHub Releases API call -- adding
+    that dependency to a background health check trades reliability for a
+    weak signal that a human reviewing the tag before merging the L1 PR
+    would catch anyway).
+
+    Deliberately does not fetch: every other check in this file is a pure
+    local read, and ``hermes-sync-fork`` (nightly) and
+    ``hermes-upstream-main-check`` already fetch ``origin`` and ``upstream``
+    respectively as part of their own jobs -- reusing their freshness keeps
+    this check's own failure surface at zero added network calls, at the
+    cost of at most ~1 day of staleness in the comparison itself, which is
+    immaterial against a 7-day urgent threshold.
+    """
+    repo_dir = hermes_home / "hermes-agent"
+    alerts: list[str] = []
+    facts: dict[str, object] = {}
+
+    if not repo_dir.is_dir():
+        return [f"Deploy drift cannot be checked: {repo_dir} is missing"], facts
+
+    def git(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["git", "-C", str(repo_dir), *args],
+            capture_output=True, text=True, timeout=30)
+
+    head = git("rev-parse", "HEAD")
+    if head.returncode != 0:
+        return [f"Deploy drift check could not read live HEAD: {head.stderr.strip()}"], facts
+    live_head = head.stdout.strip()
+    facts["live_head"] = live_head
+
+    deploy_ref = git("rev-parse", "origin/deploy")
+    if deploy_ref.returncode != 0:
+        # Expected until Step 1.1's deploy branch actually exists on origin --
+        # not itself an alert.
+        facts["origin_deploy_head"] = None
+    else:
+        deploy_head = deploy_ref.stdout.strip()
+        facts["origin_deploy_head"] = deploy_head
+        if live_head != deploy_head:
+            behind = git("rev-list", "--count", f"{live_head}..{deploy_head}")
+            commits_behind = int(behind.stdout.strip()) if behind.returncode == 0 and behind.stdout.strip().isdigit() else None
+            facts["commits_behind_deploy"] = commits_behind
+            detail = f"{commits_behind} commit(s)" if commits_behind is not None else "an unknown number of commits"
+            alerts.append(f"Live checkout is {detail} behind origin/deploy ({live_head[:12]} -> {deploy_head[:12]}) -- deploy-advance.sh has not applied an approved advance yet")
+
+    # Days since deploy-advance.sh's last recorded advance.
+    receipt_path = hermes_home / "cron" / "deploy_advance_state.json"
+    if receipt_path.is_file():
+        try:
+            receipt = load_json(receipt_path)
+            scheduled_at = parse_datetime(receipt["scheduled_at"])
+            days_since = (now - scheduled_at).total_seconds() / 86400
+            facts["days_since_last_advance"] = round(days_since, 2)
+            facts["last_advance_state"] = receipt.get("state")
+            if receipt.get("state") == "failed":
+                alerts.append(f"Last deploy-advance run failed: {receipt.get('reason', 'no reason recorded')}")
+            elif days_since > urgent_days:
+                alerts.append(f"URGENT: {days_since:.1f} days since the last deploy-advance (limit {urgent_days:g})")
+        except (OSError, ValueError, KeyError) as exc:
+            alerts.append(f"Deploy-advance receipt could not be read: {exc}")
+    else:
+        facts["days_since_last_advance"] = None
+        # Not an alert: deploy-advance.sh is not wired into cron until real
+        # cutover (MOORING Phase 6), so "never advanced" is the expected
+        # state through Phases 1-5, not a fault.
+
+    # Newest upstream stable-pattern tag, and whether origin/deploy has it.
+    all_tags = git("tag", "--sort=-v:refname", "--list", "v[0-9]*")
+    tag_list = [t for t in all_tags.stdout.splitlines() if t.strip()]
+    if not tag_list:
+        facts["newest_upstream_tag"] = None
+    else:
+        newest_tag = tag_list[0]
+        facts["newest_upstream_tag"] = newest_tag
+        newest_sha = git("rev-parse", newest_tag).stdout.strip()
+        if facts.get("origin_deploy_head"):
+            ahead = git("merge-base", "--is-ancestor", newest_sha, facts["origin_deploy_head"])
+            if ahead.returncode != 0:
+                behind_tag = git("rev-list", "--count", f"{facts['origin_deploy_head']}..{newest_sha}")
+                commits = behind_tag.stdout.strip() if behind_tag.returncode == 0 else "an unknown number of"
+                alerts.append(f"origin/deploy is behind the newest upstream tag {newest_tag} ({commits} commit(s))")
+
+        tag_message = git("tag", "-n99", "--list", newest_tag).stdout.lower()
+        security_keywords = ("cve", "security", "vulnerability", "rce ", "exploit")
+        if any(kw in tag_message for kw in security_keywords):
+            alerts.append(
+                f"URGENT: newest upstream tag {newest_tag} looks security-relevant "
+                "(matched a keyword in its tag message) -- review before the next "
+                "scheduled advance, regardless of the days-behind threshold"
+            )
+
+    return alerts, facts
+
+
 def inspect_health(
     *,
     hermes_home: Path,
@@ -200,6 +316,10 @@ def inspect_health(
 
         alerts.extend(script_drift_alerts(hermes_home))
         alerts.extend(skill_registry_alerts(hermes_home))
+
+        deploy_alerts, deploy_facts = deploy_drift_alerts(hermes_home, now)
+        alerts.extend(deploy_alerts)
+        facts.update(deploy_facts)
 
         jobs_path = hermes_home / "cron/jobs.json"
         try:
