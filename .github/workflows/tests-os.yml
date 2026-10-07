@@ -172,6 +172,12 @@ jobs:
     # interpreter selection, non-ASCII profile paths and tool ACLs, partial-clone fetch and
     # venv holders. Its own workflow so wine2e-install/** pushes can run it alone.
     name: Windows install + update E2E
+    # The personal fork has no access to this paid Windows runner (same reason
+    # as the e2e-windows job below -- matching its existing, established guard
+    # rather than inventing a new pattern). Fixed 2026-10-01 after the monthly
+    # cron audit's broader CI investigation found this sibling job was the one
+    # paid-runner-dependent check still missing it.
+    if: github.repository == 'NousResearch/hermes-agent'
     uses: ./.github/workflows/windows-install-update-e2e.yml
 
   e2e-windows:
